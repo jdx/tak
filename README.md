@@ -54,6 +54,17 @@ variation across metrics:
 Under 3.2× CPU oversubscription, wall-clock medians moved about 150%. Instruction counts moved
 0.035%. So: **gate CI on instruction counts, report wall clock without gating.**
 
+Re-measured through `tak` itself, benchmarking `/bin/ls /usr` in a container, quiet versus
+32 spinning cores:
+
+| metric | quiet | 32-way contention |
+|---|---|---|
+| `instructions` | 536124 | **536124** — byte-identical, 8/8 runs |
+| `wall_min_ms` | 0.66 | 0.66 – 1.17 (**77% swing**) |
+
+`tests/counters.rs` asserts that determinism on every CI run, and skips cleanly where valgrind
+is unavailable.
+
 Corollary that cost me an afternoon to learn: syscall count and max RSS are *not* deterministic
 — they move with thread scheduling. Only instruction counts support a tight gate.
 
@@ -78,16 +89,30 @@ on-disk size:                            124K
 
 ## Status
 
-Nothing works yet. This is a skeleton.
+Measuring and storing work. Nothing reads the data back yet.
 
-- [ ] `tak run` — measure a command
-- [ ] wall clock, interleaved A/B
-- [ ] instruction counts via cachegrind
-- [ ] `refs/notes/tak` storage
+- [x] `tak run` — wall clock (min / p50 / mean / max), no shell
+- [x] instruction counts via cachegrind, degrading to timing-only where absent
+- [x] `refs/notes/tak` storage — `run --record`, `push`, `history`, `init`
+- [x] concurrent CI writers merge via `cat_sort_uniq`
 - [ ] `tak backfill --releases` — benchmark published release binaries to bootstrap history
-- [ ] `tak compare <ref>`
+- [ ] `tak compare <ref>` — interleaved A/B against another revision
+- [ ] `bench.toml`
 - [ ] PR reporting
 - [ ] change-point detection instead of thresholds
+
+## Counters on macOS and Windows
+
+There is no usable cachegrind on Apple Silicon and none on Windows, so `tak run`
+there records timing only and says so. Run it in a container to get the
+deterministic metric on any host:
+
+```sh
+docker build -t tak docker/
+docker run --rm -v "$PWD:/w" -w /w tak run --bench startup -- ./mycli --help
+```
+
+The CI gate lives on the Linux job regardless, so this only matters locally.
 
 ## Prior art this steals from
 

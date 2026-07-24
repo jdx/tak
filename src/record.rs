@@ -127,7 +127,11 @@ mod tests {
 
     #[test]
     fn one_bad_line_does_not_poison_the_note() {
-        let body = format!("{}\nnot json at all\n{}", rec().to_line().unwrap(), rec().to_line().unwrap());
+        let body = format!(
+            "{}\nnot json at all\n{}",
+            rec().to_line().unwrap(),
+            rec().to_line().unwrap()
+        );
         assert_eq!(parse_note(&body).len(), 2);
     }
 }
