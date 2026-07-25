@@ -58,3 +58,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo test --all-targets
+
+  # Single fan-in gate, so branch protection requires one check instead of an
+  # enumerated list that goes stale every time a job is added or renamed. It
+  # also catches *skipped* jobs, which a required check would otherwise treat
+  # as passing.
+  final:
+    permissions: {}
+    needs:
+      - test
+      - test-macos
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    # Run on success or upstream failure but skip when the workflow is cancelled
+    # — `always()` would override `cancel-in-progress` and waste a runner.
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Check job results
+        if: |
+          needs.test.result != 'success' ||
+          needs.test-macos.result != 'success'
+        run: exit 1
+      - run: echo "All CI jobs completed successfully"
