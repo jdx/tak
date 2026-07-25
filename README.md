@@ -108,9 +108,15 @@ there records timing only and says so. Run it in a container to get the
 deterministic metric on any host:
 
 ```sh
-docker build -t tak docker/
-docker run --rm -v "$PWD:/w" -w /w tak run --bench startup -- ./mycli --help
+docker build -f docker/Dockerfile -t tak .
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/w" -w /w \
+  tak run --bench startup -- ./mycli --help
 ```
+
+The build context is the repository root, not `docker/`, because the build stage copies
+`Cargo.toml` and `src/`. And `--user` is not decoration: `tak` spawns the thing you are
+measuring, so the benchmark subject inherits the container's privileges over the mounted
+working tree.
 
 The CI gate lives on the Linux job regardless, so this only matters locally.
 

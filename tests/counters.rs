@@ -23,9 +23,20 @@ fn valgrind_available() -> bool {
         .unwrap_or(false)
 }
 
-/// A command that exists on any unix and does a trivial, fixed amount of work.
+/// A command that exists on the host and does a trivial, fixed amount of work.
+///
+/// Absolute path on unix so no shell or PATH lookup is involved; on Windows
+/// there is no `/bin/echo`, and no cachegrind either, so the counter tests skip
+/// and only the wall-clock test needs a working subject.
 fn subject() -> Vec<String> {
-    vec!["/bin/echo".to_string(), "tak".to_string()]
+    #[cfg(unix)]
+    {
+        vec!["/bin/echo".to_string(), "tak".to_string()]
+    }
+    #[cfg(windows)]
+    {
+        vec!["cmd".to_string(), "/C".to_string(), "echo tak".to_string()]
+    }
 }
 
 #[test]
