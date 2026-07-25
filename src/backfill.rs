@@ -225,10 +225,18 @@ fn score_asset(name: &str, os: &[&str], arch: &[&str]) -> Option<i32> {
         return None;
     }
 
-    if !os.is_empty() && !os.iter().any(|t| contains_token(&n, t)) {
+    // An unrecognised host (FreeBSD, riscv64, …) leaves the token list empty.
+    // Skipping the filter in that case is the opposite of conservative: it lets
+    // a linux-x86_64 tarball match on a machine that cannot run it, and a
+    // wrong-platform binary either fails to exec or, worse, runs and measures
+    // something meaningless. Refusing to guess is the right answer.
+    if os.is_empty() || arch.is_empty() {
         return None;
     }
-    if !arch.is_empty() && !arch.iter().any(|t| contains_token(&n, t)) {
+    if !os.iter().any(|t| contains_token(&n, t)) {
+        return None;
+    }
+    if !arch.iter().any(|t| contains_token(&n, t)) {
         return None;
     }
 
@@ -529,6 +537,23 @@ mod tests {
         assert!(contains_token("linux", "linux"));
         assert!(!contains_token("apple-darwin", "win"));
         assert!(!contains_token("mylinuxish", "linux"));
+    }
+
+    /// An empty token list means "we do not know this host", which must reject
+    /// rather than match everything.
+    #[test]
+    fn an_unknown_host_matches_nothing() {
+        let none: [&str; 0] = [];
+        assert_eq!(
+            score_asset("tool-linux-x86_64.tar.gz", &none, &X64),
+            None,
+            "unknown OS must not accept a linux asset"
+        );
+        assert_eq!(
+            score_asset("tool-linux-x86_64.tar.gz", &LINUX, &none),
+            None,
+            "unknown arch must not accept an x86_64 asset"
+        );
     }
 
     #[test]
