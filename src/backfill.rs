@@ -13,7 +13,7 @@
 //! small.
 
 use anyhow::{Context, Result, bail};
-use asset_picker::{AssetPicker, Format};
+use asset_picker::{AssetPicker, Format, detect_platform_from_url};
 use serde::Deserialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -290,11 +290,31 @@ pub fn pick_asset(assets: &[Asset]) -> Option<&Asset> {
         return None;
     }
 
-    let names: Vec<String> = assets
+    let usable: Vec<String> = assets
         .iter()
         .map(|a| a.name.clone())
         .filter(|n| is_usable_subject(n))
         .collect();
+
+    // If any candidate states a platform, the ones that do not are not
+    // trustworthy. Verified against the picker: a release shipping
+    // `tool-x86_64-unknown-linux-gnu.tar.gz` alongside `tool.tar.gz` hands the
+    // latter to a macOS host, because the linux asset is filtered out and the
+    // unlabelled one has nothing to filter on. In a release that publishes
+    // per-platform builds, an unlabelled archive is some other artefact — not a
+    // universal binary — so measuring it is measuring the wrong thing.
+    //
+    // A genuinely universal release, where nothing declares a platform, is
+    // untouched by this.
+    let declares_platform = |n: &String| detect_platform_from_url(n).is_some();
+    let names: Vec<String> = if usable.iter().any(declares_platform) {
+        usable
+            .into_iter()
+            .filter(|n| declares_platform(n))
+            .collect()
+    } else {
+        usable
+    };
     let picked = AssetPicker::with_libc(
         std::env::consts::OS.to_string(),
         std::env::consts::ARCH.to_string(),
@@ -692,6 +712,43 @@ mod tests {
             }];
             assert!(pick_asset(&assets).is_none());
         }
+    }
+
+    /// The case that motivated the platform-evidence rule: a release with
+    /// per-platform builds, none of them ours, plus an unlabelled archive.
+    #[test]
+    fn an_unlabelled_archive_never_substitutes_for_a_platform_build() {
+        let assets: Vec<Asset> = ["tool-x86_64-unknown-linux-gnu.tar.gz", "tool.tar.gz"]
+            .iter()
+            .map(|n| Asset {
+                name: n.to_string(),
+                url: format!("https://example.invalid/{n}"),
+            })
+            .collect();
+
+        // On linux/x86_64 the labelled asset is the right answer.
+        if std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64" {
+            assert_eq!(
+                pick_asset(&assets).map(|a| a.name.as_str()),
+                Some("tool-x86_64-unknown-linux-gnu.tar.gz")
+            );
+        }
+        // On macOS the linux asset does not apply, and falling back to
+        // `tool.tar.gz` would benchmark whatever that happens to be.
+        if std::env::consts::OS == "macos" {
+            assert!(pick_asset(&assets).is_none());
+        }
+    }
+
+    /// A release where nothing declares a platform is still usable — that is a
+    /// real and common shape, and rejecting it would exclude those projects.
+    #[test]
+    fn a_wholly_unlabelled_release_is_still_usable() {
+        let assets = vec![Asset {
+            name: "tool.tar.gz".to_string(),
+            url: "https://example.invalid/tool.tar.gz".to_string(),
+        }];
+        assert!(pick_asset(&assets).is_some());
     }
 
     #[test]
