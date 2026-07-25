@@ -13,6 +13,7 @@
 //! small.
 
 use anyhow::{Context, Result, bail};
+use asset_picker::AssetPicker;
 use serde::Deserialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -163,107 +164,41 @@ fn finish(mut v: Vec<Release>, limit: usize) -> Vec<Release> {
     v
 }
 
-/// Does `haystack` contain `token` as a whole word?
-///
-/// Plain `contains` is wrong here: the Windows token `win` is a substring of
-/// `apple-darwin`, so a macOS tarball would satisfy the Windows filter and get
-/// measured on the wrong platform. Requiring non-alphanumeric boundaries makes
-/// `win` match `tool-win.zip` but not `darwin`, while `win64` still matches
-/// `tool-win64.zip` as its own token.
-fn contains_token(haystack: &str, token: &str) -> bool {
-    let h = haystack.as_bytes();
-    haystack.match_indices(token).any(|(i, _)| {
-        let before = i == 0 || !h[i - 1].is_ascii_alphanumeric();
-        let end = i + token.len();
-        let after = end == h.len() || !h[end].is_ascii_alphanumeric();
-        before && after
-    })
-}
-
-/// Platform tokens for the machine we are measuring on.
-///
-/// Measuring a darwin binary on linux would be meaningless, so asset selection
-/// is strict about the OS and only flexible about spelling.
-fn platform_tokens() -> (Vec<&'static str>, Vec<&'static str>) {
-    let os: Vec<&str> = match std::env::consts::OS {
-        "linux" => vec!["linux"],
-        "macos" => vec!["darwin", "macos", "apple", "osx"],
-        "windows" => vec!["windows", "win64", "win32", "win"],
-        _ => vec![],
-    };
-    let arch: Vec<&str> = match std::env::consts::ARCH {
-        "x86_64" => vec!["x86_64", "amd64", "x64"],
-        "aarch64" => vec!["aarch64", "arm64"],
-        _ => vec![],
-    };
-    (os, arch)
-}
-
-/// Score an asset for this platform. `None` means "definitely not usable here".
-///
-/// Deliberately conservative: a wrong choice produces numbers that look real and
-/// are meaningless, which is worse than backfilling nothing.
-fn score_asset(name: &str, os: &[&str], arch: &[&str]) -> Option<i32> {
-    let n = name.to_lowercase();
-
-    // Never benchmark checksums, signatures or source archives.
-    const REJECT: [&str; 7] = [
-        ".sha256", ".sha512", ".asc", ".sig", ".pem", ".sbom", ".deb",
-    ];
-    if REJECT.iter().any(|r| n.contains(r)) {
-        return None;
-    }
-    // Source drops contain no executable. Matched as whole words so a tool
-    // legitimately named e.g. `resource-cli` is not rejected.
-    if ["source", "sources", "src"]
-        .iter()
-        .any(|t| contains_token(&n, t))
-    {
-        return None;
-    }
-    if n.ends_with(".rpm") || n.ends_with(".msi") || n.ends_with(".pkg") {
-        return None;
-    }
-
-    // An unrecognised host (FreeBSD, riscv64, …) leaves the token list empty.
-    // Skipping the filter in that case is the opposite of conservative: it lets
-    // a linux-x86_64 tarball match on a machine that cannot run it, and a
-    // wrong-platform binary either fails to exec or, worse, runs and measures
-    // something meaningless. Refusing to guess is the right answer.
-    if os.is_empty() || arch.is_empty() {
-        return None;
-    }
-    if !os.iter().any(|t| contains_token(&n, t)) {
-        return None;
-    }
-    if !arch.iter().any(|t| contains_token(&n, t)) {
-        return None;
-    }
-
-    let mut score = 100;
-    // musl is statically linked, so it runs on any distro including the slim
-    // container images this is most often executed in.
-    if n.contains("musl") {
-        score += 20;
-    }
-    if n.ends_with(".tar.gz") || n.ends_with(".tgz") {
-        score += 10;
-    } else if n.ends_with(".tar.xz") {
-        score += 8;
-    } else if n.ends_with(".zip") {
-        score += 5;
-    }
-    Some(score)
-}
-
 /// Best asset for the current platform, or `None` if nothing matches.
+///
+/// Delegates to `asset-picker`, which is mise's asset-selection logic extracted
+/// into a crate. The heuristic this replaced was a few dozen lines of substring
+/// matching, and it got platform detection wrong in ways that still produce a
+/// binary which *runs* — measuring the wrong thing and reporting numbers that
+/// look entirely real. mise's tables encode years of accumulated knowledge
+/// about how projects actually name their releases; rediscovering any of it one
+/// bad measurement at a time would have been foolish.
+/// The libc to select assets for.
+///
+/// Passing `None` makes the picker assume gnu on Linux, which is right for the
+/// common case and wrong on Alpine, where a gnu binary simply will not start.
+/// A musl-built `tak` is a good proxy for a musl host, and it is the only
+/// signal available without shelling out.
+///
+/// This matters beyond whether the binary runs: musl and glibc builds have
+/// different allocators and different startup costs, so picking the wrong one
+/// measures something the project's users never execute.
+fn host_libc() -> Option<String> {
+    cfg!(target_env = "musl").then(|| "musl".to_string())
+}
+
 pub fn pick_asset(assets: &[Asset]) -> Option<&Asset> {
-    let (os, arch) = platform_tokens();
-    assets
-        .iter()
-        .filter_map(|a| score_asset(&a.name, &os, &arch).map(|s| (s, a)))
-        .max_by_key(|(s, _)| *s)
-        .map(|(_, a)| a)
+    let names: Vec<String> = assets.iter().map(|a| a.name.clone()).collect();
+    let picked = AssetPicker::with_libc(
+        std::env::consts::OS.to_string(),
+        std::env::consts::ARCH.to_string(),
+        host_libc(),
+    )
+    // A macOS `.app` bundle is not something we can invoke as a subject.
+    .with_no_app(true)
+    .pick_best_asset(&names)?;
+
+    assets.iter().find(|a| a.name == picked)
 }
 
 fn run(cmd: &mut Command, what: &str) -> Result<()> {
@@ -489,98 +424,6 @@ pub fn version_of(tag: &str) -> &str {
 mod tests {
     use super::*;
 
-    const LINUX: [&str; 1] = ["linux"];
-    const X64: [&str; 3] = ["x86_64", "amd64", "x64"];
-    const WINDOWS: [&str; 4] = ["windows", "win64", "win32", "win"];
-
-    #[test]
-    fn rejects_checksums_and_signatures() {
-        for n in [
-            "tool-linux-x86_64.tar.gz.sha256",
-            "tool-linux-x86_64.tar.gz.asc",
-            "tool.sbom.json",
-        ] {
-            assert_eq!(score_asset(n, &LINUX, &X64), None, "{n} should be rejected");
-        }
-    }
-
-    #[test]
-    fn rejects_other_platforms() {
-        assert_eq!(score_asset("tool-darwin-arm64.tar.gz", &LINUX, &X64), None);
-        assert_eq!(score_asset("tool-linux-aarch64.tar.gz", &LINUX, &X64), None);
-    }
-
-    #[test]
-    fn rejects_distro_packages() {
-        // These need installing, not extracting, and would silently fail later.
-        assert_eq!(score_asset("tool_1.2.3_amd64.deb", &LINUX, &X64), None);
-        assert_eq!(score_asset("tool-1.2.3.x86_64.rpm", &LINUX, &X64), None);
-    }
-
-    /// `win` is a substring of `darwin`, so substring matching would let a macOS
-    /// tarball satisfy the Windows filter and be measured on the wrong platform.
-    #[test]
-    fn win_token_does_not_match_darwin() {
-        assert_eq!(
-            score_asset("tool-x86_64-apple-darwin.tar.gz", &WINDOWS, &X64),
-            None,
-            "a darwin asset must never satisfy the windows filter"
-        );
-        assert!(score_asset("tool-x86_64-win64.zip", &WINDOWS, &X64).is_some());
-        assert!(score_asset("tool-windows-amd64.zip", &WINDOWS, &X64).is_some());
-        assert!(score_asset("tool-win-x64.zip", &WINDOWS, &X64).is_some());
-    }
-
-    #[test]
-    fn token_matching_respects_word_boundaries() {
-        assert!(contains_token("tool-linux-amd64.tar.gz", "linux"));
-        assert!(contains_token("linux", "linux"));
-        assert!(!contains_token("apple-darwin", "win"));
-        assert!(!contains_token("mylinuxish", "linux"));
-    }
-
-    /// An empty token list means "we do not know this host", which must reject
-    /// rather than match everything.
-    #[test]
-    fn an_unknown_host_matches_nothing() {
-        let none: [&str; 0] = [];
-        assert_eq!(
-            score_asset("tool-linux-x86_64.tar.gz", &none, &X64),
-            None,
-            "unknown OS must not accept a linux asset"
-        );
-        assert_eq!(
-            score_asset("tool-linux-x86_64.tar.gz", &LINUX, &none),
-            None,
-            "unknown arch must not accept an x86_64 asset"
-        );
-    }
-
-    #[test]
-    fn prefers_musl_over_gnu() {
-        let musl = score_asset("tool-x86_64-unknown-linux-musl.tar.gz", &LINUX, &X64).unwrap();
-        let gnu = score_asset("tool-x86_64-unknown-linux-gnu.tar.gz", &LINUX, &X64).unwrap();
-        assert!(musl > gnu, "musl {musl} should outrank gnu {gnu}");
-    }
-
-    #[test]
-    fn prefers_tarball_over_zip() {
-        let tgz = score_asset("tool-linux-amd64.tar.gz", &LINUX, &X64).unwrap();
-        let zip = score_asset("tool-linux-amd64.zip", &LINUX, &X64).unwrap();
-        assert!(tgz > zip);
-    }
-
-    #[test]
-    fn accepts_common_arch_spellings() {
-        for n in [
-            "tool-linux-x86_64.tar.gz",
-            "tool-linux-amd64.tar.gz",
-            "tool-linux-x64.tar.gz",
-        ] {
-            assert!(score_asset(n, &LINUX, &X64).is_some(), "{n} should match");
-        }
-    }
-
     #[test]
     fn pick_asset_chooses_the_best_candidate() {
         let assets: Vec<Asset> = [
@@ -596,10 +439,19 @@ mod tests {
         })
         .collect();
 
-        // Only meaningful on the platform whose tokens the test asserts.
+        // Only meaningful on the platform this asserts against.
         if std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64" {
             let got = pick_asset(&assets).expect("something should match");
-            assert_eq!(got.name, "tool-x86_64-unknown-linux-musl.tar.gz");
+            // gnu, not musl, on a glibc host. The two builds differ in
+            // allocator and startup cost, so the one users actually run is the
+            // one worth measuring — and it is never the darwin asset or the
+            // checksum file.
+            let want = if cfg!(target_env = "musl") {
+                "tool-x86_64-unknown-linux-musl.tar.gz"
+            } else {
+                "tool-x86_64-unknown-linux-gnu.tar.gz"
+            };
+            assert_eq!(got.name, want);
         }
     }
 
