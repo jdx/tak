@@ -1,0 +1,5 @@
+[tools]
+# Used by the enhance-release job in .github/workflows/release-plz.yml to
+# rewrite the generated release body. Not needed to build or test tak — the
+# Rust toolchain comes from rust-toolchain in CI and rustup locally.
+communique = "latest"

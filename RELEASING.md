@@ -2,10 +2,25 @@
 
 Releases are automated with [release-plz](https://release-plz.dev). Merge to `main`, and
 release-plz opens a release PR that bumps versions and writes the changelog. Merging *that*
-tags, publishes to crates.io, builds binaries for seven targets, attaches them, and publishes
-the GitHub release.
+tags, publishes to crates.io, builds binaries for seven targets, attaches them, rewrites the
+release notes, and publishes the GitHub release.
 
-The release stays a draft until its binaries are attached, so it never appears without them.
+The release stays a draft until its binaries are attached and its notes are written, so it
+never appears half-finished.
+
+## Release notes
+
+`release-plz` writes the release body from commit subjects using `cliff.toml`.
+[communique](https://github.com/jdx/communique) then rewrites it into prose from the commits,
+pull requests and diffs, in the `enhance-release` job. It runs while the release is still a
+draft and in parallel with the binary builds, so it costs no wall clock and the raw version is
+never visible.
+
+Tone and project context live in `communique.toml`. The tool version is pinned in `mise.toml` —
+that is the only thing mise is used for in this repository.
+
+The job is `continue-on-error`, so if generation fails the release still publishes, with the
+`cliff.toml` notes intact.
 
 ## Crates
 
@@ -24,9 +39,12 @@ Each crate has a Trusted Publisher on crates.io pointing at `jdx/tak` and the wo
 filename `release-plz.yml`. **Renaming that workflow breaks publishing** until the trusted
 publisher is updated to match.
 
-The only stored secret is `RELEASE_PLZ_TOKEN`, a PAT with `contents: write` and
-`pull-requests: write`. The built-in `GITHUB_TOKEN` cannot be used: events it raises do not
-trigger other workflows, so the release PR it opened would never run CI.
+Two secrets are stored:
+
+| secret | used by | why |
+|---|---|---|
+| `RELEASE_PLZ_TOKEN` | `release-plz.yml` | A PAT with `contents: write` and `pull-requests: write`. The built-in `GITHUB_TOKEN` cannot be used: events it raises do not trigger other workflows, so the release PR it opened would never run CI. communique also needs it to read the *draft* release — the `/releases/tags` endpoint hides drafts, so it falls back to listing releases, which requires write access. |
+| `ANTHROPIC_API_KEY` | `release-plz.yml` (`enhance-release`) | communique's model calls. Without it, note generation fails and the release publishes with the `cliff.toml` body. |
 
 ## Building a release by hand
 

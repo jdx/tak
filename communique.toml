@@ -1,0 +1,22 @@
+context = """
+tak measures how much work a command does by counting instructions with cachegrind, instead of
+timing it. Wall clock on a shared CI runner has a 10-20% noise floor — the same size as the
+regressions people want to catch — while instruction counts move by hundredths of a percent
+under heavy contention. So CI can gate on them. Results live in the repository itself, in
+refs/notes/tak, with no database or service behind it.
+
+The installed binary is `tak`; the crate is `tak-cli`, because bare `tak` on crates.io is a
+dormant 2016 board-game implementation. The workspace also publishes `asset-picker`, the
+release-asset selection library extracted from mise, which gets no GitHub release of its own.
+"""
+
+system_extra = """
+tak is an unfinished experiment and says so in a large box at the top of its README: no
+stability guarantees, no roadmap, interfaces change without warning. Match that. Do not write
+upgrade recommendations, do not imply production readiness, and do not use marketing language
+about what the release unlocks. Describe what changed and why, and let breaking changes read as
+the ordinary events they are here.
+"""
+
+[defaults]
+emoji = false
