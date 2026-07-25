@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="tak">
+  <style>
+    .ink{stroke:#12161C} .ink-f{fill:#12161C}
+    .track{stroke:#CBD3DE} .tick{stroke:#9AA5B5} .tick-f{fill:#9AA5B5}
+    .amber{stroke:#F0A02A} .amber-f{fill:#F0A02A}
+    .red{stroke:#E5484D} .red-f{fill:#E5484D}
+    @media (prefers-color-scheme:dark){
+      .ink{stroke:#F2F5F9} .ink-f{fill:#F2F5F9}
+      .track{stroke:#333D4B} .tick{stroke:#6C7788} .tick-f{fill:#6C7788}
+    }
+  </style>
+  <path d="M 38.37 205.75 A 103.5 103.5 0 1 1 217.63 205.75" class="track" fill="none" stroke-width="18" stroke-linecap="round"/>
+  <path d="M 223.96 115.23 A 103.5 103.5 0 0 1 217.63 205.75" class="red" fill="none" stroke-width="18" stroke-linecap="round"/>
+  <path d="M 38.37 205.75 A 103.5 103.5 0 0 1 202.45 82.1" class="amber" fill="none" stroke-width="18" stroke-linecap="round"/>
+  <path d="M 186.63 97.39 L 138.42 164.79 L 117.58 143.21 Z" class="ink-f"/>
+  <circle cx="128" cy="154" r="22" class="ink-f"/>
+  <circle cx="128" cy="154" r="8.5" class="amber-f"/>
+</svg>
