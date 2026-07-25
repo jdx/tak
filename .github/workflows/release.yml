@@ -45,8 +45,7 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
-          - target: x86_64-apple-darwin
-            os: macos-latest
+          # No x86_64-apple-darwin: Intel Macs are not a target we publish for.
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-pc-windows-msvc
