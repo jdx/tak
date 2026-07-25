@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::collections::BTreeMap;
 
+use tak_cli::backfill;
 use tak_cli::measure::{self, Plan};
 use tak_cli::notes;
 use tak_cli::record::{Record, SCHEMA_VERSION};
@@ -58,6 +59,36 @@ enum Cmd {
     Init {
         #[arg(long, default_value = "origin")]
         remote: String,
+    },
+    /// Benchmark published release binaries to bootstrap history.
+    ///
+    /// A new adopter's first chart is empty. Rather than rebuilding a project at
+    /// a hundred historical commits, download what it already published.
+    Backfill {
+        /// Repository to pull releases from, as "owner/name". Defaults to the
+        /// `origin` remote of the current repository.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Executable name to look for inside each release archive. Defaults to
+        /// the repository name.
+        #[arg(long)]
+        bin: Option<String>,
+        /// Arguments passed to the downloaded binary, after `--`.
+        /// Defaults to `--version`, which every CLI answers cheaply.
+        #[arg(last = true)]
+        args: Vec<String>,
+        /// Name to record measurements under.
+        #[arg(long, default_value = "release")]
+        bench: String,
+        /// Most recent releases to measure.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Timed runs per release.
+        #[arg(long, default_value_t = 10)]
+        runs: u32,
+        /// Measure but do not write to refs/notes/tak.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Diagnose the git-notes plumbing.
     Doctor,
@@ -233,6 +264,139 @@ fn cmd_doctor() -> Result<()> {
     Ok(())
 }
 
+/// Infer "owner/name" from the `origin` remote.
+fn repo_from_origin() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // Handles https://github.com/o/r(.git) and git@github.com:o/r(.git).
+    let tail = url.rsplit_once("github.com").map(|(_, t)| t)?;
+    let slug = tail.trim_start_matches([':', '/']).trim_end_matches(".git");
+    (slug.matches('/').count() == 1).then(|| slug.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_backfill(
+    repo: Option<String>,
+    bin: Option<String>,
+    args: Vec<String>,
+    bench: String,
+    limit: usize,
+    runs: u32,
+    dry_run: bool,
+) -> Result<()> {
+    let repo = repo
+        .or_else(repo_from_origin)
+        .context("could not infer the repository — pass --repo owner/name")?;
+    let bin = bin.unwrap_or_else(|| repo.rsplit('/').next().unwrap_or(&repo).to_string());
+    let args = if args.is_empty() {
+        vec!["--version".to_string()]
+    } else {
+        args
+    };
+
+    let releases = backfill::list_releases(&repo, limit)?;
+    if releases.is_empty() {
+        println!("no releases with downloadable assets found for {repo}");
+        return Ok(());
+    }
+    println!("{} release(s) from {repo}\n", releases.len());
+
+    let workdir = std::env::temp_dir().join(format!("tak-backfill-{}", std::process::id()));
+    let mut recorded = 0usize;
+    let mut skipped = 0usize;
+
+    for rel in &releases {
+        let Some(asset) = backfill::pick_asset(&rel.assets) else {
+            println!("  {:<14} skipped — no asset for this platform", rel.tag);
+            skipped += 1;
+            continue;
+        };
+
+        let dir = workdir.join(&rel.tag);
+        let path = match backfill::fetch_binary(asset, &bin, &dir) {
+            Ok(p) => p,
+            Err(e) => {
+                println!("  {:<14} skipped — {e}", rel.tag);
+                skipped += 1;
+                continue;
+            }
+        };
+
+        let mut cmd = vec![path.to_string_lossy().to_string()];
+        cmd.extend(args.iter().cloned());
+
+        let plan = Plan {
+            cmd: cmd.clone(),
+            warmup: 2,
+            runs,
+        };
+        let mut metrics = match measure::wall(&plan) {
+            Ok(m) => m,
+            Err(e) => {
+                println!("  {:<14} skipped — {e}", rel.tag);
+                skipped += 1;
+                continue;
+            }
+        };
+        if let Ok(Some(n)) = measure::instructions(&cmd) {
+            metrics.insert("instructions".into(), n as f64);
+        }
+
+        let ins = metrics
+            .get("instructions")
+            .map(|v| format!("{v:>14.0}"))
+            .unwrap_or_else(|| format!("{:>14}", "-"));
+        println!(
+            "  {:<14} wall_min {:>8.2}ms   instructions {ins}",
+            rel.tag, metrics["wall_min_ms"]
+        );
+
+        if dry_run {
+            continue;
+        }
+
+        // Attach to the tagged commit so the series lands on the real timeline.
+        // A shallow clone has no tags, which is a skip rather than an error.
+        let Some(sha) = backfill::tag_commit(&rel.tag) else {
+            println!("                 not recorded — tag not present locally");
+            skipped += 1;
+            continue;
+        };
+
+        let rec = Record {
+            v: SCHEMA_VERSION,
+            bench: bench.clone(),
+            tool: bin.clone(),
+            version: Some(backfill::version_of(&rel.tag).to_string()),
+            runner: runner_class(),
+            // The release's own date, not now: this is when the code existed.
+            ts: rel.published_at.clone().unwrap_or_else(now_rfc3339),
+            metrics,
+        };
+        notes::append(&sha, &[rec])?;
+        recorded += 1;
+    }
+
+    std::fs::remove_dir_all(&workdir).ok();
+
+    if dry_run {
+        println!("\n  dry run — nothing written");
+    } else {
+        println!(
+            "\n  recorded {recorded}, skipped {skipped} → {}",
+            notes::NOTES_REF
+        );
+        println!("  push with: tak push");
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Run {
@@ -257,6 +421,15 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Cmd::Backfill {
+            repo,
+            bin,
+            args,
+            bench,
+            limit,
+            runs,
+            dry_run,
+        } => cmd_backfill(repo, bin, args, bench, limit, runs, dry_run),
         Cmd::Doctor => cmd_doctor(),
     }
 }
