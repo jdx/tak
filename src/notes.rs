@@ -41,6 +41,33 @@ fn git(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
 
+/// Fallback identity arguments for commands that create a commit.
+///
+/// `git notes add` and `git notes merge` write commits, so git demands an
+/// author. Containers and fresh CI images routinely have none configured, and
+/// aborting a whole backfill for want of a name nobody will ever read is not a
+/// useful failure. Only applied when the user has not set one, so a real
+/// identity is never overridden.
+fn identity_args() -> Vec<&'static str> {
+    let configured = Command::new("git")
+        .args(["config", "--get", "user.email"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if configured {
+        vec![]
+    } else {
+        vec!["-c", "user.name=tak", "-c", "user.email=tak@localhost"]
+    }
+}
+
+/// Like [`git`] but prepends a fallback identity, for commands that commit.
+fn git_committing(args: &[&str]) -> Result<String> {
+    let mut full = identity_args();
+    full.extend_from_slice(args);
+    git(&full)
+}
+
 /// Like [`git`] but returns the failure instead of raising, for calls whose
 /// failure is an expected outcome (a rejected push, a missing note).
 fn git_ok(args: &[&str]) -> Result<(bool, String)> {
@@ -101,7 +128,7 @@ pub fn append(commit: &str, records: &[Record]) -> Result<()> {
     lines.sort();
     lines.dedup();
 
-    git(&[
+    git_committing(&[
         "notes",
         "--ref",
         NOTES_REF,
@@ -135,7 +162,7 @@ pub fn push(remote: &str) -> Result<()> {
             remote,
             "+refs/notes/tak:refs/notes/tak-remote",
         ])?;
-        git(&[
+        git_committing(&[
             "notes",
             "--ref",
             NOTES_REF,

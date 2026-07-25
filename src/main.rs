@@ -154,8 +154,19 @@ fn cmd_run(
 
     if !no_counters {
         match measure::instructions(&cmd)? {
-            Some(n) => {
-                metrics.insert("instructions".into(), n as f64);
+            Some(c) => {
+                metrics.insert("instructions".into(), c.min as f64);
+                if c.is_suspect() {
+                    eprintln!(
+                        "warning: instruction count varied {:.2}% across {} runs. \
+                         The metric is deterministic, so this means the command \
+                         itself does environment-dependent work (an update check, \
+                         a cache it populates on first run, DNS). Its counts are \
+                         not a usable gate until that is removed.",
+                        c.spread_pct(),
+                        c.runs
+                    );
+                }
             }
             None => eprintln!(
                 "note: valgrind not found — recording timing only. \
@@ -353,8 +364,12 @@ fn cmd_backfill(
                 continue;
             }
         };
-        if let Ok(Some(n)) = measure::instructions(&cmd) {
-            metrics.insert("instructions".into(), n as f64);
+        let mut suspect = None;
+        if let Ok(Some(c)) = measure::instructions(&cmd) {
+            metrics.insert("instructions".into(), c.min as f64);
+            if c.is_suspect() {
+                suspect = Some(c.spread_pct());
+            }
         }
 
         let ins = metrics
@@ -362,8 +377,12 @@ fn cmd_backfill(
             .map(|v| format!("{v:>14.0}"))
             .unwrap_or_else(|| format!("{:>14}", "-"));
         println!(
-            "  {:<14} wall_min {:>8.2}ms   instructions {ins}",
-            rel.tag, metrics["wall_min_ms"]
+            "  {:<14} wall_min {:>8.2}ms   instructions {ins}{}",
+            rel.tag,
+            metrics["wall_min_ms"],
+            suspect
+                .map(|p| format!("   ⚠ varied {p:.1}%"))
+                .unwrap_or_default()
         );
 
         if dry_run {
