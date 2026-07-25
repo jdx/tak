@@ -188,6 +188,13 @@ fn host_libc() -> Option<String> {
 fn is_usable_subject(name: &str) -> bool {
     let n = name.to_lowercase();
 
+    // A .vsix is a zip, so `Format` classifies it as openable, but it is a VS
+    // Code extension package — never a CLI binary. Admitting it wastes a
+    // download and then skips the release with a confusing "no `tool` inside".
+    if n.ends_with(".vsix") {
+        return false;
+    }
+
     // Checksums and signatures describe a release rather than being one. The
     // picker scores them positively — verified: given only
     // `tool-x86_64-unknown-linux-gnu.tar.gz.sha256` it returns exactly that —
@@ -545,12 +552,12 @@ mod tests {
         }
     }
 
-    /// The filter and `fetch_binary` must classify identically, or an asset
-    /// passes here and is refused at unpack.
+    /// A .vsix unpacks fine — it is a zip — but never contains a CLI binary,
+    /// so admitting it costs a download and a confusing skip.
     #[test]
-    fn vsix_is_a_zip_to_both_sides() {
-        assert!(is_usable_subject("tool-linux-x86_64.vsix"));
+    fn vsix_is_openable_but_never_a_subject() {
         assert_eq!(Format::from_file_name("tool.vsix"), Format::Zip);
+        assert!(!is_usable_subject("tool-linux-x86_64.vsix"));
     }
 
     /// `Format::Raw` means "no recognised archive suffix", which is not the
