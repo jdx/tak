@@ -1,11 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="tak">
   <rect width="256" height="256" rx="0" fill="#0F131A"/>
   <g transform="translate(128,128) scale(0.88) translate(-128,-128)">
-  <path d="M 38.37 205.75 A 103.5 103.5 0 1 1 217.63 205.75" class="" stroke="#3E4959" fill="none" stroke-width="18" stroke-linecap="round"/>
-  <path d="M 223.96 115.23 A 103.5 103.5 0 0 1 217.63 205.75" class="" stroke="#E5484D" fill="none" stroke-width="18" stroke-linecap="round"/>
-  <path d="M 38.37 205.75 A 103.5 103.5 0 0 1 202.45 82.1" class="" stroke="#F0A02A" fill="none" stroke-width="18" stroke-linecap="round"/>
-  <path d="M 186.63 97.39 L 138.42 164.79 L 117.58 143.21 Z" class="" fill="#F2F5F9"/>
-  <circle cx="128" cy="154" r="22" class="" fill="#F2F5F9"/>
-  <circle cx="128" cy="154" r="8.5" class="" fill="#F0A02A"/>
+  <path d="M 38.37 205.75 A 103.5 103.5 0 1 1 217.63 205.75" stroke="#3E4959" fill="none" stroke-width="18" stroke-linecap="round"/>
+  <path d="M 223.96 115.23 A 103.5 103.5 0 0 1 217.63 205.75" stroke="#E5484D" fill="none" stroke-width="18" stroke-linecap="round"/>
+  <path d="M 38.37 205.75 A 103.5 103.5 0 0 1 202.45 82.1" stroke="#F0A02A" fill="none" stroke-width="18" stroke-linecap="round"/>
+  <path d="M 186.63 97.39 L 138.42 164.79 L 117.58 143.21 Z" fill="#F2F5F9"/>
+  <circle cx="128" cy="154" r="22" fill="#F2F5F9"/>
+  <circle cx="128" cy="154" r="8.5" fill="#F0A02A"/>
   </g>
 </svg>

@@ -22,9 +22,28 @@ python3 assets/logo.py
 | `tak-icon-tile-small.svg` | the tile at ≤32px |
 | `tak-icon-square*.svg` | favicon sources — same field, square corners. iOS and Android apply their own mask, so pre-rounded corners come out double-rounded. |
 | `tak-wordmark-plain.svg` | wordmark with an ordinary `a`, when the dial would be too small to read |
+| `tak-lockup-light.svg` / `-dark.svg` | fixed-palette lockups, for `<picture>` where the host picks the file rather than the SVG picking its own colours |
 
-Every file except the tiles carries a `prefers-color-scheme` block, so one asset
-works on a light and a dark README. The tiles are always dark by design.
+## Theming
+
+Colours are emitted as presentation attributes carrying the **light** palette,
+with the dark palette layered on top in a `<style>` block:
+
+```svg
+<style>@media (prefers-color-scheme:dark){.ink{stroke:#F2F5F9} ...}</style>
+<path … class="ink" stroke="#12161C" …/>
+```
+
+Presentation attributes lose to any CSS rule, so the override still wins. The
+point of the redundancy is the failure mode: if a host strips the `<style>`
+— GitHub has historically sanitised SVG — the file falls back to the light
+palette instead of rendering blank, which is what happens when the only colour
+source is a stylesheet that got removed.
+
+The icon tiles skip all of this. They carry a fixed dark palette and no CSS at
+all, so a self-contained dark tile reads correctly on a light or a dark page.
+That is what makes `tak-icon-tile.svg` the safe thing to drop into a README,
+and it is what the README uses.
 
 ## Palette
 
@@ -84,4 +103,5 @@ pip install resvg-py && python3 -c "import resvg_py,pathlib; pathlib.Path('/tmp/
 ```
 
 Note that resvg does not evaluate `@media` queries, so that renders the light
-theme only.
+theme only. To check dark, render `tak-lockup-dark.svg`, which has the dark
+palette baked in.

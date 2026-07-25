@@ -1,4 +1,12 @@
-# tak
+<p align="center">
+  <img src="assets/tak-icon-tile.svg" alt="tak logo" width="140" height="140">
+</p>
+
+<h1 align="center">tak</h1>
+
+<p align="center">
+  <em>A tachometer for code.</em>
+</p>
 
 > [!CAUTION]
 > ## 🚧 GO AWAY 🚧

@@ -1,34 +1,27 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 412 194" width="412" height="194" role="img" aria-label="tak">
   <style>
-    .ink{stroke:#12161C} .ink-f{fill:#12161C}
-    .track{stroke:#CBD3DE} .tick{stroke:#9AA5B5} .tick-f{fill:#9AA5B5}
-    .amber{stroke:#F0A02A} .amber-f{fill:#F0A02A}
-    .red{stroke:#E5484D} .red-f{fill:#E5484D}
-    @media (prefers-color-scheme:dark){
-      .ink{stroke:#F2F5F9} .ink-f{fill:#F2F5F9}
-      .track{stroke:#333D4B} .tick{stroke:#6C7788} .tick-f{fill:#6C7788}
-    }
+    @media (prefers-color-scheme:dark){.ink{stroke:#F2F5F9} .ink-f{fill:#F2F5F9} .track{stroke:#333D4B} .track-f{fill:#333D4B} .tick{stroke:#6C7788} .tick-f{fill:#6C7788}}
   </style>
   <g transform="translate(-9.55,18.42) scale(0.62)">
-  <path d="M 36.2 207 A 106 106 0 1 1 219.8 207" class="track" fill="none" stroke-width="13" stroke-linecap="round"/>
-  <path d="M 226.28 114.29 A 106 106 0 0 1 219.8 207" class="red" fill="none" stroke-width="13" stroke-linecap="round"/>
-  <path d="M 36.2 207 A 106 106 0 0 1 204.25 80.37" class="amber" fill="none" stroke-width="13" stroke-linecap="round"/>
-  <line x1="65.65" y1="190" x2="53.52" y2="197" class="tick" stroke-width="7" stroke-linecap="round"/>
-  <line x1="57.09" y1="141.5" x2="43.31" y2="139.07" class="tick" stroke-width="7" stroke-linecap="round"/>
-  <line x1="81.72" y1="98.84" x2="72.72" y2="88.12" class="tick" stroke-width="7" stroke-linecap="round"/>
-  <line x1="128" y1="82" x2="128" y2="68" class="tick" stroke-width="7" stroke-linecap="round"/>
-  <line x1="174.28" y1="98.84" x2="183.28" y2="88.12" class="tick" stroke-width="7" stroke-linecap="round"/>
-  <line x1="198.91" y1="141.5" x2="212.69" y2="139.07" class="tick" stroke-width="7" stroke-linecap="round"/>
-  <line x1="190.35" y1="190" x2="202.48" y2="197" class="tick" stroke-width="7" stroke-linecap="round"/>
-  <path d="M 182.67 101.21 L 135.64 161.91 L 120.36 146.09 Z" class="ink-f"/>
-  <circle cx="128" cy="154" r="17" class="ink-f"/>
-  <circle cx="128" cy="154" r="6.5" class="amber-f"/>
+  <path d="M 36.2 207 A 106 106 0 1 1 219.8 207" class="track" stroke="#CBD3DE" fill="none" stroke-width="13" stroke-linecap="round"/>
+  <path d="M 226.28 114.29 A 106 106 0 0 1 219.8 207" class="red" stroke="#E5484D" fill="none" stroke-width="13" stroke-linecap="round"/>
+  <path d="M 36.2 207 A 106 106 0 0 1 204.25 80.37" class="amber" stroke="#F0A02A" fill="none" stroke-width="13" stroke-linecap="round"/>
+  <line x1="65.65" y1="190" x2="53.52" y2="197" class="tick" stroke="#9AA5B5" stroke-width="7" stroke-linecap="round"/>
+  <line x1="57.09" y1="141.5" x2="43.31" y2="139.07" class="tick" stroke="#9AA5B5" stroke-width="7" stroke-linecap="round"/>
+  <line x1="81.72" y1="98.84" x2="72.72" y2="88.12" class="tick" stroke="#9AA5B5" stroke-width="7" stroke-linecap="round"/>
+  <line x1="128" y1="82" x2="128" y2="68" class="tick" stroke="#9AA5B5" stroke-width="7" stroke-linecap="round"/>
+  <line x1="174.28" y1="98.84" x2="183.28" y2="88.12" class="tick" stroke="#9AA5B5" stroke-width="7" stroke-linecap="round"/>
+  <line x1="198.91" y1="141.5" x2="212.69" y2="139.07" class="tick" stroke="#9AA5B5" stroke-width="7" stroke-linecap="round"/>
+  <line x1="190.35" y1="190" x2="202.48" y2="197" class="tick" stroke="#9AA5B5" stroke-width="7" stroke-linecap="round"/>
+  <path d="M 182.67 101.21 L 135.64 161.91 L 120.36 146.09 Z" class="ink-f" fill="#12161C"/>
+  <circle cx="128" cy="154" r="17" class="ink-f" fill="#12161C"/>
+  <circle cx="128" cy="154" r="6.5" class="amber-f" fill="#F0A02A"/>
   </g>
-  <g transform="translate(169.66,0)"><path d="M 26 44 L 26 134 Q 26 150 42 150" class="ink" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-  <line x1="6" y1="78" x2="52" y2="78" class="ink" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="110" cy="114" r="36" class="ink" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-  <line x1="146" y1="78" x2="146" y2="150" class="ink" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-  <line x1="188" y1="44" x2="188" y2="150" class="ink" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-  <line x1="234" y1="78" x2="188" y2="120" class="ink" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
-  <line x1="205" y1="103" x2="236" y2="150" class="ink" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/></g>
+  <g transform="translate(169.66,0)"><path d="M 26 44 L 26 134 Q 26 150 42 150" class="ink" stroke="#12161C" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="6" y1="78" x2="52" y2="78" class="ink" stroke="#12161C" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="110" cy="114" r="36" class="ink" stroke="#12161C" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="146" y1="78" x2="146" y2="150" class="ink" stroke="#12161C" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="188" y1="44" x2="188" y2="150" class="ink" stroke="#12161C" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="234" y1="78" x2="188" y2="120" class="ink" stroke="#12161C" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="205" y1="103" x2="236" y2="150" class="ink" stroke="#12161C" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/></g>
 </svg>
