@@ -566,33 +566,31 @@ fn cmd_backfill(
 
 /// Resolve settings from the CLI, the environment, and `tak.toml`.
 ///
-/// A missing or unreadable `tak.toml` is not fatal here: `tak run -- cmd` works
-/// in any directory, and settings must too.
-fn resolve_settings(cli: &Cli) -> Settings {
-    let config = config::Config::find(&std::env::current_dir().unwrap_or_default())
-        .ok()
-        .flatten()
+/// A *missing* `tak.toml` is fine — `tak run -- cmd` works in any directory, so
+/// settings must too. A *malformed* one is an error: swallowing the parse
+/// failure would have `tak settings` print defaults the project never asked
+/// for, with nothing to suggest its configuration had been skipped.
+fn resolve_settings(cli: &Cli) -> Result<Settings> {
+    let config = config::Config::find(&std::env::current_dir()?)
+        .context("could not read settings")?
         .and_then(|(_, c)| c.env);
     let overrides = Overrides {
         env_deny: settings::from_cli(cli.env_deny.clone()),
         env_allow: settings::from_cli(cli.env_allow.clone()),
     };
-    Settings::from_process(&overrides, config.as_ref())
+    Ok(Settings::from_process(&overrides, config.as_ref()))
 }
 
 /// Print the settings registry with resolved values.
 fn cmd_settings(resolved: &Settings, docs: bool) -> Result<()> {
     let scrubbed: Vec<&str> = resolved.scrubbed_env().collect();
     for meta in settings::SETTINGS {
-        let value = match meta.name {
-            "env_allow" => &resolved.env_allow,
-            "env_deny" => &resolved.env_deny,
-            // Unreachable while every setting is wired above; a new one added
-            // to settings.toml lands here rather than being silently omitted.
-            other => {
-                println!("  {other}  (no accessor — wire it into cmd_settings)");
-                continue;
-            }
+        // `Settings::get` rather than a match here: a test asserts it answers
+        // for every registry entry, so a new setting cannot reach this display
+        // without a value behind it.
+        let Some(value) = resolved.get(meta.name) else {
+            println!("{}  (no accessor — wire it into Settings::get)", meta.name);
+            continue;
         };
         println!("{}  {}", meta.name, meta.type_);
         println!("  value    {value:?}");
@@ -624,7 +622,7 @@ fn cmd_settings(resolved: &Settings, docs: bool) -> Result<()> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let resolved = resolve_settings(&cli);
+    let resolved = resolve_settings(&cli)?;
     match cli.cmd {
         Cmd::Run {
             bench,

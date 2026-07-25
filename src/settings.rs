@@ -83,6 +83,21 @@ impl Settings {
         Self::resolve(cli, config, &|key| std::env::var(key).ok())
     }
 
+    /// The value of a setting, by its registry name.
+    ///
+    /// Exists so display code cannot silently omit a setting: `SETTINGS` is
+    /// generated, so a new entry appears in `tak settings` whether or not
+    /// anything can produce its value. A test asserts this returns `Some` for
+    /// every registry entry, which turns "added a setting, forgot the
+    /// accessor" into a build failure instead of a blank row.
+    pub fn get(&self, name: &str) -> Option<&Vec<String>> {
+        match name {
+            "env_allow" => Some(&self.env_allow),
+            "env_deny" => Some(&self.env_deny),
+            _ => None,
+        }
+    }
+
     /// Variables to remove from a benchmark subject: denied, less allowed.
     ///
     /// Allow subtracts from deny rather than sitting beside it, so opting one
@@ -210,6 +225,47 @@ mod tests {
                     setting.name
                 );
             }
+        }
+    }
+
+    /// The same guard for `tak.toml`. A dotted registry key is valid TOML on
+    /// its own, so this builds the smallest config that sets exactly that key
+    /// and checks it lands — which also proves the key spelled in the registry
+    /// is the one `Config` actually deserializes.
+    #[test]
+    fn every_declared_config_key_is_honoured() {
+        for setting in SETTINGS {
+            for key in setting.config_keys {
+                let text = format!("{key} = [\"SENTINEL\"]\n");
+                let cfg: crate::config::Config = toml::from_str(&text).unwrap_or_else(|e| {
+                    panic!(
+                        "`{}` declares config key `{key}`, which does not parse: {e}",
+                        setting.name
+                    )
+                });
+                let got = Settings::resolve(&Overrides::default(), cfg.env.as_ref(), &no_env);
+                assert_ne!(
+                    got,
+                    Settings::default(),
+                    "`{}` declares config key `{key}` but setting it changes nothing",
+                    setting.name
+                );
+            }
+        }
+    }
+
+    /// Display code reads values by registry name, and `SETTINGS` is generated,
+    /// so a new setting shows up in `tak settings` whether or not its value can
+    /// be produced. This is what stops that being a blank row.
+    #[test]
+    fn every_setting_has_an_accessor() {
+        let s = Settings::default();
+        for setting in SETTINGS {
+            assert!(
+                s.get(setting.name).is_some(),
+                "`{}` has no accessor in Settings::get",
+                setting.name
+            );
         }
     }
 
