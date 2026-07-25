@@ -14,8 +14,9 @@
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Asset {
@@ -35,40 +36,113 @@ pub struct Release {
     pub assets: Vec<Asset>,
 }
 
+/// GitHub's maximum, and the fewest round trips per page of history.
+const PER_PAGE: usize = 100;
+/// Bound the walk so a `--limit` larger than a project's history cannot spin.
+const MAX_PAGES: usize = 10;
+
+fn github_token() -> Option<String> {
+    std::env::var("GITHUB_TOKEN")
+        .or_else(|_| std::env::var("GH_TOKEN"))
+        .ok()
+        .filter(|t| !t.is_empty())
+}
+
+/// Run curl with every option supplied on stdin rather than as arguments.
+///
+/// A bearer token passed as `-H` lands in the process's argv, where any local
+/// process that can read `/proc` recovers it. `--config -` keeps it off the
+/// command line entirely.
+fn curl(url: &str, output: Option<&Path>, auth: bool) -> Result<Vec<u8>> {
+    let mut cfg = String::from("silent\nshow-error\nlocation\nfail\n");
+    cfg.push_str("header = \"User-Agent: tak\"\n");
+    if auth && let Some(token) = github_token() {
+        // curl's config format has no escape for `"` inside a quoted value, and
+        // GitHub tokens are ASCII-alphanumeric with `_`, so a token containing
+        // a quote is malformed rather than something to escape.
+        if token.contains(['"', '\n', '\r']) {
+            bail!("refusing to use a token containing quotes or newlines");
+        }
+        cfg.push_str(&format!("header = \"Authorization: Bearer {token}\"\n"));
+    }
+    if let Some(p) = output {
+        cfg.push_str(&format!("output = \"{}\"\n", p.display()));
+    }
+    cfg.push_str(&format!("url = \"{url}\"\n"));
+
+    let mut child = Command::new("curl")
+        .arg("--config")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to run curl — is it installed?")?;
+    child
+        .stdin
+        .take()
+        .context("curl stdin unavailable")?
+        .write_all(cfg.as_bytes())?;
+
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        bail!(
+            "curl failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(out.stdout)
+}
+
 /// Releases for `repo` ("owner/name"), newest first, pre-releases excluded.
+///
+/// Pages until `limit` qualifying releases are found or the history runs out —
+/// a first page consisting mostly of pre-releases would otherwise silently
+/// return far fewer than asked for.
 ///
 /// Uses the GitHub API directly rather than mise-versions: that index only
 /// covers mise's curated registry, and backfill has to work for any project.
 pub fn list_releases(repo: &str, limit: usize) -> Result<Vec<Release>> {
-    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=100");
-    let mut args = vec![
-        "-sSL".to_string(),
-        "-H".to_string(),
-        "Accept: application/vnd.github+json".to_string(),
-        "-H".to_string(),
-        "User-Agent: tak".to_string(),
-    ];
-    // Unauthenticated GitHub allows 60 requests/hour, which a backfill blows
-    // through immediately. Use a token when the environment offers one.
-    if let Ok(token) = std::env::var("GITHUB_TOKEN").or_else(|_| std::env::var("GH_TOKEN")) {
-        args.push("-H".to_string());
-        args.push(format!("Authorization: Bearer {token}"));
-    }
-    args.push(url);
+    let mut out: Vec<Release> = Vec::new();
 
-    let out = Command::new("curl")
-        .args(&args)
-        .output()
-        .context("failed to run curl — is it installed?")?;
-    if !out.status.success() {
-        bail!("curl failed listing releases for {repo}");
+    for page in 1..=MAX_PAGES {
+        let url =
+            format!("https://api.github.com/repos/{repo}/releases?per_page={PER_PAGE}&page={page}");
+        let body = curl(&url, None, true)?;
+        let batch: Vec<Release> =
+            serde_json::from_slice(&body).context("could not parse the GitHub releases API")?;
+        let exhausted = batch.len() < PER_PAGE;
+
+        out.extend(
+            batch
+                .into_iter()
+                .filter(|r| !r.prerelease && !r.assets.is_empty()),
+        );
+
+        if out.len() >= limit || exhausted {
+            break;
+        }
     }
 
-    let mut rels: Vec<Release> =
-        serde_json::from_slice(&out.stdout).context("could not parse the GitHub releases API")?;
-    rels.retain(|r| !r.prerelease && !r.assets.is_empty());
-    rels.truncate(limit);
-    Ok(rels)
+    out.truncate(limit);
+    Ok(out)
+}
+
+/// Does `haystack` contain `token` as a whole word?
+///
+/// Plain `contains` is wrong here: the Windows token `win` is a substring of
+/// `apple-darwin`, so a macOS tarball would satisfy the Windows filter and get
+/// measured on the wrong platform. Requiring non-alphanumeric boundaries makes
+/// `win` match `tool-win.zip` but not `darwin`, while `win64` still matches
+/// `tool-win64.zip` as its own token.
+fn contains_token(haystack: &str, token: &str) -> bool {
+    let h = haystack.as_bytes();
+    haystack.match_indices(token).any(|(i, _)| {
+        let before = i == 0 || !h[i - 1].is_ascii_alphanumeric();
+        let end = i + token.len();
+        let after = end == h.len() || !h[end].is_ascii_alphanumeric();
+        before && after
+    })
 }
 
 /// Platform tokens for the machine we are measuring on.
@@ -79,7 +153,7 @@ fn platform_tokens() -> (Vec<&'static str>, Vec<&'static str>) {
     let os: Vec<&str> = match std::env::consts::OS {
         "linux" => vec!["linux"],
         "macos" => vec!["darwin", "macos", "apple", "osx"],
-        "windows" => vec!["windows", "win"],
+        "windows" => vec!["windows", "win64", "win32", "win"],
         _ => vec![],
     };
     let arch: Vec<&str> = match std::env::consts::ARCH {
@@ -108,10 +182,10 @@ fn score_asset(name: &str, os: &[&str], arch: &[&str]) -> Option<i32> {
         return None;
     }
 
-    if !os.is_empty() && !os.iter().any(|t| n.contains(t)) {
+    if !os.is_empty() && !os.iter().any(|t| contains_token(&n, t)) {
         return None;
     }
-    if !arch.is_empty() && !arch.iter().any(|t| n.contains(t)) {
+    if !arch.is_empty() && !arch.iter().any(|t| contains_token(&n, t)) {
         return None;
     }
 
@@ -157,15 +231,14 @@ fn run(cmd: &mut Command, what: &str) -> Result<()> {
 /// Download `asset` into `dir`, unpack it, and return the path to `bin_name`.
 ///
 /// Handles tarballs, zips and bare executables — the three shapes essentially
-/// every CLI ships.
+/// every CLI ships. The download is authenticated for the same reason the
+/// listing is: a private repository's assets are not publicly readable, and
+/// failing here after listing succeeded would skip every release.
 pub fn fetch_binary(asset: &Asset, bin_name: &str, dir: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let archive = dir.join(&asset.name);
 
-    run(
-        Command::new("curl").args(["-sSL", "-o", &archive.to_string_lossy(), &asset.url]),
-        "curl",
-    )?;
+    curl(&asset.url, Some(&archive), true)?;
 
     let n = asset.name.to_lowercase();
     if n.ends_with(".tar.gz") || n.ends_with(".tgz") || n.ends_with(".tar.xz") {
@@ -213,10 +286,23 @@ fn make_executable(p: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Depth-limited search for `name`. Release archives nest one or two levels at
-/// most; a full walk risks wandering into a vendored tree.
+/// Names to accept for the executable.
+///
+/// Windows archives ship `tool.exe`, while `--bin` defaults to the repository
+/// name without a suffix, so an exact-match-only search skips every Windows
+/// release.
+fn binary_candidates(name: &str) -> Vec<String> {
+    let mut v = vec![name.to_string()];
+    if cfg!(windows) && !name.ends_with(".exe") {
+        v.push(format!("{name}.exe"));
+    }
+    v
+}
+
+/// Depth-limited search for the executable. Release archives nest one or two
+/// levels at most; a full walk risks wandering into a vendored tree.
 fn find_binary(dir: &Path, name: &str) -> Option<PathBuf> {
-    fn walk(dir: &Path, name: &str, depth: u32) -> Option<PathBuf> {
+    fn walk(dir: &Path, names: &[String], depth: u32) -> Option<PathBuf> {
         if depth > 3 {
             return None;
         }
@@ -226,18 +312,36 @@ fn find_binary(dir: &Path, name: &str) -> Option<PathBuf> {
             let p = e.path();
             if p.is_dir() {
                 dirs.push(p);
-            } else if p.file_name().and_then(|s| s.to_str()) == Some(name) {
+            } else if p
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|f| names.iter().any(|n| n == f))
+            {
                 return Some(p);
             }
         }
-        dirs.into_iter().find_map(|d| walk(&d, name, depth + 1))
+        dirs.into_iter().find_map(|d| walk(&d, names, depth + 1))
     }
-    walk(dir, name, 0)
+    walk(dir, &binary_candidates(name), 0)
+}
+
+/// Whether the current directory is inside a git work tree.
+///
+/// Distinguishes "not in a repository" from "tag not fetched", which otherwise
+/// both surface as a missing tag and send people looking in the wrong place.
+pub fn in_git_repo() -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// Resolve a release tag to the commit it points at, if the tag is available
 /// locally. Returns `None` rather than failing — a shallow clone legitimately
-/// has no tags, and the caller can still record against something else.
+/// has no tags, and the caller can still report that precisely.
 pub fn tag_commit(tag: &str) -> Option<String> {
     let out = Command::new("git")
         .args(["rev-parse", &format!("{tag}^{{commit}}")])
@@ -260,6 +364,7 @@ mod tests {
 
     const LINUX: [&str; 1] = ["linux"];
     const X64: [&str; 3] = ["x86_64", "amd64", "x64"];
+    const WINDOWS: [&str; 4] = ["windows", "win64", "win32", "win"];
 
     #[test]
     fn rejects_checksums_and_signatures() {
@@ -283,6 +388,28 @@ mod tests {
         // These need installing, not extracting, and would silently fail later.
         assert_eq!(score_asset("tool_1.2.3_amd64.deb", &LINUX, &X64), None);
         assert_eq!(score_asset("tool-1.2.3.x86_64.rpm", &LINUX, &X64), None);
+    }
+
+    /// `win` is a substring of `darwin`, so substring matching would let a macOS
+    /// tarball satisfy the Windows filter and be measured on the wrong platform.
+    #[test]
+    fn win_token_does_not_match_darwin() {
+        assert_eq!(
+            score_asset("tool-x86_64-apple-darwin.tar.gz", &WINDOWS, &X64),
+            None,
+            "a darwin asset must never satisfy the windows filter"
+        );
+        assert!(score_asset("tool-x86_64-win64.zip", &WINDOWS, &X64).is_some());
+        assert!(score_asset("tool-windows-amd64.zip", &WINDOWS, &X64).is_some());
+        assert!(score_asset("tool-win-x64.zip", &WINDOWS, &X64).is_some());
+    }
+
+    #[test]
+    fn token_matching_respects_word_boundaries() {
+        assert!(contains_token("tool-linux-amd64.tar.gz", "linux"));
+        assert!(contains_token("linux", "linux"));
+        assert!(!contains_token("apple-darwin", "win"));
+        assert!(!contains_token("mylinuxish", "linux"));
     }
 
     #[test]
@@ -339,6 +466,17 @@ mod tests {
         // Non-semver tags must survive untouched.
         assert_eq!(version_of("nightly"), "nightly");
         assert_eq!(version_of("lts-iron"), "lts-iron");
+    }
+
+    #[test]
+    fn windows_archives_may_carry_an_exe_suffix() {
+        let c = binary_candidates("mycli");
+        assert!(c.contains(&"mycli".to_string()));
+        if cfg!(windows) {
+            assert!(c.contains(&"mycli.exe".to_string()));
+        }
+        // An explicit .exe must not become mycli.exe.exe.
+        assert_eq!(binary_candidates("mycli.exe").len(), 1);
     }
 
     #[test]

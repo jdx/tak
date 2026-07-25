@@ -2,7 +2,7 @@
 //!
 //! Experimental. See README.md, which asks you to use hyperfine instead.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use std::collections::BTreeMap;
 
@@ -300,6 +300,15 @@ fn cmd_backfill(
         args
     };
 
+    // Fail before spending minutes downloading and measuring, and so that a
+    // missing tag later means exactly that rather than "not in a repository".
+    if !dry_run && !backfill::in_git_repo() {
+        bail!(
+            "not inside a git repository — measurements are recorded against tagged \
+             commits. Run from a clone of {repo}, or pass --dry-run."
+        );
+    }
+
     let releases = backfill::list_releases(&repo, limit)?;
     if releases.is_empty() {
         println!("no releases with downloadable assets found for {repo}");
@@ -364,7 +373,10 @@ fn cmd_backfill(
         // Attach to the tagged commit so the series lands on the real timeline.
         // A shallow clone has no tags, which is a skip rather than an error.
         let Some(sha) = backfill::tag_commit(&rel.tag) else {
-            println!("                 not recorded — tag not present locally");
+            println!(
+                "                 not recorded — tag {} not present locally (try `git fetch --tags`)",
+                rel.tag
+            );
             skipped += 1;
             continue;
         };
