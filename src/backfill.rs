@@ -13,7 +13,7 @@
 //! small.
 
 use anyhow::{Context, Result, bail};
-use asset_picker::AssetPicker;
+use asset_picker::{AssetPicker, Format};
 use serde::Deserialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -164,15 +164,6 @@ fn finish(mut v: Vec<Release>, limit: usize) -> Vec<Release> {
     v
 }
 
-/// Best asset for the current platform, or `None` if nothing matches.
-///
-/// Delegates to `asset-picker`, which is mise's asset-selection logic extracted
-/// into a crate. The heuristic this replaced was a few dozen lines of substring
-/// matching, and it got platform detection wrong in ways that still produce a
-/// binary which *runs* — measuring the wrong thing and reporting numbers that
-/// look entirely real. mise's tables encode years of accumulated knowledge
-/// about how projects actually name their releases; rediscovering any of it one
-/// bad measurement at a time would have been foolish.
 /// The libc to select assets for.
 ///
 /// Passing `None` makes the picker assume gnu on Linux, which is right for the
@@ -197,6 +188,26 @@ fn host_libc() -> Option<String> {
 fn is_usable_subject(name: &str) -> bool {
     let n = name.to_lowercase();
 
+    // Checksums and signatures describe a release rather than being one. The
+    // picker scores them positively — verified: given only
+    // `tool-x86_64-unknown-linux-gnu.tar.gz.sha256` it returns exactly that —
+    // because mise consumes sidecars deliberately elsewhere. Here they are
+    // never a subject.
+    const SIDECAR: [&str; 9] = [
+        ".sha256",
+        ".sha512",
+        ".sha1",
+        ".md5",
+        ".asc",
+        ".sig",
+        ".pem",
+        ".sbom",
+        ".intoto.jsonl",
+    ];
+    if SIDECAR.iter().any(|e| n.ends_with(e)) {
+        return false;
+    }
+
     // Source drops contain no executable. Whole-word so `resource-cli` survives.
     let stem = n.rsplit('/').next().unwrap_or(&n);
     if ["source", "sources", "src"].iter().any(|t| {
@@ -206,10 +217,12 @@ fn is_usable_subject(name: &str) -> bool {
         return false;
     }
 
-    // Only formats `fetch_binary` can actually open.
+    // Only formats `fetch_binary` can actually open. Both sides ask `Format`
+    // rather than matching suffixes independently, so a name like `.vsix` —
+    // which is a zip — cannot pass the filter and then be rejected at unpack.
     matches!(
-        asset_picker::Format::from_file_name(&n),
-        asset_picker::Format::Tar | asset_picker::Format::Zip | asset_picker::Format::Raw
+        Format::from_file_name(&n),
+        Format::Tar | Format::Zip | Format::Raw
     )
 }
 
@@ -262,10 +275,12 @@ pub fn fetch_binary(asset: &Asset, bin_name: &str, dir: &Path) -> Result<PathBuf
 
     curl(&asset.url, Some(&archive), true)?;
 
-    let n = asset.name.to_lowercase();
-    if TAR_SUFFIXES.iter().any(|e| n.ends_with(e)) {
+    // Same classifier the candidate filter used, so the two can never disagree.
+    // Matching suffixes independently in each place is what let `.vsix` pass the
+    // filter as a zip and then be rejected here as unknown.
+    match Format::from_file_name(&asset.name) {
         // `tar -xf` sniffs the compression, so gz/xz/bz2/zst all work here.
-        run(
+        Format::Tar => run(
             Command::new("tar").args([
                 "-xf",
                 &archive.to_string_lossy(),
@@ -273,9 +288,8 @@ pub fn fetch_binary(asset: &Asset, bin_name: &str, dir: &Path) -> Result<PathBuf
                 &dir.to_string_lossy(),
             ]),
             "tar",
-        )?;
-    } else if n.ends_with(".zip") {
-        run(
+        )?,
+        Format::Zip => run(
             Command::new("unzip").args([
                 "-oq",
                 &archive.to_string_lossy(),
@@ -283,41 +297,23 @@ pub fn fetch_binary(asset: &Asset, bin_name: &str, dir: &Path) -> Result<PathBuf
                 &dir.to_string_lossy(),
             ]),
             "unzip",
-        )?;
-    } else if is_bare_binary(&n) {
+        )?,
         // The download is the artefact.
-        make_executable(&archive)?;
-        return Ok(archive);
-    } else {
-        // Anything else would previously have been *executed* as if it were a
-        // binary. Skipping loudly beats benchmarking a tarball.
-        bail!("unsupported archive format: {}", asset.name);
+        Format::Raw => {
+            make_executable(&archive)?;
+            return Ok(archive);
+        }
+        // Unreachable via `pick_asset`, which filters these out, but a caller
+        // could hand one over directly. Skipping loudly beats executing a
+        // tarball as if it were a program, which is what the old suffix chain
+        // did for anything it did not recognise.
+        other => bail!("cannot unpack {} ({other:?})", asset.name),
     }
 
     let found = find_binary(dir, bin_name)
         .with_context(|| format!("no `{bin_name}` inside {}", asset.name))?;
     make_executable(&found)?;
     Ok(found)
-}
-
-/// Archive suffixes `tar` can unpack unaided.
-const TAR_SUFFIXES: [&str; 7] = [
-    ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tar.zst", ".tar",
-];
-
-/// Is this plausibly a bare executable rather than an archive?
-///
-/// Conservative on purpose: an unrecognised extension is treated as an archive
-/// we cannot open, not as something safe to run.
-fn is_bare_binary(lower_name: &str) -> bool {
-    if lower_name.ends_with(".exe") {
-        return true;
-    }
-    // No extension at all — the usual shape for a raw unix binary.
-    !Path::new(lower_name)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .is_some_and(|f| f.contains('.'))
 }
 
 /// Reduce an untrusted name to a single safe path component.
@@ -515,6 +511,28 @@ mod tests {
         // Whole-word, so a tool whose name merely contains "src" survives.
         assert!(is_usable_subject("resource-cli-linux-x86_64.tar.gz"));
         assert!(is_usable_subject("srcery-linux-amd64.tar.gz"));
+    }
+
+    #[test]
+    fn sidecars_are_never_subjects() {
+        // Verified against the real picker: given only the .sha256 it returns
+        // exactly that, so the filter has to catch them.
+        for n in [
+            "tool-x86_64-unknown-linux-gnu.tar.gz.sha256",
+            "tool-x86_64-unknown-linux-gnu.tar.gz.asc",
+            "tool.sig",
+            "tool.intoto.jsonl",
+        ] {
+            assert!(!is_usable_subject(n), "{n} should be rejected");
+        }
+    }
+
+    /// The filter and `fetch_binary` must classify identically, or an asset
+    /// passes here and is refused at unpack.
+    #[test]
+    fn vsix_is_a_zip_to_both_sides() {
+        assert!(is_usable_subject("tool-linux-x86_64.vsix"));
+        assert_eq!(Format::from_file_name("tool.vsix"), Format::Zip);
     }
 
     #[test]
