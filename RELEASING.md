@@ -35,9 +35,8 @@ gh workflow run release.yml -f tag=v0.1.0
 ```
 
 Builds all eight targets, attaches them with `--clobber`, and publishes the release. It is
-idempotent, and self-sufficient: if the tag or the GitHub release does not exist yet it
-creates them, so this also works for a version that was published to crates.io without ever
-getting a GitHub release.
+idempotent. The tag and the GitHub release must already exist — release-plz creates both, and
+this workflow only rebuilds and reattaches.
 
 The undraft happens only on manual dispatch — when `release-plz.yml` calls the same workflow,
 it publishes the release itself once the assets are in place.
