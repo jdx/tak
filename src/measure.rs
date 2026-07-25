@@ -13,6 +13,7 @@
 //! clock (~1%) but not deterministic, because they move with thread scheduling.
 //! They are recorded, and may be flagged, but must not gate at a tight threshold.
 
+use crate::settings::Settings;
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::process::{Command, Stdio};
@@ -27,6 +28,34 @@ pub struct Plan {
     /// against `tak.toml`'s directory, not the caller's — otherwise the same
     /// benchmark measures different things depending on where you stood.
     pub dir: Option<std::path::PathBuf>,
+    /// Resolved settings. Carried on the plan rather than read from a global so
+    /// a test can measure under a different configuration without touching the
+    /// environment of the whole test binary.
+    pub settings: Settings,
+}
+
+/// A command for running a benchmark subject, with the scrubbed variables
+/// removed.
+///
+/// Every subject spawn goes through here. Under cachegrind the removal is
+/// applied to valgrind itself, which the subject inherits from.
+///
+/// What gets removed is [`Settings::scrubbed_env`] — `env_deny` less
+/// `env_allow`, both declared in `settings.toml`. The default is the forge
+/// tokens, for two reasons. **Determinism**: a CLI that finds a token often
+/// does more with it than without, so a measurement would move depending on
+/// whether CI happened to export one. **Credentials**: `backfill` downloads
+/// release binaries and executes them, and any run that can push notes holds a
+/// repository-write token.
+///
+/// tak's own network calls are unaffected — `backfill` authenticates with
+/// `curl` directly rather than through this path.
+fn subject(bin: &str, settings: &Settings) -> Command {
+    let mut c = Command::new(bin);
+    for key in settings.scrubbed_env() {
+        c.env_remove(key);
+    }
+    c
 }
 
 /// Run once, discarding output, returning elapsed wall time in milliseconds.
@@ -34,9 +63,9 @@ pub struct Plan {
 /// No shell. Spawning a shell adds its own startup cost and variance to every
 /// sample, which for commands in the 10ms range is a large fraction of the
 /// measurement — the same reasoning behind poop's refusal to support one.
-fn time_once(cmd: &[String], dir: Option<&std::path::Path>) -> Result<f64> {
+fn time_once(cmd: &[String], dir: Option<&std::path::Path>, settings: &Settings) -> Result<f64> {
     let (bin, args) = cmd.split_first().context("empty command")?;
-    let mut c = Command::new(bin);
+    let mut c = subject(bin, settings);
     c.args(args).stdout(Stdio::null()).stderr(Stdio::null());
     if let Some(d) = dir {
         c.current_dir(d);
@@ -62,11 +91,11 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
     }
     let dir = plan.dir.as_deref();
     for _ in 0..plan.warmup {
-        time_once(&plan.cmd, dir)?;
+        time_once(&plan.cmd, dir, &plan.settings)?;
     }
     let mut samples = Vec::with_capacity(plan.runs as usize);
     for _ in 0..plan.runs {
-        samples.push(time_once(&plan.cmd, dir)?);
+        samples.push(time_once(&plan.cmd, dir, &plan.settings)?);
     }
     samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
@@ -147,14 +176,18 @@ impl Counted {
 /// the expected state on macOS (no usable Apple Silicon support) and Windows.
 /// Those platforms record timing only, and the CI gate lives on the Linux job.
 /// Locally, a container gets you counters on any host.
-pub fn instructions(cmd: &[String], dir: Option<&std::path::Path>) -> Result<Option<Counted>> {
+pub fn instructions(
+    cmd: &[String],
+    dir: Option<&std::path::Path>,
+    settings: &Settings,
+) -> Result<Option<Counted>> {
     if !valgrind_available() {
         return Ok(None);
     }
 
     let mut samples: Vec<u64> = Vec::with_capacity(COUNTER_RUNS as usize);
     for _ in 0..COUNTER_RUNS {
-        let mut c = Command::new("valgrind");
+        let mut c = subject("valgrind", settings);
         c.args([
             "--tool=cachegrind",
             "--cache-sim=no",
@@ -216,6 +249,49 @@ mod tests {
         assert_eq!(parse_irefs("valgrind: command not found"), None);
     }
 
+    /// What `subject` removes, as configured.
+    fn removals(settings: &Settings) -> Vec<String> {
+        subject("true", settings)
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Construction-level check. The end-to-end proof that a subject cannot see
+    /// the token lives in `tests/subject_env.rs`, which runs the real binary.
+    #[test]
+    fn subject_commands_remove_the_default_denied_variables() {
+        let removed = removals(&Settings::default());
+        for key in Settings::default().scrubbed_env() {
+            assert!(removed.contains(&key.to_string()), "{key} not removed");
+        }
+    }
+
+    /// The removal follows the setting rather than a compiled-in list, which is
+    /// the whole point of routing it through `Settings`.
+    #[test]
+    fn the_removal_follows_the_settings() {
+        let removed = removals(&Settings {
+            env_deny: vec!["CUSTOM_SECRET".into()],
+            env_allow: Vec::new(),
+        });
+        assert!(removed.contains(&"CUSTOM_SECRET".to_string()));
+        assert!(!removed.contains(&"GITHUB_TOKEN".to_string()));
+    }
+
+    /// An allowed variable is not removed, so a subject that genuinely needs
+    /// one can still be measured.
+    #[test]
+    fn an_allowed_variable_survives() {
+        let removed = removals(&Settings {
+            env_deny: vec!["GITHUB_TOKEN".into(), "GH_TOKEN".into()],
+            env_allow: vec!["GITHUB_TOKEN".into()],
+        });
+        assert!(!removed.contains(&"GITHUB_TOKEN".to_string()));
+        assert!(removed.contains(&"GH_TOKEN".to_string()));
+    }
+
     #[test]
     fn zero_runs_is_rejected_not_a_panic() {
         let plan = Plan {
@@ -223,6 +299,7 @@ mod tests {
             warmup: 0,
             runs: 0,
             dir: None,
+            settings: Settings::default(),
         };
         assert!(wall(&plan).is_err());
     }
@@ -234,6 +311,7 @@ mod tests {
             warmup: 1,
             runs: 5,
             dir: None,
+            settings: Settings::default(),
         };
         let m = wall(&plan).unwrap();
         assert!(m["wall_min_ms"] <= m["wall_p50_ms"]);

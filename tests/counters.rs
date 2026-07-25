@@ -10,6 +10,7 @@
 //! normal state on macOS and Windows.
 
 use tak_cli::measure::{self, Plan};
+use tak_cli::settings::Settings;
 
 use tak_cli::measure::valgrind_available;
 
@@ -35,7 +36,7 @@ fn instructions_are_reported_when_valgrind_exists() {
         eprintln!("skipping: valgrind not installed");
         return;
     }
-    let c = measure::instructions(&subject(), None)
+    let c = measure::instructions(&subject(), None, &Settings::default())
         .expect("cachegrind invocation failed")
         .expect("valgrind present but no I refs parsed");
 
@@ -69,7 +70,7 @@ fn instruction_counts_are_deterministic() {
     // across separate invocations too, not just within one.
     let outer: Vec<_> = (0..2)
         .map(|_| {
-            measure::instructions(&cmd, None)
+            measure::instructions(&cmd, None, &Settings::default())
                 .expect("cachegrind invocation failed")
                 .expect("no I refs parsed")
         })
@@ -98,11 +99,15 @@ fn availability_and_failure_are_distinct() {
         // vanish, so this must be an error rather than Ok(None).
         let bogus = vec!["/nonexistent/tak-not-a-real-binary".to_string()];
         assert!(
-            measure::instructions(&bogus, None).is_err(),
+            measure::instructions(&bogus, None, &Settings::default()).is_err(),
             "a failed measurement must not look like a missing valgrind"
         );
     } else {
-        assert!(measure::instructions(&subject(), None).unwrap().is_none());
+        assert!(
+            measure::instructions(&subject(), None, &Settings::default())
+                .unwrap()
+                .is_none()
+        );
     }
 }
 
@@ -113,8 +118,8 @@ fn missing_valgrind_is_not_an_error() {
         eprintln!("skipping: valgrind is installed, cannot test its absence");
         return;
     }
-    let got =
-        measure::instructions(&subject(), None).expect("must not error when valgrind is absent");
+    let got = measure::instructions(&subject(), None, &Settings::default())
+        .expect("must not error when valgrind is absent");
     assert!(got.is_none());
 }
 
@@ -126,6 +131,7 @@ fn wall_clock_works_without_counters() {
         warmup: 1,
         runs: 3,
         dir: None,
+        settings: Settings::default(),
     })
     .expect("wall measurement failed");
 
