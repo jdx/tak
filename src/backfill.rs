@@ -32,6 +32,10 @@ pub struct Release {
     pub published_at: Option<String>,
     #[serde(default)]
     pub prerelease: bool,
+    /// Drafts are visible to authenticated requests and are not published
+    /// artefacts, so benchmarking one would record a version nobody can install.
+    #[serde(default)]
+    pub draft: bool,
     #[serde(default)]
     pub assets: Vec<Asset>,
 }
@@ -116,16 +120,30 @@ pub fn list_releases(repo: &str, limit: usize) -> Result<Vec<Release>> {
         out.extend(
             batch
                 .into_iter()
-                .filter(|r| !r.prerelease && !r.assets.is_empty()),
+                .filter(|r| !r.prerelease && !r.draft && !r.assets.is_empty()),
         );
 
-        if out.len() >= limit || exhausted {
+        if out.len() >= limit {
             break;
+        }
+        if exhausted {
+            return Ok(finish(out, limit));
+        }
+        if page == MAX_PAGES {
+            eprintln!(
+                "warning: stopped after {MAX_PAGES} pages with {} of {limit} releases; \
+                 older releases exist but were not fetched",
+                out.len()
+            );
         }
     }
 
-    out.truncate(limit);
-    Ok(out)
+    Ok(finish(out, limit))
+}
+
+fn finish(mut v: Vec<Release>, limit: usize) -> Vec<Release> {
+    v.truncate(limit);
+    v
 }
 
 /// Does `haystack` contain `token` as a whole word?
@@ -172,10 +190,18 @@ fn score_asset(name: &str, os: &[&str], arch: &[&str]) -> Option<i32> {
     let n = name.to_lowercase();
 
     // Never benchmark checksums, signatures or source archives.
-    const REJECT: [&str; 8] = [
-        ".sha256", ".sha512", ".asc", ".sig", ".pem", ".sbom", "sources", ".deb",
+    const REJECT: [&str; 7] = [
+        ".sha256", ".sha512", ".asc", ".sig", ".pem", ".sbom", ".deb",
     ];
     if REJECT.iter().any(|r| n.contains(r)) {
+        return None;
+    }
+    // Source drops contain no executable. Matched as whole words so a tool
+    // legitimately named e.g. `resource-cli` is not rejected.
+    if ["source", "sources", "src"]
+        .iter()
+        .any(|t| contains_token(&n, t))
+    {
         return None;
     }
     if n.ends_with(".rpm") || n.ends_with(".msi") || n.ends_with(".pkg") {
@@ -236,12 +262,15 @@ fn run(cmd: &mut Command, what: &str) -> Result<()> {
 /// failing here after listing succeeded would skip every release.
 pub fn fetch_binary(asset: &Asset, bin_name: &str, dir: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let archive = dir.join(&asset.name);
+    // Asset names come from the API and are not trusted: `../../x` would escape
+    // the per-release directory and write wherever it liked.
+    let archive = dir.join(safe_component(&asset.name)?);
 
     curl(&asset.url, Some(&archive), true)?;
 
     let n = asset.name.to_lowercase();
-    if n.ends_with(".tar.gz") || n.ends_with(".tgz") || n.ends_with(".tar.xz") {
+    if TAR_SUFFIXES.iter().any(|e| n.ends_with(e)) {
+        // `tar -xf` sniffs the compression, so gz/xz/bz2/zst all work here.
         run(
             Command::new("tar").args([
                 "-xf",
@@ -261,16 +290,76 @@ pub fn fetch_binary(asset: &Asset, bin_name: &str, dir: &Path) -> Result<PathBuf
             ]),
             "unzip",
         )?;
-    } else {
-        // A bare binary: the download is the artefact.
+    } else if is_bare_binary(&n) {
+        // The download is the artefact.
         make_executable(&archive)?;
         return Ok(archive);
+    } else {
+        // Anything else would previously have been *executed* as if it were a
+        // binary. Skipping loudly beats benchmarking a tarball.
+        bail!("unsupported archive format: {}", asset.name);
     }
 
     let found = find_binary(dir, bin_name)
         .with_context(|| format!("no `{bin_name}` inside {}", asset.name))?;
     make_executable(&found)?;
     Ok(found)
+}
+
+/// Archive suffixes `tar` can unpack unaided.
+const TAR_SUFFIXES: [&str; 7] = [
+    ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tar.zst", ".tar",
+];
+
+/// Is this plausibly a bare executable rather than an archive?
+///
+/// Conservative on purpose: an unrecognised extension is treated as an archive
+/// we cannot open, not as something safe to run.
+fn is_bare_binary(lower_name: &str) -> bool {
+    if lower_name.ends_with(".exe") {
+        return true;
+    }
+    // No extension at all — the usual shape for a raw unix binary.
+    !Path::new(lower_name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|f| f.contains('.'))
+}
+
+/// Reduce an untrusted name to a single safe path component.
+///
+/// `Path::join` with a value containing `..` or separators escapes the intended
+/// directory, and both asset names and tags come from the GitHub API.
+fn safe_component(name: &str) -> Result<String> {
+    let base = Path::new(name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+        .with_context(|| format!("unusable name from the API: {name:?}"))?;
+    Ok(base.to_string())
+}
+
+/// A filesystem-safe directory name for a release tag.
+///
+/// Tags may contain `/` (`release/1.0`) and are otherwise arbitrary, so anything
+/// outside a conservative set becomes `_`.
+pub fn safe_dir_name(tag: &str) -> String {
+    let s: String = tag
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = s.trim_matches('.');
+    if trimmed.is_empty() {
+        "release".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn make_executable(p: &Path) -> Result<()> {

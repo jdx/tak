@@ -275,6 +275,15 @@ fn cmd_doctor() -> Result<()> {
     Ok(())
 }
 
+/// Removes the backfill work directory on every exit path, including `?`.
+struct TempDirGuard(std::path::PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
 /// Infer "owner/name" from the `origin` remote.
 fn repo_from_origin() -> Option<String> {
     let out = std::process::Command::new("git")
@@ -285,10 +294,18 @@ fn repo_from_origin() -> Option<String> {
         return None;
     }
     let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    // Handles https://github.com/o/r(.git) and git@github.com:o/r(.git).
-    let tail = url.rsplit_once("github.com").map(|(_, t)| t)?;
-    let slug = tail.trim_start_matches([':', '/']).trim_end_matches(".git");
-    (slug.matches('/').count() == 1).then(|| slug.to_string())
+    // Match the host exactly. Splitting on the substring "github.com" would
+    // accept `git@mygithub.com:o/r` and then query the wrong repository.
+    let rest = [
+        "https://github.com/",
+        "http://github.com/",
+        "git@github.com:",
+        "ssh://git@github.com/",
+    ]
+    .iter()
+    .find_map(|p| url.strip_prefix(p))?;
+    let slug = rest.trim_end_matches('/').trim_end_matches(".git");
+    (slug.matches('/').count() == 1 && !slug.is_empty()).then(|| slug.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -328,6 +345,9 @@ fn cmd_backfill(
     println!("{} release(s) from {repo}\n", releases.len());
 
     let workdir = std::env::temp_dir().join(format!("tak-backfill-{}", std::process::id()));
+    // Downloads can be hundreds of megabytes; a `?` partway through the loop
+    // must not leave them behind.
+    let _cleanup = TempDirGuard(workdir.clone());
     let mut recorded = 0usize;
     let mut skipped = 0usize;
 
@@ -338,7 +358,7 @@ fn cmd_backfill(
             continue;
         };
 
-        let dir = workdir.join(&rel.tag);
+        let dir = workdir.join(backfill::safe_dir_name(&rel.tag));
         let path = match backfill::fetch_binary(asset, &bin, &dir) {
             Ok(p) => p,
             Err(e) => {
@@ -413,8 +433,6 @@ fn cmd_backfill(
         notes::append(&sha, &[rec])?;
         recorded += 1;
     }
-
-    std::fs::remove_dir_all(&workdir).ok();
 
     if dry_run {
         println!("\n  dry run — nothing written");
