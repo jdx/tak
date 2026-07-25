@@ -163,11 +163,12 @@ fn cmd_run(
     no_counters: bool,
     record_it: bool,
     cmd: Vec<String>,
+    settings: &Settings,
 ) -> Result<()> {
     // An explicit command always wins; tak.toml is only consulted when none is
     // given, so ad-hoc measurement never depends on repository state.
     if cmd.is_empty() {
-        return run_declared(bench, runs, warmup, no_counters, record_it);
+        return run_declared(bench, runs, warmup, no_counters, record_it, settings);
     }
     let bench = bench.unwrap_or_else(|| "default".to_string());
     let plan = Plan {
@@ -175,6 +176,7 @@ fn cmd_run(
         warmup: warmup.unwrap_or(DEFAULT_WARMUP),
         runs: runs.unwrap_or(DEFAULT_RUNS),
         dir: None,
+        settings: settings.clone(),
     };
     let rec = measure_and_report(&bench, &plan, no_counters)?;
     if record_it {
@@ -190,6 +192,7 @@ fn run_declared(
     warmup: Option<u32>,
     no_counters: bool,
     record_it: bool,
+    settings: &Settings,
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let Some((path, cfg)) = Config::find(&cwd)? else {
@@ -240,6 +243,7 @@ fn run_declared(
             warmup: warmup.unwrap_or_else(|| b.warmup()),
             runs: runs.unwrap_or_else(|| b.runs()),
             dir: root.clone(),
+            settings: settings.clone(),
         };
         records.push(measure_and_report(&name, &plan, no_counters)?);
     }
@@ -274,7 +278,7 @@ fn measure_and_report(bench: &str, plan: &Plan, no_counters: bool) -> Result<Rec
     let mut metrics: BTreeMap<String, f64> = measure::wall(plan)?;
 
     if !no_counters {
-        match measure::instructions(cmd, plan.dir.as_deref()) {
+        match measure::instructions(cmd, plan.dir.as_deref(), &plan.settings) {
             Ok(Some(c)) => {
                 metrics.insert("instructions".into(), c.min as f64);
                 if c.is_suspect() {
@@ -433,6 +437,7 @@ fn cmd_backfill(
     limit: usize,
     runs: u32,
     dry_run: bool,
+    settings: &Settings,
 ) -> Result<()> {
     let repo = repo
         .or_else(repo_from_origin)
@@ -493,6 +498,7 @@ fn cmd_backfill(
             runs,
             // Release binaries are extracted to absolute paths.
             dir: None,
+            settings: settings.clone(),
         };
         let mut metrics = match measure::wall(&plan) {
             Ok(m) => m,
@@ -503,7 +509,7 @@ fn cmd_backfill(
             }
         };
         let mut suspect = None;
-        if let Ok(Some(c)) = measure::instructions(&cmd, None) {
+        if let Ok(Some(c)) = measure::instructions(&cmd, None, settings) {
             metrics.insert("instructions".into(), c.min as f64);
             if c.is_suspect() {
                 suspect = Some(c.spread_pct());
@@ -631,7 +637,7 @@ fn main() -> Result<()> {
             no_counters,
             record,
             cmd,
-        } => cmd_run(bench, runs, warmup, no_counters, record, cmd),
+        } => cmd_run(bench, runs, warmup, no_counters, record, cmd, &resolved),
         Cmd::History { rev, remote } => cmd_history(rev, remote),
         Cmd::Push { remote } => {
             notes::push(&remote)?;
@@ -654,7 +660,7 @@ fn main() -> Result<()> {
             limit,
             runs,
             dry_run,
-        } => cmd_backfill(repo, bin, args, bench, limit, runs, dry_run),
+        } => cmd_backfill(repo, bin, args, bench, limit, runs, dry_run, &resolved),
         Cmd::Doctor => cmd_doctor(),
         Cmd::Settings { docs } => cmd_settings(&resolved, docs),
     }
