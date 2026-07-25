@@ -89,7 +89,11 @@ commit_parsers = [
 ]
 protect_breaking_commits = false
 filter_commits = false
-tag_pattern = '^v\d+\.\d+\.\d+$'
+# Matches both the bare `vX.Y.Z` that tak-cli takes and the package-prefixed
+# `asset-picker-vX.Y.Z` that release-plz gives every other workspace crate.
+# Accepting only the bare form made git-cliff ignore the library's release tag
+# and scope its changelog across the wrong boundaries.
+tag_pattern = '^([a-z][a-z0-9-]*-)?v\d+\.\d+\.\d+$'
 topo_order = false
 sort_commits = "oldest"
 
