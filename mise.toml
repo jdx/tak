@@ -1,5 +1,46 @@
 [tools]
 # Used by the enhance-release job in .github/workflows/release-plz.yml to
-# rewrite the generated release body. Not needed to build or test tak — the
-# Rust toolchain comes from rust-toolchain in CI and rustup locally.
+# rewrite the generated release body. Not needed to build or test tak, so CI's
+# build jobs run mise-action with `install: false` rather than downloading it
+# on every run. The Rust toolchain comes from rust-toolchain in CI, rustup
+# locally — mise wraps the commands, it does not supply the compiler.
 communique = "latest"
+
+[tasks.build]
+description = "Build the debug binary"
+run = "cargo build"
+
+[tasks.test]
+description = "Run the test suite, including the cachegrind integration tests"
+# --all-targets so tests/counters.rs is included. Without valgrind installed it
+# skips rather than fails, which is the normal state on macOS and Windows.
+run = "cargo test --all-targets"
+
+[tasks.lint]
+description = "Check formatting and run clippy"
+depends = ["lint:fmt", "lint:clippy"]
+
+[tasks."lint:fmt"]
+description = "Check formatting"
+run = "cargo fmt --check"
+
+[tasks."lint:clippy"]
+description = "Run clippy, warnings as errors"
+run = "cargo clippy --all-targets -- -D warnings"
+
+[tasks.lint-fix]
+description = "Auto-fix formatting and the clippy lints that can be fixed"
+run = [
+    "cargo fmt",
+    "cargo clippy --all-targets --fix --allow-dirty --allow-staged -- -D warnings",
+]
+
+[tasks.ci]
+description = "Everything CI runs"
+depends = ["build", "test", "lint"]
+
+[tasks.docker]
+description = "Build the container image that carries valgrind"
+# Context is the repository root, not docker/ — the build stage needs Cargo.toml
+# and the sources.
+run = "docker build -f docker/Dockerfile -t tak ."

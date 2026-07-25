@@ -27,13 +27,19 @@ Two consequences that come up constantly:
 
 ## Build & test
 
+Go through mise rather than calling cargo directly, so that a laptop and a CI runner invoke
+the same commands — the same reason `tak.toml` exists for benchmarks.
+
 ```bash
-cargo test --all-targets       # unit + tests/counters.rs
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+mise run build        # cargo build
+mise run test         # cargo test --all-targets, including tests/counters.rs
+mise run lint         # fmt check + clippy, warnings as errors
+mise run lint-fix     # auto-fix what can be auto-fixed
+mise run ci           # build + test + lint, everything CI runs
 ```
 
-CI runs exactly those three on Linux, plus `cargo test --all-targets` on macOS.
+`mise run lint:fmt` and `mise run lint:clippy` are separately runnable. `mise tasks` lists
+everything.
 
 **Instruction counting needs valgrind.** Without it `measure::instructions` returns
 `Ok(None)` and every counter test skips — which is how the cachegrind call once shipped having
@@ -44,14 +50,16 @@ measurement path, run it somewhere valgrind exists:
 sudo apt-get install -y valgrind
 ```
 
-No usable valgrind exists on Apple Silicon or Windows. On those hosts use the container:
+No usable valgrind exists on Apple Silicon or Windows. On those hosts, `mise run docker` builds
+an image that carries it:
 
 ```bash
-docker build -f docker/Dockerfile -t tak . && docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/w" -w /w tak run --bench startup -- ./mycli --help
+mise run docker
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/w" -w /w tak run --bench startup -- ./mycli --help
 ```
 
-The build context is the repository root, not `docker/`. Pass `--user`: tak spawns the subject
-under measurement, so it inherits the container's privileges over your mounted checkout.
+Pass `--user`: tak spawns the subject under measurement, so it inherits the container's
+privileges over your mounted checkout.
 
 `tak doctor` reports what is actually available — git repo, valgrind, notes fetch, runner class.
 
@@ -133,10 +141,17 @@ Published crates carry source and licence only — repository furniture is liste
 
 ## GitHub interactions
 
+Opening pull requests and discussions is fine. Issues are disabled on this repository, as on
+every jdx project — discussions are where that traffic goes.
+
 PR titles follow the same conventional-commit format as commits. Do not prefix them with agent
 or tool labels such as `[claude]` or `[codex]`.
 
 When posting comments on PRs or discussions, note that the comment was AI-generated.
 
-The README asks people not to file issues or open pull requests. Respect that framing in
-anything user-facing you write — no roadmap promises, no stability guarantees, no marketing.
+## Tone
+
+The README opens with a large box saying this is a half-baked experiment with no support, no
+stability guarantees and no roadmap. Match that in anything user-facing — release notes, docs,
+PR descriptions. No marketing language, no upgrade recommendations, no implying production
+readiness. `communique.toml` carries the same instruction for generated release notes.
