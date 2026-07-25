@@ -9,6 +9,17 @@ description = "Benchmark command-line programs and track their performance over 
 keywords = ["benchmark", "performance", "cli", "git-notes"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
+# Published crates carry the source and its licence, not the machinery used to
+# develop and ship it. Everything below is repository furniture.
+exclude = [
+    ".github/",
+    ".gitignore",
+    "docker/",
+    "cliff.toml",
+    "release-plz.toml",
+    "renovate.json",
+    "RELEASING.md",
+]
 license = "MIT"
 repository = "https://github.com/jdx/tak"
 
