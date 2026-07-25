@@ -2,10 +2,11 @@
 //!
 //! Experimental. See README.md, which asks you to use hyperfine instead.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use std::collections::BTreeMap;
 
+use tak_cli::backfill;
 use tak_cli::measure::{self, Plan};
 use tak_cli::notes;
 use tak_cli::record::{Record, SCHEMA_VERSION};
@@ -58,6 +59,36 @@ enum Cmd {
     Init {
         #[arg(long, default_value = "origin")]
         remote: String,
+    },
+    /// Benchmark published release binaries to bootstrap history.
+    ///
+    /// A new adopter's first chart is empty. Rather than rebuilding a project at
+    /// a hundred historical commits, download what it already published.
+    Backfill {
+        /// Repository to pull releases from, as "owner/name". Defaults to the
+        /// `origin` remote of the current repository.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Executable name to look for inside each release archive. Defaults to
+        /// the repository name.
+        #[arg(long)]
+        bin: Option<String>,
+        /// Arguments passed to the downloaded binary, after `--`.
+        /// Defaults to `--version`, which every CLI answers cheaply.
+        #[arg(last = true)]
+        args: Vec<String>,
+        /// Name to record measurements under.
+        #[arg(long, default_value = "release")]
+        bench: String,
+        /// Most recent releases to measure.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Timed runs per release.
+        #[arg(long, default_value_t = 10)]
+        runs: u32,
+        /// Measure but do not write to refs/notes/tak.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Diagnose the git-notes plumbing.
     Doctor,
@@ -122,15 +153,29 @@ fn cmd_run(
     let mut metrics: BTreeMap<String, f64> = measure::wall(&plan)?;
 
     if !no_counters {
-        match measure::instructions(&cmd)? {
-            Some(n) => {
-                metrics.insert("instructions".into(), n as f64);
+        match measure::instructions(&cmd) {
+            Ok(Some(c)) => {
+                metrics.insert("instructions".into(), c.min as f64);
+                if c.is_suspect() {
+                    eprintln!(
+                        "warning: instruction count varied {:.2}% across {} runs. \
+                         The metric is deterministic, so this means the command \
+                         itself does environment-dependent work (an update check, \
+                         a cache it populates on first run, DNS). Its counts are \
+                         not a usable gate until that is removed.",
+                        c.spread_pct(),
+                        c.runs
+                    );
+                }
             }
-            None => eprintln!(
+            Ok(None) => eprintln!(
                 "note: valgrind not found — recording timing only. \
                  Instruction counts are the only gate-able metric; on macOS/Windows \
                  run tak in a Linux container to get them."
             ),
+            // Valgrind exists but the measurement failed. Say so rather than
+            // blaming a missing install, and keep the timing we did collect.
+            Err(e) => eprintln!("warning: instruction counting failed: {e}"),
         }
     }
 
@@ -233,6 +278,177 @@ fn cmd_doctor() -> Result<()> {
     Ok(())
 }
 
+/// Removes the backfill work directory on every exit path, including `?`.
+struct TempDirGuard(std::path::PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+/// Infer "owner/name" from the `origin` remote.
+fn repo_from_origin() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // Match the host exactly. Splitting on the substring "github.com" would
+    // accept `git@mygithub.com:o/r` and then query the wrong repository.
+    let rest = [
+        "https://github.com/",
+        "http://github.com/",
+        "git@github.com:",
+        "ssh://git@github.com/",
+    ]
+    .iter()
+    .find_map(|p| url.strip_prefix(p))?;
+    let slug = rest.trim_end_matches('/').trim_end_matches(".git");
+    (slug.matches('/').count() == 1 && !slug.is_empty()).then(|| slug.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_backfill(
+    repo: Option<String>,
+    bin: Option<String>,
+    args: Vec<String>,
+    bench: String,
+    limit: usize,
+    runs: u32,
+    dry_run: bool,
+) -> Result<()> {
+    let repo = repo
+        .or_else(repo_from_origin)
+        .context("could not infer the repository — pass --repo owner/name")?;
+    let bin = bin.unwrap_or_else(|| repo.rsplit('/').next().unwrap_or(&repo).to_string());
+    let args = if args.is_empty() {
+        vec!["--version".to_string()]
+    } else {
+        args
+    };
+
+    // Fail before spending minutes downloading and measuring, and so that a
+    // missing tag later means exactly that rather than "not in a repository".
+    if !dry_run && !backfill::in_git_repo() {
+        bail!(
+            "not inside a git repository — measurements are recorded against tagged \
+             commits. Run from a clone of {repo}, or pass --dry-run."
+        );
+    }
+
+    let releases = backfill::list_releases(&repo, limit)?;
+    if releases.is_empty() {
+        println!("no releases with downloadable assets found for {repo}");
+        return Ok(());
+    }
+    println!("{} release(s) from {repo}\n", releases.len());
+
+    let workdir = std::env::temp_dir().join(format!("tak-backfill-{}", std::process::id()));
+    // Downloads can be hundreds of megabytes; a `?` partway through the loop
+    // must not leave them behind.
+    let _cleanup = TempDirGuard(workdir.clone());
+    let mut recorded = 0usize;
+    let mut skipped = 0usize;
+
+    for (i, rel) in releases.iter().enumerate() {
+        let Some(asset) = backfill::pick_asset(&rel.assets) else {
+            println!("  {:<14} skipped — no asset for this platform", rel.tag);
+            skipped += 1;
+            continue;
+        };
+
+        let dir = workdir.join(backfill::release_dir_name(i, &rel.tag));
+        let path = match backfill::fetch_binary(asset, &bin, &dir) {
+            Ok(p) => p,
+            Err(e) => {
+                println!("  {:<14} skipped — {e}", rel.tag);
+                skipped += 1;
+                continue;
+            }
+        };
+
+        let mut cmd = vec![path.to_string_lossy().to_string()];
+        cmd.extend(args.iter().cloned());
+
+        let plan = Plan {
+            cmd: cmd.clone(),
+            warmup: 2,
+            runs,
+        };
+        let mut metrics = match measure::wall(&plan) {
+            Ok(m) => m,
+            Err(e) => {
+                println!("  {:<14} skipped — {e}", rel.tag);
+                skipped += 1;
+                continue;
+            }
+        };
+        let mut suspect = None;
+        if let Ok(Some(c)) = measure::instructions(&cmd) {
+            metrics.insert("instructions".into(), c.min as f64);
+            if c.is_suspect() {
+                suspect = Some(c.spread_pct());
+            }
+        }
+
+        let ins = metrics
+            .get("instructions")
+            .map(|v| format!("{v:>14.0}"))
+            .unwrap_or_else(|| format!("{:>14}", "-"));
+        println!(
+            "  {:<14} wall_min {:>8.2}ms   instructions {ins}{}",
+            rel.tag,
+            metrics["wall_min_ms"],
+            suspect
+                .map(|p| format!("   ⚠ varied {p:.1}%"))
+                .unwrap_or_default()
+        );
+
+        if dry_run {
+            continue;
+        }
+
+        // Attach to the tagged commit so the series lands on the real timeline.
+        // A shallow clone has no tags, which is a skip rather than an error.
+        let Some(sha) = backfill::tag_commit(&rel.tag) else {
+            println!(
+                "                 not recorded — tag {} not present locally (try `git fetch --tags`)",
+                rel.tag
+            );
+            skipped += 1;
+            continue;
+        };
+
+        let rec = Record {
+            v: SCHEMA_VERSION,
+            bench: bench.clone(),
+            tool: bin.clone(),
+            version: Some(backfill::version_of(&rel.tag).to_string()),
+            runner: runner_class(),
+            // The release's own date, not now: this is when the code existed.
+            ts: rel.published_at.clone().unwrap_or_else(now_rfc3339),
+            metrics,
+        };
+        notes::append(&sha, &[rec])?;
+        recorded += 1;
+    }
+
+    if dry_run {
+        println!("\n  dry run — nothing written");
+    } else {
+        println!(
+            "\n  recorded {recorded}, skipped {skipped} → {}",
+            notes::NOTES_REF
+        );
+        println!("  push with: tak push");
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Run {
@@ -257,6 +473,15 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Cmd::Backfill {
+            repo,
+            bin,
+            args,
+            bench,
+            limit,
+            runs,
+            dry_run,
+        } => cmd_backfill(repo, bin, args, bench, limit, runs, dry_run),
         Cmd::Doctor => cmd_doctor(),
     }
 }

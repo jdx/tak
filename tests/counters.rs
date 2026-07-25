@@ -9,19 +9,9 @@
 //! Every test skips cleanly when valgrind is unavailable, because that is the
 //! normal state on macOS and Windows.
 
-use std::process::{Command, Stdio};
-
 use tak_cli::measure::{self, Plan};
 
-fn valgrind_available() -> bool {
-    Command::new("valgrind")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
+use tak_cli::measure::valgrind_available;
 
 /// A command that exists on the host and does a trivial, fixed amount of work.
 ///
@@ -45,13 +35,22 @@ fn instructions_are_reported_when_valgrind_exists() {
         eprintln!("skipping: valgrind not installed");
         return;
     }
-    let n = measure::instructions(&subject())
+    let c = measure::instructions(&subject())
         .expect("cachegrind invocation failed")
         .expect("valgrind present but no I refs parsed");
 
     // A dynamically linked process cannot retire a trivially small number of
     // instructions; anything tiny means we parsed the wrong thing.
-    assert!(n > 10_000, "implausibly low instruction count: {n}");
+    assert!(
+        c.min > 10_000,
+        "implausibly low instruction count: {}",
+        c.min
+    );
+    assert!(c.max >= c.min);
+    assert!(
+        c.runs >= 2,
+        "a single sample cannot detect a varying subject"
+    );
 }
 
 /// The claim the CI gate depends on: repeated runs of an identical command
@@ -66,7 +65,9 @@ fn instruction_counts_are_deterministic() {
         return;
     }
     let cmd = subject();
-    let runs: Vec<u64> = (0..3)
+    // `instructions` already samples repeatedly; doing it again covers variation
+    // across separate invocations too, not just within one.
+    let outer: Vec<_> = (0..2)
         .map(|_| {
             measure::instructions(&cmd)
                 .expect("cachegrind invocation failed")
@@ -74,15 +75,35 @@ fn instruction_counts_are_deterministic() {
         })
         .collect();
 
-    let min = *runs.iter().min().unwrap();
-    let max = *runs.iter().max().unwrap();
+    let min = outer.iter().map(|c| c.min).min().unwrap();
+    let max = outer.iter().map(|c| c.max).max().unwrap();
     let spread = (max - min) as f64 / min as f64 * 100.0;
 
     assert!(
         spread < 0.1,
-        "instruction counts varied by {spread:.4}% across {runs:?} — \
-         the deterministic-gate premise does not hold on this platform"
+        "instruction counts varied by {spread:.4}% — the deterministic-gate \
+         premise does not hold on this platform"
     );
+    // /bin/echo is hermetic, so nothing here should look suspect.
+    assert!(outer.iter().all(|c| !c.is_suspect()));
+}
+
+/// The two "no counters" outcomes must stay distinguishable: a missing valgrind
+/// is `Ok(None)`, while valgrind failing mid-measurement is an error. Reporting
+/// the latter as the former sends people installing what they already have.
+#[test]
+fn availability_and_failure_are_distinct() {
+    if valgrind_available() {
+        // A command that cannot be spawned makes cachegrind fail rather than
+        // vanish, so this must be an error rather than Ok(None).
+        let bogus = vec!["/nonexistent/tak-not-a-real-binary".to_string()];
+        assert!(
+            measure::instructions(&bogus).is_err(),
+            "a failed measurement must not look like a missing valgrind"
+        );
+    } else {
+        assert!(measure::instructions(&subject()).unwrap().is_none());
+    }
 }
 
 /// Absence of valgrind must degrade to timing-only, never fail the run.

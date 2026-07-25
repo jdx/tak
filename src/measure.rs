@@ -13,7 +13,7 @@
 //! clock (~1%) but not deterministic, because they move with thread scheduling.
 //! They are recorded, and may be flagged, but must not gate at a tight threshold.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::process::{Command, Stdio};
 use std::time::Instant;
@@ -72,38 +72,108 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
     ]))
 }
 
-/// Instruction count via `valgrind --tool=cachegrind`.
+/// Is cachegrind usable on this machine?
+///
+/// Exposed so callers can tell "no counters because valgrind is missing" from
+/// "no counters because the measurement failed" — two problems with entirely
+/// different fixes.
+pub fn valgrind_available() -> bool {
+    Command::new("valgrind")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Repeats of the cachegrind run. Three is enough to catch a bimodal subject
+/// without tripling the cost of a measurement that is already ~50x slowed.
+const COUNTER_RUNS: u32 = 3;
+
+/// A subject varying by more than this is doing environment-dependent work, and
+/// its instruction count is not a usable gate. Well above the ~0.005% observed
+/// for a genuinely hermetic command, far below the 16% seen from one that
+/// touches the network.
+const SPREAD_WARN_PCT: f64 = 0.5;
+
+/// Instruction counts from repeated cachegrind runs.
+#[derive(Debug, Clone, Copy)]
+pub struct Counted {
+    pub min: u64,
+    pub max: u64,
+    pub runs: u32,
+}
+
+impl Counted {
+    /// Relative spread across runs, as a percentage of the minimum.
+    pub fn spread_pct(&self) -> f64 {
+        if self.min == 0 {
+            return 0.0;
+        }
+        (self.max - self.min) as f64 / self.min as f64 * 100.0
+    }
+
+    /// Whether this subject looks non-hermetic.
+    ///
+    /// The metric is deterministic; the program being measured need not be. A
+    /// CLI that checks for updates, reads a cache it may have just created, or
+    /// resolves DNS retires a different number of instructions depending on
+    /// conditions that have nothing to do with the code under test.
+    pub fn is_suspect(&self) -> bool {
+        self.spread_pct() > SPREAD_WARN_PCT
+    }
+}
+
+/// Instruction count via `valgrind --tool=cachegrind`, repeated.
+///
+/// Reports the **minimum**, for the same reason wall clock does: the extra work
+/// a subject sometimes performs is one-sided. A run that consults the network or
+/// populates a cache can only retire *more* instructions than the quiet path,
+/// never fewer, so the floor is the stable estimator.
 ///
 /// Returns `Ok(None)` when valgrind is unavailable rather than failing: this is
 /// the expected state on macOS (no usable Apple Silicon support) and Windows.
 /// Those platforms record timing only, and the CI gate lives on the Linux job.
 /// Locally, a container gets you counters on any host.
-pub fn instructions(cmd: &[String]) -> Result<Option<u64>> {
-    if Command::new("valgrind")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_err()
-    {
+pub fn instructions(cmd: &[String]) -> Result<Option<Counted>> {
+    if !valgrind_available() {
         return Ok(None);
     }
 
-    let out = Command::new("valgrind")
-        .args([
-            "--tool=cachegrind",
-            "--cache-sim=no",
-            "--branch-sim=no",
-            "--cachegrind-out-file=/dev/null",
-        ])
-        .args(cmd)
-        .stdout(Stdio::null())
-        .output()
-        .context("failed to run valgrind")?;
+    let mut samples: Vec<u64> = Vec::with_capacity(COUNTER_RUNS as usize);
+    for _ in 0..COUNTER_RUNS {
+        let out = Command::new("valgrind")
+            .args([
+                "--tool=cachegrind",
+                "--cache-sim=no",
+                "--branch-sim=no",
+                "--cachegrind-out-file=/dev/null",
+            ])
+            .args(cmd)
+            .stdout(Stdio::null())
+            .output()
+            .context("failed to run valgrind")?;
 
-    // cachegrind writes its summary to stderr as e.g. "I refs:  48,349,132".
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    Ok(parse_irefs(&stderr))
+        // cachegrind writes its summary to stderr as e.g. "I refs:  48,349,132".
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        match parse_irefs(&stderr) {
+            Some(n) => samples.push(n),
+            // Valgrind is installed but produced no summary — a real failure,
+            // not the same thing as valgrind being absent. Reporting it as
+            // absent sends people off installing something they already have.
+            None => bail!(
+                "valgrind ran but emitted no `I refs` summary: {}",
+                stderr.lines().last().unwrap_or("(no output)").trim()
+            ),
+        }
+    }
+
+    Ok(Some(Counted {
+        min: *samples.iter().min().expect("COUNTER_RUNS > 0"),
+        max: *samples.iter().max().expect("COUNTER_RUNS > 0"),
+        runs: COUNTER_RUNS,
+    }))
 }
 
 /// Extract the `I refs:` count from cachegrind's stderr summary.

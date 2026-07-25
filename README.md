@@ -95,7 +95,7 @@ Measuring and storing work. Nothing reads the data back yet.
 - [x] instruction counts via cachegrind, degrading to timing-only where absent
 - [x] `refs/notes/tak` storage — `run --record`, `push`, `history`, `init`
 - [x] concurrent CI writers merge via `cat_sort_uniq`
-- [ ] `tak backfill --releases` — benchmark published release binaries to bootstrap history
+- [x] `tak backfill` — benchmark published release binaries to bootstrap history
 - [ ] `tak compare <ref>` — interleaved A/B against another revision
 - [ ] `bench.toml`
 - [ ] PR reporting
