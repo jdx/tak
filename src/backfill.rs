@@ -164,6 +164,16 @@ fn finish(mut v: Vec<Release>, limit: usize) -> Vec<Release> {
     v
 }
 
+/// Whether the picker's tables actually cover this host.
+///
+/// Kept in step with `asset_picker`'s own OS and arch tables; anything outside
+/// them leaves its token list empty, which disables the corresponding filter
+/// rather than rejecting.
+fn host_is_recognised() -> bool {
+    matches!(std::env::consts::OS, "linux" | "macos" | "windows")
+        && matches!(std::env::consts::ARCH, "x86_64" | "aarch64")
+}
+
 /// The libc to select assets for.
 ///
 /// Passing `None` makes the picker assume gnu on Linux, which is right for the
@@ -252,6 +262,15 @@ fn is_usable_subject(name: &str) -> bool {
 const TAR_NEEDS_RARE_CODEC: [&str; 4] = [".tar.br", ".tbr", ".tar.lz4", ".tlz4"];
 
 pub fn pick_asset(assets: &[Asset]) -> Option<&Asset> {
+    // The picker's platform tables cover the mainstream targets and skip the
+    // OS or arch filter entirely when it does not recognise one — which on
+    // FreeBSD or riscv64 would let a linux-x86_64 tarball match a machine that
+    // cannot run it. Refusing to guess is the right answer for a tool whose
+    // whole purpose is trustworthy numbers.
+    if !host_is_recognised() {
+        return None;
+    }
+
     let names: Vec<String> = assets
         .iter()
         .map(|a| a.name.clone())
@@ -616,6 +635,23 @@ mod tests {
                 pick_asset(&assets).map(|a| a.name.as_str()),
                 Some("tool-x86_64-unknown-linux-gnu.tar.gz")
             );
+        }
+    }
+
+    /// The picker disables a filter it cannot populate, so an unrecognised host
+    /// must be refused before it ever gets there.
+    #[test]
+    fn unrecognised_hosts_are_refused() {
+        let recognised = matches!(std::env::consts::OS, "linux" | "macos" | "windows")
+            && matches!(std::env::consts::ARCH, "x86_64" | "aarch64");
+        assert_eq!(host_is_recognised(), recognised);
+
+        if !host_is_recognised() {
+            let assets = vec![Asset {
+                name: "tool-x86_64-unknown-linux-gnu.tar.gz".to_string(),
+                url: "https://example.invalid/x".to_string(),
+            }];
+            assert!(pick_asset(&assets).is_none());
         }
     }
 
