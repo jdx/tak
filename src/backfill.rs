@@ -187,8 +187,38 @@ fn host_libc() -> Option<String> {
     cfg!(target_env = "musl").then(|| "musl".to_string())
 }
 
+/// Can this asset actually serve as a benchmark subject?
+///
+/// The picker answers "which asset fits this platform", which is not the same
+/// question. It will happily choose a source tarball when that is the only
+/// candidate, or a `.7z` this code cannot unpack — and an unusable pick means a
+/// skipped release rather than a fallback to the next-best asset. Filtering
+/// first lets the picker choose the best of what remains.
+fn is_usable_subject(name: &str) -> bool {
+    let n = name.to_lowercase();
+
+    // Source drops contain no executable. Whole-word so `resource-cli` survives.
+    let stem = n.rsplit('/').next().unwrap_or(&n);
+    if ["source", "sources", "src"].iter().any(|t| {
+        stem.split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|w| w == *t)
+    }) {
+        return false;
+    }
+
+    // Only formats `fetch_binary` can actually open.
+    matches!(
+        asset_picker::Format::from_file_name(&n),
+        asset_picker::Format::Tar | asset_picker::Format::Zip | asset_picker::Format::Raw
+    )
+}
+
 pub fn pick_asset(assets: &[Asset]) -> Option<&Asset> {
-    let names: Vec<String> = assets.iter().map(|a| a.name.clone()).collect();
+    let names: Vec<String> = assets
+        .iter()
+        .map(|a| a.name.clone())
+        .filter(|n| is_usable_subject(n))
+        .collect();
     let picked = AssetPicker::with_libc(
         std::env::consts::OS.to_string(),
         std::env::consts::ARCH.to_string(),
@@ -473,6 +503,59 @@ mod tests {
         }
         // An explicit .exe must not become mycli.exe.exe.
         assert_eq!(binary_candidates("mycli.exe").len(), 1);
+    }
+
+    #[test]
+    fn source_archives_are_not_benchmark_subjects() {
+        // The picker selects these when they are the only candidate; they
+        // contain no executable.
+        assert!(!is_usable_subject("tool-1.0-source.tar.gz"));
+        assert!(!is_usable_subject("tool-src.tar.gz"));
+        assert!(!is_usable_subject("sources.zip"));
+        // Whole-word, so a tool whose name merely contains "src" survives.
+        assert!(is_usable_subject("resource-cli-linux-x86_64.tar.gz"));
+        assert!(is_usable_subject("srcery-linux-amd64.tar.gz"));
+    }
+
+    #[test]
+    fn only_openable_formats_are_subjects() {
+        assert!(is_usable_subject("tool-linux-x86_64.tar.gz"));
+        assert!(is_usable_subject("tool-linux-x86_64.zip"));
+        assert!(is_usable_subject("tool"));
+        assert!(is_usable_subject("tool.exe"));
+        // fetch_binary cannot open these, and picking one skips the release.
+        assert!(!is_usable_subject("tool-linux-x86_64.7z"));
+        assert!(!is_usable_subject("tool-linux-x86_64.gz"));
+        assert!(!is_usable_subject("tool.rar"));
+    }
+
+    #[test]
+    fn a_platform_asset_beats_a_source_drop() {
+        let assets: Vec<Asset> = [
+            "tool-1.0-source.tar.gz",
+            "tool-x86_64-unknown-linux-gnu.tar.gz",
+        ]
+        .iter()
+        .map(|n| Asset {
+            name: n.to_string(),
+            url: format!("https://example.invalid/{n}"),
+        })
+        .collect();
+        if std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64" {
+            assert_eq!(
+                pick_asset(&assets).map(|a| a.name.as_str()),
+                Some("tool-x86_64-unknown-linux-gnu.tar.gz")
+            );
+        }
+    }
+
+    #[test]
+    fn a_release_of_only_source_yields_nothing() {
+        let assets = vec![Asset {
+            name: "tool-1.0-source.tar.gz".to_string(),
+            url: "https://example.invalid/x".to_string(),
+        }];
+        assert!(pick_asset(&assets).is_none());
     }
 
     #[test]
