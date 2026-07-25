@@ -1,0 +1,82 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Actions are pinned to full commit SHAs. A mutable tag like @v2 or @stable can
+# be retargeted at any time, which would swap out executable CI code without
+# review.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      # The whole premise of this project is that instruction counts are stable
+      # enough to gate on. That path is a subprocess call, so it can only be
+      # exercised where valgrind exists — and it once shipped having never run.
+      # Installing it here is what keeps tests/counters.rs meaningful.
+      - name: Install valgrind
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind
+
+      - run: valgrind --version
+
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all-targets
+
+  # macOS has no usable cachegrind, so counters are expected to be absent here.
+  # This job asserts the degradation path rather than the measurement path.
+  test-macos:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo test --all-targets
+
+  # Single fan-in gate, so branch protection requires one check instead of an
+  # enumerated list that goes stale every time a job is added or renamed. It
+  # also catches *skipped* jobs, which a required check would otherwise treat
+  # as passing.
+  final:
+    permissions: {}
+    needs:
+      - test
+      - test-macos
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    # Run on success or upstream failure but skip when the workflow is cancelled
+    # — `always()` would override `cancel-in-progress` and waste a runner.
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Check job results
+        if: |
+          needs.test.result != 'success' ||
+          needs.test-macos.result != 'success'
+        run: exit 1
+      - run: echo "All CI jobs completed successfully"

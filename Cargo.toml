@@ -7,6 +7,10 @@ license = "MIT"
 repository = "https://github.com/jdx/tak"
 publish = false
 
+[lib]
+name = "tak_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "tak"
 path = "src/main.rs"

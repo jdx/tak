@@ -2,16 +2,13 @@
 //!
 //! Experimental. See README.md, which asks you to use hyperfine instead.
 
-mod measure;
-mod notes;
-mod record;
-
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::collections::BTreeMap;
 
-use measure::Plan;
-use record::{Record, SCHEMA_VERSION};
+use tak_cli::measure::{self, Plan};
+use tak_cli::notes;
+use tak_cli::record::{Record, SCHEMA_VERSION};
 
 #[derive(Parser)]
 #[command(name = "tak", version, about = "CLI performance, tracked", long_about = None)]
@@ -221,7 +218,10 @@ fn cmd_doctor() -> Result<()> {
     }
 
     match notes::fetch("origin") {
-        Ok(true) => println!("  ✓ notes fetch           refreshed {} from origin", notes::NOTES_REF),
+        Ok(true) => println!(
+            "  ✓ notes fetch           refreshed {} from origin",
+            notes::NOTES_REF
+        ),
         Ok(false) => println!(
             "  ! notes fetch           could not fetch {} (no remote, offline, or no data yet)",
             notes::NOTES_REF
