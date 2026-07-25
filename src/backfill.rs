@@ -52,11 +52,15 @@ fn github_token() -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
-/// Run curl with every option supplied on stdin rather than as arguments.
+/// Run curl, keeping the bearer token off the command line.
 ///
-/// A bearer token passed as `-H` lands in the process's argv, where any local
-/// process that can read `/proc` recovers it. `--config -` keeps it off the
-/// command line entirely.
+/// The split matters. A token passed as `-H` lands in argv, where any local
+/// process reading `/proc` recovers it, so it goes over stdin via `--config -`.
+/// The URL and output path are *not* secret and go as ordinary arguments —
+/// which also sidesteps curl's config quoting, where a value containing `"` or
+/// a newline would otherwise close the quoted field and inject further
+/// directives. A crafted `browser_download_url` could then add its own `url =`
+/// line and receive the Authorization header meant for GitHub.
 fn curl(url: &str, output: Option<&Path>, auth: bool) -> Result<Vec<u8>> {
     let mut cfg = String::from("silent\nshow-error\nlocation\nfail\n");
     cfg.push_str("header = \"User-Agent: tak\"\n");
@@ -69,14 +73,21 @@ fn curl(url: &str, output: Option<&Path>, auth: bool) -> Result<Vec<u8>> {
         }
         cfg.push_str(&format!("header = \"Authorization: Bearer {token}\"\n"));
     }
-    if let Some(p) = output {
-        cfg.push_str(&format!("output = \"{}\"\n", p.display()));
-    }
-    cfg.push_str(&format!("url = \"{url}\"\n"));
 
-    let mut child = Command::new("curl")
-        .arg("--config")
-        .arg("-")
+    // Only ever talk to https endpoints: a `http://` or `file://` redirect
+    // target would send the header in clear or read local files.
+    if !url.starts_with("https://") {
+        bail!("refusing a non-https URL: {url}");
+    }
+
+    let mut cmd = Command::new("curl");
+    cmd.arg("--config").arg("-");
+    if let Some(p) = output {
+        cmd.arg("-o").arg(p);
+    }
+    cmd.arg("--").arg(url);
+
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -261,6 +272,10 @@ fn run(cmd: &mut Command, what: &str) -> Result<()> {
 /// listing is: a private repository's assets are not publicly readable, and
 /// failing here after listing succeeded would skip every release.
 pub fn fetch_binary(asset: &Asset, bin_name: &str, dir: &Path) -> Result<PathBuf> {
+    // Start clean. Reusing a populated directory risks `find_binary` picking up
+    // an executable left by an earlier release and attributing its measurement
+    // to the wrong tag.
+    std::fs::remove_dir_all(dir).ok();
     std::fs::create_dir_all(dir)?;
     // Asset names come from the API and are not trusted: `../../x` would escape
     // the per-release directory and write wherever it liked.
@@ -339,11 +354,20 @@ fn safe_component(name: &str) -> Result<String> {
     Ok(base.to_string())
 }
 
+/// A filesystem-safe, collision-free directory name for a release.
+///
+/// Sanitising alone is not enough: tags may contain `/` (`release/1.0`), and
+/// mapping both `v1/0` and `v1_0` to `v1_0` would let two releases share a
+/// directory. The index keeps them distinct.
+pub fn release_dir_name(index: usize, tag: &str) -> String {
+    format!("{index:04}-{}", safe_dir_name(tag))
+}
+
 /// A filesystem-safe directory name for a release tag.
 ///
 /// Tags may contain `/` (`release/1.0`) and are otherwise arbitrary, so anything
 /// outside a conservative set becomes `_`.
-pub fn safe_dir_name(tag: &str) -> String {
+fn safe_dir_name(tag: &str) -> String {
     let s: String = tag
         .chars()
         .map(|c| {
@@ -566,6 +590,21 @@ mod tests {
         }
         // An explicit .exe must not become mycli.exe.exe.
         assert_eq!(binary_candidates("mycli.exe").len(), 1);
+    }
+
+    #[test]
+    fn release_dirs_never_collide() {
+        // Sanitising alone maps both of these to `v1_0`.
+        assert_ne!(
+            release_dir_name(0, "v1/0"),
+            release_dir_name(1, "v1_0"),
+            "distinct releases must not share a work directory"
+        );
+        assert_eq!(release_dir_name(7, "v1.2.3"), "0007-v1.2.3");
+        // Path separators must not survive into the name.
+        assert!(!release_dir_name(0, "release/1.0").contains('/'));
+        // A tag of only punctuation still yields something usable.
+        assert!(!release_dir_name(0, "...").is_empty());
     }
 
     #[test]

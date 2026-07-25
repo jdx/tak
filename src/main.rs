@@ -351,14 +351,14 @@ fn cmd_backfill(
     let mut recorded = 0usize;
     let mut skipped = 0usize;
 
-    for rel in &releases {
+    for (i, rel) in releases.iter().enumerate() {
         let Some(asset) = backfill::pick_asset(&rel.assets) else {
             println!("  {:<14} skipped — no asset for this platform", rel.tag);
             skipped += 1;
             continue;
         };
 
-        let dir = workdir.join(backfill::safe_dir_name(&rel.tag));
+        let dir = workdir.join(backfill::release_dir_name(i, &rel.tag));
         let path = match backfill::fetch_binary(asset, &bin, &dir) {
             Ok(p) => p,
             Err(e) => {
