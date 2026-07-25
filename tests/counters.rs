@@ -9,19 +9,9 @@
 //! Every test skips cleanly when valgrind is unavailable, because that is the
 //! normal state on macOS and Windows.
 
-use std::process::{Command, Stdio};
-
 use tak_cli::measure::{self, Plan};
 
-fn valgrind_available() -> bool {
-    Command::new("valgrind")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
+use tak_cli::measure::valgrind_available;
 
 /// A command that exists on the host and does a trivial, fixed amount of work.
 ///
@@ -96,6 +86,24 @@ fn instruction_counts_are_deterministic() {
     );
     // /bin/echo is hermetic, so nothing here should look suspect.
     assert!(outer.iter().all(|c| !c.is_suspect()));
+}
+
+/// The two "no counters" outcomes must stay distinguishable: a missing valgrind
+/// is `Ok(None)`, while valgrind failing mid-measurement is an error. Reporting
+/// the latter as the former sends people installing what they already have.
+#[test]
+fn availability_and_failure_are_distinct() {
+    if valgrind_available() {
+        // A command that cannot be spawned makes cachegrind fail rather than
+        // vanish, so this must be an error rather than Ok(None).
+        let bogus = vec!["/nonexistent/tak-not-a-real-binary".to_string()];
+        assert!(
+            measure::instructions(&bogus).is_err(),
+            "a failed measurement must not look like a missing valgrind"
+        );
+    } else {
+        assert!(measure::instructions(&subject()).unwrap().is_none());
+    }
 }
 
 /// Absence of valgrind must degrade to timing-only, never fail the run.

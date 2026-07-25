@@ -13,7 +13,7 @@
 //! clock (~1%) but not deterministic, because they move with thread scheduling.
 //! They are recorded, and may be flagged, but must not gate at a tight threshold.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::process::{Command, Stdio};
 use std::time::Instant;
@@ -72,6 +72,21 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
     ]))
 }
 
+/// Is cachegrind usable on this machine?
+///
+/// Exposed so callers can tell "no counters because valgrind is missing" from
+/// "no counters because the measurement failed" — two problems with entirely
+/// different fixes.
+pub fn valgrind_available() -> bool {
+    Command::new("valgrind")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// Repeats of the cachegrind run. Three is enough to catch a bimodal subject
 /// without tripling the cost of a measurement that is already ~50x slowed.
 const COUNTER_RUNS: u32 = 3;
@@ -122,13 +137,7 @@ impl Counted {
 /// Those platforms record timing only, and the CI gate lives on the Linux job.
 /// Locally, a container gets you counters on any host.
 pub fn instructions(cmd: &[String]) -> Result<Option<Counted>> {
-    if Command::new("valgrind")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_err()
-    {
+    if !valgrind_available() {
         return Ok(None);
     }
 
@@ -150,9 +159,13 @@ pub fn instructions(cmd: &[String]) -> Result<Option<Counted>> {
         let stderr = String::from_utf8_lossy(&out.stderr);
         match parse_irefs(&stderr) {
             Some(n) => samples.push(n),
-            // Valgrind ran but produced no summary — treat as unavailable rather
-            // than reporting a count derived from fewer runs than promised.
-            None => return Ok(None),
+            // Valgrind is installed but produced no summary — a real failure,
+            // not the same thing as valgrind being absent. Reporting it as
+            // absent sends people off installing something they already have.
+            None => bail!(
+                "valgrind ran but emitted no `I refs` summary: {}",
+                stderr.lines().last().unwrap_or("(no output)").trim()
+            ),
         }
     }
 

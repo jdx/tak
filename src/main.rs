@@ -153,8 +153,8 @@ fn cmd_run(
     let mut metrics: BTreeMap<String, f64> = measure::wall(&plan)?;
 
     if !no_counters {
-        match measure::instructions(&cmd)? {
-            Some(c) => {
+        match measure::instructions(&cmd) {
+            Ok(Some(c)) => {
                 metrics.insert("instructions".into(), c.min as f64);
                 if c.is_suspect() {
                     eprintln!(
@@ -168,11 +168,14 @@ fn cmd_run(
                     );
                 }
             }
-            None => eprintln!(
+            Ok(None) => eprintln!(
                 "note: valgrind not found — recording timing only. \
                  Instruction counts are the only gate-able metric; on macOS/Windows \
                  run tak in a Linux container to get them."
             ),
+            // Valgrind exists but the measurement failed. Say so rather than
+            // blaming a missing install, and keep the timing we did collect.
+            Err(e) => eprintln!("warning: instruction counting failed: {e}"),
         }
     }
 
