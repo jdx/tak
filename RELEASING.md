@@ -8,6 +8,21 @@ release notes, and publishes the GitHub release.
 The release stays a draft until its binaries are attached and its notes are written, so it
 never appears half-finished.
 
+## Cadence
+
+Nobody merges the release PR by hand. `auto-merge-release.yml` runs daily at 10:00 UTC and
+merges it only if **both** hold:
+
+- the most recent `v*` tag is at least **seven days** old, and
+- at least one `fix:` or `feat:` commit has landed since it
+
+Docs, CI and chore commits therefore accumulate without producing a release. To release
+sooner, dispatch it manually — that skips both guards:
+
+```sh
+gh workflow run auto-merge-release.yml
+```
+
 ## Release notes
 
 `release-plz` writes the release body from commit subjects using `cliff.toml`.
@@ -43,7 +58,7 @@ Two secrets are stored:
 
 | secret | used by | why |
 |---|---|---|
-| `RELEASE_PLZ_TOKEN` | `release-plz.yml` | A PAT with `contents: write` and `pull-requests: write`. The built-in `GITHUB_TOKEN` cannot be used: events it raises do not trigger other workflows, so the release PR it opened would never run CI. communique also needs it to read the *draft* release — the `/releases/tags` endpoint hides drafts, so it falls back to listing releases, which requires write access. |
+| `RELEASE_PLZ_TOKEN` | `release-plz.yml`, `auto-merge-release.yml` | A PAT with `contents: write` and `pull-requests: write`. The built-in `GITHUB_TOKEN` cannot be used: events it raises do not trigger other workflows, so the release PR it opened would never run CI. communique also needs it to read the *draft* release — the `/releases/tags` endpoint hides drafts, so it falls back to listing releases, which requires write access. |
 | `ANTHROPIC_API_KEY` | `release-plz.yml` (`enhance-release`) | communique's model calls. Without it, note generation fails and the release publishes with the `cliff.toml` body. |
 
 ## Building a release by hand
