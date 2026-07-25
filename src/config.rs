@@ -18,8 +18,8 @@ pub const FILE_NAME: &str = "tak.toml";
 
 /// Defaults chosen to match `tak run`'s, so moving a command into `tak.toml`
 /// does not silently change what it measures.
-const DEFAULT_RUNS: u32 = 20;
-const DEFAULT_WARMUP: u32 = 3;
+pub const DEFAULT_RUNS: u32 = 20;
+pub const DEFAULT_WARMUP: u32 = 3;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {

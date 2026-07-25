@@ -23,6 +23,10 @@ pub struct Plan {
     pub cmd: Vec<String>,
     pub warmup: u32,
     pub runs: u32,
+    /// Directory to run in. Declared benchmarks resolve relative commands
+    /// against `tak.toml`'s directory, not the caller's — otherwise the same
+    /// benchmark measures different things depending on where you stood.
+    pub dir: Option<std::path::PathBuf>,
 }
 
 /// Run once, discarding output, returning elapsed wall time in milliseconds.
@@ -30,13 +34,15 @@ pub struct Plan {
 /// No shell. Spawning a shell adds its own startup cost and variance to every
 /// sample, which for commands in the 10ms range is a large fraction of the
 /// measurement — the same reasoning behind poop's refusal to support one.
-fn time_once(cmd: &[String]) -> Result<f64> {
+fn time_once(cmd: &[String], dir: Option<&std::path::Path>) -> Result<f64> {
     let (bin, args) = cmd.split_first().context("empty command")?;
+    let mut c = Command::new(bin);
+    c.args(args).stdout(Stdio::null()).stderr(Stdio::null());
+    if let Some(d) = dir {
+        c.current_dir(d);
+    }
     let start = Instant::now();
-    let status = Command::new(bin)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+    let status = c
         .status()
         .with_context(|| format!("failed to spawn `{bin}`"))?;
     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
@@ -50,12 +56,17 @@ fn time_once(cmd: &[String]) -> Result<f64> {
 /// machine can only make a run slower, never faster — so the minimum is a far
 /// more robust estimator than the mean on shared CI hardware.
 pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
+    // Zero runs would leave `samples` empty and index straight off the end.
+    if plan.runs == 0 {
+        bail!("runs must be at least 1");
+    }
+    let dir = plan.dir.as_deref();
     for _ in 0..plan.warmup {
-        time_once(&plan.cmd)?;
+        time_once(&plan.cmd, dir)?;
     }
     let mut samples = Vec::with_capacity(plan.runs as usize);
     for _ in 0..plan.runs {
-        samples.push(time_once(&plan.cmd)?);
+        samples.push(time_once(&plan.cmd, dir)?);
     }
     samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
@@ -136,24 +147,26 @@ impl Counted {
 /// the expected state on macOS (no usable Apple Silicon support) and Windows.
 /// Those platforms record timing only, and the CI gate lives on the Linux job.
 /// Locally, a container gets you counters on any host.
-pub fn instructions(cmd: &[String]) -> Result<Option<Counted>> {
+pub fn instructions(cmd: &[String], dir: Option<&std::path::Path>) -> Result<Option<Counted>> {
     if !valgrind_available() {
         return Ok(None);
     }
 
     let mut samples: Vec<u64> = Vec::with_capacity(COUNTER_RUNS as usize);
     for _ in 0..COUNTER_RUNS {
-        let out = Command::new("valgrind")
-            .args([
-                "--tool=cachegrind",
-                "--cache-sim=no",
-                "--branch-sim=no",
-                "--cachegrind-out-file=/dev/null",
-            ])
-            .args(cmd)
-            .stdout(Stdio::null())
-            .output()
-            .context("failed to run valgrind")?;
+        let mut c = Command::new("valgrind");
+        c.args([
+            "--tool=cachegrind",
+            "--cache-sim=no",
+            "--branch-sim=no",
+            "--cachegrind-out-file=/dev/null",
+        ])
+        .args(cmd)
+        .stdout(Stdio::null());
+        if let Some(d) = dir {
+            c.current_dir(d);
+        }
+        let out = c.output().context("failed to run valgrind")?;
 
         // cachegrind writes its summary to stderr as e.g. "I refs:  48,349,132".
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -204,11 +217,23 @@ mod tests {
     }
 
     #[test]
+    fn zero_runs_is_rejected_not_a_panic() {
+        let plan = Plan {
+            cmd: vec!["true".into()],
+            warmup: 0,
+            runs: 0,
+            dir: None,
+        };
+        assert!(wall(&plan).is_err());
+    }
+
+    #[test]
     fn wall_reports_min_le_p50_le_max() {
         let plan = Plan {
             cmd: vec!["true".into()],
             warmup: 1,
             runs: 5,
+            dir: None,
         };
         let m = wall(&plan).unwrap();
         assert!(m["wall_min_ms"] <= m["wall_p50_ms"]);
