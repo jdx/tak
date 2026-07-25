@@ -28,17 +28,22 @@ The only stored secret is `RELEASE_PLZ_TOKEN`, a PAT with `contents: write` and
 `pull-requests: write`. The built-in `GITHUB_TOKEN` cannot be used: events it raises do not
 trigger other workflows, so the release PR it opened would never run CI.
 
-## Re-running a build
-
-If a build fails after the tag already exists:
+## Building a release by hand
 
 ```sh
 gh workflow run release.yml -f tag=v0.1.0
 ```
 
-This rebuilds, attaches with `--clobber`, and publishes the release. It is idempotent. The
-undraft happens only on manual dispatch — when `release-plz.yml` calls the same workflow, it
-publishes the release itself once the assets are in place.
+Builds all eight targets, attaches them with `--clobber`, and publishes the release. It is
+idempotent. The tag and the GitHub release must already exist — release-plz creates both, and
+this workflow only rebuilds and reattaches.
+
+The undraft happens only on manual dispatch — when `release-plz.yml` calls the same workflow,
+it publishes the release itself once the assets are in place.
+
+`release-plz.yml` can also be dispatched manually, but that cannot conjure a release out of
+nothing: release-plz compares packaged file contents against crates.io and opens a release PR
+only when they differ. "already up to date" means the published crate really is identical.
 
 ## Targets
 
