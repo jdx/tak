@@ -3,7 +3,7 @@
 # metric on any host.
 #
 # The build context is the repository root, not this directory, because the
-# build stage copies Cargo.toml, crates/ and src/:
+# build stage copies Cargo.toml, build.rs, settings.toml, crates/ and src/:
 #
 #   docker build -f docker/Dockerfile -t tak .
 #   docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/w" -w /w \
@@ -19,7 +19,10 @@
 
 FROM rust:1-slim-trixie AS build
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
+# settings.toml and build.rs travel together: the build script generates the
+# settings code from the registry, so omitting either fails the compile rather
+# than producing a binary with no settings.
+COPY Cargo.toml Cargo.lock build.rs settings.toml ./
 COPY crates ./crates
 COPY src ./src
 RUN cargo build --release --bin tak
