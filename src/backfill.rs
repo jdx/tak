@@ -220,11 +220,29 @@ fn is_usable_subject(name: &str) -> bool {
     // Only formats `fetch_binary` can actually open. Both sides ask `Format`
     // rather than matching suffixes independently, so a name like `.vsix` —
     // which is a zip — cannot pass the filter and then be rejected at unpack.
-    matches!(
-        Format::from_file_name(&n),
-        Format::Tar | Format::Zip | Format::Raw
-    )
+    match Format::from_file_name(&n) {
+        // `Format::Raw` is a catch-all for "no recognised archive suffix",
+        // which also covers `tool-linux-x86_64.json`, `.yaml`, `.run` and
+        // anything else a project ships alongside its binaries. Those score on
+        // their platform tokens, and marking one executable and running it
+        // benchmarks the wrong program. A real bare binary has no extension at
+        // all, or `.exe`.
+        Format::Raw => {
+            let base = n.rsplit('/').next().unwrap_or(&n);
+            base.ends_with(".exe") || !base.contains('.')
+        }
+        // `tar` handles gz/xz/bz2/zst everywhere, but brotli and lz4 depend on
+        // the host build. Admitting one only to fail at extraction turns a
+        // usable release into a skipped one; excluding them lets the picker
+        // choose a different asset instead.
+        Format::Tar => !TAR_NEEDS_RARE_CODEC.iter().any(|e| n.ends_with(e)),
+        Format::Zip => true,
+        _ => false,
+    }
 }
+
+/// Tar compressions that `tar` frequently cannot decompress unaided.
+const TAR_NEEDS_RARE_CODEC: [&str; 4] = [".tar.br", ".tbr", ".tar.lz4", ".tlz4"];
 
 pub fn pick_asset(assets: &[Asset]) -> Option<&Asset> {
     let names: Vec<String> = assets
@@ -533,6 +551,33 @@ mod tests {
     fn vsix_is_a_zip_to_both_sides() {
         assert!(is_usable_subject("tool-linux-x86_64.vsix"));
         assert_eq!(Format::from_file_name("tool.vsix"), Format::Zip);
+    }
+
+    /// `Format::Raw` means "no recognised archive suffix", which is not the
+    /// same as "an executable".
+    #[test]
+    fn platform_tagged_metadata_is_not_a_subject() {
+        for n in [
+            "tool-linux-x86_64.json",
+            "tool-linux-x86_64.yaml",
+            "tool-linux-x86_64.run",
+            "tool-linux-x86_64.txt",
+        ] {
+            assert!(!is_usable_subject(n), "{n} should be rejected");
+        }
+        // A genuine bare binary still qualifies.
+        assert!(is_usable_subject("tool-linux-x86_64"));
+        assert!(is_usable_subject("tool.exe"));
+    }
+
+    #[test]
+    fn tar_codecs_the_host_may_lack_are_skipped() {
+        assert!(is_usable_subject("tool-linux-x86_64.tar.gz"));
+        assert!(is_usable_subject("tool-linux-x86_64.tar.zst"));
+        // Better to let the picker choose another asset than to fail at
+        // extraction and skip the release entirely.
+        assert!(!is_usable_subject("tool-linux-x86_64.tar.br"));
+        assert!(!is_usable_subject("tool-linux-x86_64.tar.lz4"));
     }
 
     #[test]
