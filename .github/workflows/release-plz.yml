@@ -23,7 +23,7 @@ jobs:
       # long-lived CARGO_REGISTRY_TOKEN exists anywhere.
       id-token: write
     outputs:
-      tag: ${{ steps.release-plz.outputs.releases && fromJSON(steps.release-plz.outputs.releases)[0].tag || '' }}
+      tag: ${{ steps.tak-tag.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -47,6 +47,23 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+
+      # This is a workspace: a run can release `asset-picker`, `tak-cli`, or
+      # both, in whatever order release-plz reports. Taking `releases[0]` would
+      # sometimes hand the binary-upload job asset-picker's tag — attaching
+      # `tak` binaries to the library's release and leaving tak-cli's draft
+      # unpublished forever. Select by name instead.
+      - name: Find the tak-cli tag
+        id: tak-tag
+        env:
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          tag=""
+          if [ -n "$RELEASES" ]; then
+            tag=$(jq -r '[.[] | select(.package_name == "tak-cli")][0].tag // ""' <<<"$RELEASES")
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "tak-cli tag: ${tag:-<none released>}"
 
   # Binaries are attached to the draft, then the draft is published — so a
   # release is never visible without its assets.

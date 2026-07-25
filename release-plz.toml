@@ -1,4 +1,7 @@
 [workspace]
+# Without this, release-plz silently uses its built-in changelog format and the
+# cliff.toml in this repository is never read.
+changelog_config = "cliff.toml"
 git_tag_enable = true
 git_release_enable = true
 # Drafted so release.yml can attach binaries before anyone sees it — a release
