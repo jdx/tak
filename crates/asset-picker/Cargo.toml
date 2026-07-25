@@ -1,11 +1,13 @@
 [package]
 name = "asset-picker"
-version = "0.0.0"
+version = "0.0.1"
 edition = "2024"
-description = "Pick the right release asset for a platform. Extracted from mise."
+description = "Pick the right release asset for a target platform. Extracted from mise."
+keywords = ["release", "assets", "platform", "github"]
+categories = ["development-tools"]
+readme = "README.md"
 license = "MIT"
 repository = "https://github.com/jdx/tak"
-publish = false
 
 [dependencies]
 regex = "1"

@@ -1,0 +1,20 @@
+[workspace]
+git_tag_enable = true
+git_release_enable = true
+# Drafted so release.yml can attach binaries before anyone sees it — a release
+# that appears without its assets is worse than one that appears a minute later.
+git_release_draft = true
+# asset-picker is a library others may depend on, so breaking changes must be
+# reflected in the version rather than slipped out.
+semver_check = true
+
+[[package]]
+name = "tak-cli"
+# The binary is `tak`; the crate is `tak-cli` because bare `tak` on crates.io is
+# a dormant 2016 board-game implementation. Same workaround as usage-cli and
+# pitchfork-cli.
+publish = true
+
+[[package]]
+name = "asset-picker"
+publish = true

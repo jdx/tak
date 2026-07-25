@@ -3,12 +3,14 @@ members = ["crates/asset-picker"]
 
 [package]
 name = "tak-cli"
-version = "0.0.0"
+version = "0.0.1"
 edition = "2024"
 description = "Benchmark command-line programs and track their performance over time. Experimental; do not use."
+keywords = ["benchmark", "performance", "cli", "git-notes"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "README.md"
 license = "MIT"
 repository = "https://github.com/jdx/tak"
-publish = false
 
 [lib]
 name = "tak_cli"
@@ -20,7 +22,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-asset-picker = { path = "crates/asset-picker" }
+asset-picker = { path = "crates/asset-picker", version = "0.0.1" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

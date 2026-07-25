@@ -1,0 +1,101 @@
+name: release-plz
+
+# release-plz watches main, opens a release PR that bumps versions and writes
+# the changelog, and on merge tags, publishes to crates.io and drafts the
+# GitHub release. `release.yml` then attaches binaries and publishes the draft.
+
+permissions: {}
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release-plz-release:
+    name: Release
+    runs-on: ubuntu-latest
+    # Forks should never attempt to publish.
+    if: ${{ github.repository_owner == 'jdx' }}
+    permissions:
+      contents: write
+      # Required for crates.io trusted publishing: the OIDC token proves this
+      # workflow, in this repository, is the configured publisher. No
+      # long-lived CARGO_REGISTRY_TOKEN exists anywhere.
+      id-token: write
+    outputs:
+      tag: ${{ steps.release-plz.outputs.releases && fromJSON(steps.release-plz.outputs.releases)[0].tag || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      # Exchanges the OIDC token for a short-lived crates.io token. Requires a
+      # Trusted Publisher configured on each crate, naming this repository and
+      # this workflow file — see RELEASING.md.
+      - name: Authenticate with crates.io
+        id: crates-io-auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+
+      - name: Run release-plz
+        id: release-plz
+        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+
+  # Binaries are attached to the draft, then the draft is published — so a
+  # release is never visible without its assets.
+  upload-assets:
+    name: Upload assets
+    needs: release-plz-release
+    if: ${{ needs.release-plz-release.outputs.tag != '' }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-plz-release.outputs.tag }}
+
+  publish-release:
+    name: Publish release
+    needs: [release-plz-release, upload-assets]
+    if: ${{ needs.release-plz-release.outputs.tag != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Undraft the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          TAG: ${{ needs.release-plz-release.outputs.tag }}
+        run: gh release edit "$TAG" --repo "${{ github.repository }}" --draft=false
+
+  release-plz-pr:
+    name: Release PR
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'jdx' }}
+    permissions:
+      contents: write
+      pull-requests: write
+    # Never run two of these at once: they would race the same branch.
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Run release-plz
+        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
