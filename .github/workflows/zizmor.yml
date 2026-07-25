@@ -2,6 +2,10 @@ name: zizmor
 on:
   push:
     branches: [main]
+    # Filtered on push as well as pull_request. zizmor only audits workflow
+    # files, so running it for an unrelated push burns a runner and reports on
+    # content that has not changed.
+    paths: [".github/workflows/**"]
   pull_request:
     paths: [".github/workflows/**"]
 
