@@ -95,6 +95,34 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Called from release-plz.yml the tag and draft already exist. Run by
+      # hand they may not: a version can be published to crates.io without ever
+      # having had a GitHub release, and there is otherwise no way to give it
+      # one. Creating them here makes manual dispatch self-sufficient rather
+      # than requiring the tag to be conjured up first.
+      - name: Ensure the tag and release exist
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "creating tag $TAG at $GITHUB_SHA"
+            gh api "repos/${{ github.repository }}/git/refs" \
+              -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA"
+          fi
+          if ! gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "creating draft release $TAG"
+            gh release create "$TAG" --repo "${{ github.repository }}" \
+              --draft --title "$TAG" --generate-notes
+          fi
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts

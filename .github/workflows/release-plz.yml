@@ -9,6 +9,12 @@ permissions: {}
 on:
   push:
     branches: [main]
+  # Manual trigger. Note that this cannot conjure a release out of nothing:
+  # release-plz compares packaged file contents against what is on crates.io
+  # and opens a PR only when they differ. If it reports "already up to date",
+  # the crate really is — publishing an identical tree under a new version is
+  # not something worth adding a button for.
+  workflow_dispatch:
 
 jobs:
   release-plz-release:
