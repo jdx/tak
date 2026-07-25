@@ -3,7 +3,7 @@
 # metric on any host.
 #
 # The build context is the repository root, not this directory, because the
-# build stage copies Cargo.toml and src/:
+# build stage copies Cargo.toml, crates/ and src/:
 #
 #   docker build -f docker/Dockerfile -t tak .
 #   docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/w" -w /w \
@@ -20,6 +20,7 @@
 FROM rust:1-slim-trixie AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
 COPY src ./src
 RUN cargo build --release --bin tak
 

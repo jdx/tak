@@ -69,6 +69,38 @@ jobs:
           install: false
       - run: mise run test
 
+  # docker/Dockerfile is the documented way to get instruction counts on macOS
+  # and Windows, where there is no usable valgrind. Nothing built it, so it sat
+  # broken from the asset-picker extraction onward — the build stage never
+  # copied crates/, and cargo failed at manifest resolution. This job is the
+  # guard that keeps the documented path working.
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Built without a layer cache on purpose. The dependency set is small
+      # enough that a fully cold build takes about 25 seconds, which is not
+      # worth the buildx + cache-export machinery it would take to avoid.
+      - name: Build the image
+        run: docker build -f docker/Dockerfile -t tak .
+
+      - run: docker run --rm tak --version
+
+      # `tak run` degrades to wall clock when valgrind is missing instead of
+      # failing — correct for a macOS host, but it means a bare run inside the
+      # image would pass having measured nothing. The image exists solely to
+      # provide the counter, so assert the counter is in the output.
+      - name: Instruction counting works inside the image
+        run: |
+          out=$(docker run --rm tak run --bench smoke --runs 2 -- /bin/echo hi)
+          echo "$out"
+          grep -qE '^[[:space:]]*instructions[[:space:]]+[0-9]+' <<<"$out" \
+            || { echo "::error::image produced no instruction count"; exit 1; }
+
   # Single fan-in gate, so branch protection requires one check instead of an
   # enumerated list that goes stale every time a job is added or renamed. It
   # also catches *skipped* jobs, which a required check would otherwise treat
@@ -78,6 +110,7 @@ jobs:
     needs:
       - test
       - test-macos
+      - docker
     runs-on: ubuntu-latest
     timeout-minutes: 1
     # Run on success or upstream failure but skip when the workflow is cancelled
@@ -87,6 +120,7 @@ jobs:
       - name: Check job results
         if: |
           needs.test.result != 'success' ||
-          needs.test-macos.result != 'success'
+          needs.test-macos.result != 'success' ||
+          needs.docker.result != 'success'
         run: exit 1
       - run: echo "All CI jobs completed successfully"
