@@ -1,0 +1,136 @@
+name: release
+
+# Builds a binary per target and attaches them to an existing release.
+#
+# Normally called by release-plz.yml against the draft it just created, so the
+# release is only published once its assets are in place. `workflow_dispatch`
+# is there for re-running a build that failed after the tag already existed.
+
+permissions: {}
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to attach binaries to, e.g. v0.1.0"
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      # One target failing should not deny the others their artifacts.
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          # musl matters here beyond portability: `tak backfill` runs in slim
+          # containers, and a static binary needs no libc to match.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: ${{ matrix.target }}
+
+      # Cross-compiles and produces the archive. `dry-run` builds without
+      # uploading, so a later target failing cannot leave a half-populated
+      # release behind — everything is attached in one step at the end.
+      - uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1
+        with:
+          bin: tak
+          target: ${{ matrix.target }}
+          # `cross` for the aarch64 Linux targets, plain cargo elsewhere.
+          build-tool: ${{ startsWith(matrix.target, 'aarch64-unknown-linux') && 'cross' || 'cargo' }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          dry-run: true
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: binary-${{ matrix.target }}
+          path: |
+            tak-*.tar.gz
+            tak-*.zip
+          # Only needed long enough for the attach job to collect them.
+          retention-days: 1
+          if-no-files-found: error
+
+  attach:
+    name: Attach to release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: artifacts
+
+      - name: Collect assets
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) \
+            -exec mv {} release-assets/ \;
+          ls -la release-assets/
+          # An empty upload would silently produce a release with no binaries.
+          [ -n "$(ls -A release-assets/)" ] || {
+            echo "::error::no binaries were produced"; exit 1; }
+
+      # Checksums let people verify a download, and `tak backfill` skips
+      # sidecars when picking an asset, so they cost nothing downstream.
+      - name: Generate checksums
+        run: |
+          cd release-assets
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: gh release upload "$TAG" release-assets/* --repo "${{ github.repository }}" --clobber
+
+      # Called from release-plz.yml, undrafting is that workflow's job — it
+      # happens after this one returns. Run by hand, nothing else will do it,
+      # and the release would sit drafted forever. Since manual dispatch is the
+      # documented recovery for a build that failed after the tag existed, that
+      # would leave the recovery path itself broken.
+      - name: Publish the release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: gh release edit "$TAG" --repo "${{ github.repository }}" --draft=false

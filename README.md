@@ -102,6 +102,9 @@ Measuring and storing work. Nothing reads the data back yet.
 - [ ] PR reporting
 - [ ] change-point detection instead of thresholds
 
+Releases are automated with release-plz and publish to crates.io via trusted publishing —
+see [RELEASING.md](RELEASING.md). The crate is `tak-cli`; the binary is `tak`.
+
 ## Counters on macOS and Windows
 
 There is no usable cachegrind on Apple Silicon and none on Windows, so `tak run`

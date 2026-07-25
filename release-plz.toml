@@ -1,0 +1,33 @@
+[workspace]
+# Without this, release-plz silently uses its built-in changelog format and the
+# cliff.toml in this repository is never read.
+changelog_config = "cliff.toml"
+git_tag_enable = true
+git_release_enable = true
+# Drafted so release.yml can attach binaries before anyone sees it — a release
+# that appears without its assets is worse than one that appears a minute later.
+git_release_draft = true
+# asset-picker is a library others may depend on, so breaking changes must be
+# reflected in the version rather than slipped out.
+semver_check = true
+
+[[package]]
+name = "tak-cli"
+# The binary is `tak`; the crate is `tak-cli` because bare `tak` on crates.io is
+# a dormant 2016 board-game implementation. Same workaround as usage-cli and
+# pitchfork-cli.
+publish = true
+# release-plz would otherwise tag this `tak-cli-vX.Y.Z`, which cliff.toml's
+# tag_pattern does not match — git-cliff would stop treating releases as
+# changelog boundaries and mis-scope commits. The downloadable release is also
+# the one people reference, so it takes the bare tag.
+git_tag_name = "v{{ version }}"
+git_release_enable = true
+
+[[package]]
+name = "asset-picker"
+publish = true
+# A library: crates.io is its distribution, and a GitHub release for it would
+# carry no assets. It would also sit drafted forever, since only the tak-cli
+# tag is ever undrafted.
+git_release_enable = false
