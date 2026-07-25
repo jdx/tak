@@ -35,7 +35,7 @@ fn instructions_are_reported_when_valgrind_exists() {
         eprintln!("skipping: valgrind not installed");
         return;
     }
-    let c = measure::instructions(&subject())
+    let c = measure::instructions(&subject(), None)
         .expect("cachegrind invocation failed")
         .expect("valgrind present but no I refs parsed");
 
@@ -69,7 +69,7 @@ fn instruction_counts_are_deterministic() {
     // across separate invocations too, not just within one.
     let outer: Vec<_> = (0..2)
         .map(|_| {
-            measure::instructions(&cmd)
+            measure::instructions(&cmd, None)
                 .expect("cachegrind invocation failed")
                 .expect("no I refs parsed")
         })
@@ -98,11 +98,11 @@ fn availability_and_failure_are_distinct() {
         // vanish, so this must be an error rather than Ok(None).
         let bogus = vec!["/nonexistent/tak-not-a-real-binary".to_string()];
         assert!(
-            measure::instructions(&bogus).is_err(),
+            measure::instructions(&bogus, None).is_err(),
             "a failed measurement must not look like a missing valgrind"
         );
     } else {
-        assert!(measure::instructions(&subject()).unwrap().is_none());
+        assert!(measure::instructions(&subject(), None).unwrap().is_none());
     }
 }
 
@@ -113,7 +113,8 @@ fn missing_valgrind_is_not_an_error() {
         eprintln!("skipping: valgrind is installed, cannot test its absence");
         return;
     }
-    let got = measure::instructions(&subject()).expect("must not error when valgrind is absent");
+    let got =
+        measure::instructions(&subject(), None).expect("must not error when valgrind is absent");
     assert!(got.is_none());
 }
 
@@ -124,6 +125,7 @@ fn wall_clock_works_without_counters() {
         cmd: subject(),
         warmup: 1,
         runs: 3,
+        dir: None,
     })
     .expect("wall measurement failed");
 
