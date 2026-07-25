@@ -96,6 +96,7 @@ Measuring and storing work. Nothing reads the data back yet.
 - [x] `refs/notes/tak` storage — `run --record`, `push`, `history`, `init`
 - [x] concurrent CI writers merge via `cat_sort_uniq`
 - [x] `tak backfill` — benchmark published release binaries to bootstrap history
+- [x] asset selection via `crates/asset-picker`, extracted from mise
 - [ ] `tak compare <ref>` — interleaved A/B against another revision
 - [ ] `bench.toml`
 - [ ] PR reporting
@@ -125,6 +126,9 @@ The CI gate lives on the Linux job regardless, so this only matters locally.
 - [hyperfine](https://github.com/sharkdp/hyperfine) — the UX everyone knows. Its own
   [2.0 roadmap](https://github.com/sharkdp/hyperfine/issues/788) asks for most of what's above.
 - [poop](https://github.com/andrewrk/poop) — hardware counters, no shell, first command as reference.
+- [mise](https://github.com/jdx/mise) — `crates/asset-picker` is mise's release-asset
+  selection logic extracted verbatim, tests and all. Picking the wrong asset yields a binary
+  that runs and reports numbers that look real, so a naive heuristic here is worse than none.
 - [git-appraise](https://github.com/google/git-appraise) — one JSON object per line in git notes,
   merged with `cat_sort_uniq`. The storage design is lifted from here wholesale.
 - [git-perf](https://github.com/kaihowl/git-perf) — independently arrived at git-notes storage

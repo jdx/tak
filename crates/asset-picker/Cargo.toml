@@ -1,0 +1,11 @@
+[package]
+name = "asset-picker"
+version = "0.0.0"
+edition = "2024"
+description = "Pick the right release asset for a platform. Extracted from mise."
+license = "MIT"
+repository = "https://github.com/jdx/tak"
+publish = false
+
+[dependencies]
+regex = "1"

@@ -13,6 +13,7 @@
 //! small.
 
 use anyhow::{Context, Result, bail};
+use asset_picker::{AssetPicker, Format, detect_platform_from_url};
 use serde::Deserialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -163,107 +164,167 @@ fn finish(mut v: Vec<Release>, limit: usize) -> Vec<Release> {
     v
 }
 
-/// Does `haystack` contain `token` as a whole word?
+/// Whether the picker's tables actually cover this host.
 ///
-/// Plain `contains` is wrong here: the Windows token `win` is a substring of
-/// `apple-darwin`, so a macOS tarball would satisfy the Windows filter and get
-/// measured on the wrong platform. Requiring non-alphanumeric boundaries makes
-/// `win` match `tool-win.zip` but not `darwin`, while `win64` still matches
-/// `tool-win64.zip` as its own token.
-fn contains_token(haystack: &str, token: &str) -> bool {
-    let h = haystack.as_bytes();
-    haystack.match_indices(token).any(|(i, _)| {
-        let before = i == 0 || !h[i - 1].is_ascii_alphanumeric();
-        let end = i + token.len();
-        let after = end == h.len() || !h[end].is_ascii_alphanumeric();
-        before && after
-    })
+/// Kept in step with `asset_picker`'s own OS and arch tables; anything outside
+/// them leaves its token list empty, which disables the corresponding filter
+/// rather than rejecting.
+fn host_is_recognised() -> bool {
+    matches!(std::env::consts::OS, "linux" | "macos" | "windows")
+        && matches!(std::env::consts::ARCH, "x86_64" | "aarch64")
 }
 
-/// Platform tokens for the machine we are measuring on.
+/// The libc to select assets for.
 ///
-/// Measuring a darwin binary on linux would be meaningless, so asset selection
-/// is strict about the OS and only flexible about spelling.
-fn platform_tokens() -> (Vec<&'static str>, Vec<&'static str>) {
-    let os: Vec<&str> = match std::env::consts::OS {
-        "linux" => vec!["linux"],
-        "macos" => vec!["darwin", "macos", "apple", "osx"],
-        "windows" => vec!["windows", "win64", "win32", "win"],
-        _ => vec![],
-    };
-    let arch: Vec<&str> = match std::env::consts::ARCH {
-        "x86_64" => vec!["x86_64", "amd64", "x64"],
-        "aarch64" => vec!["aarch64", "arm64"],
-        _ => vec![],
-    };
-    (os, arch)
+/// Passing `None` makes the picker assume gnu on Linux, which is right for the
+/// common case and wrong on Alpine, where a gnu binary simply will not start.
+/// A musl-built `tak` is a good proxy for a musl host, and it is the only
+/// signal available without shelling out.
+///
+/// This matters beyond whether the binary runs: musl and glibc builds have
+/// different allocators and different startup costs, so picking the wrong one
+/// measures something the project's users never execute.
+fn host_libc() -> Option<String> {
+    cfg!(target_env = "musl").then(|| "musl".to_string())
 }
 
-/// Score an asset for this platform. `None` means "definitely not usable here".
+/// Can this asset actually serve as a benchmark subject?
 ///
-/// Deliberately conservative: a wrong choice produces numbers that look real and
-/// are meaningless, which is worse than backfilling nothing.
-fn score_asset(name: &str, os: &[&str], arch: &[&str]) -> Option<i32> {
+/// The picker answers "which asset fits this platform", which is not the same
+/// question. It will happily choose a source tarball when that is the only
+/// candidate, or a `.7z` this code cannot unpack — and an unusable pick means a
+/// skipped release rather than a fallback to the next-best asset. Filtering
+/// first lets the picker choose the best of what remains.
+fn is_usable_subject(name: &str) -> bool {
     let n = name.to_lowercase();
 
-    // Never benchmark checksums, signatures or source archives.
-    const REJECT: [&str; 7] = [
-        ".sha256", ".sha512", ".asc", ".sig", ".pem", ".sbom", ".deb",
+    // A .vsix is a zip, so `Format` classifies it as openable, but it is a VS
+    // Code extension package — never a CLI binary. Admitting it wastes a
+    // download and then skips the release with a confusing "no `tool` inside".
+    if n.ends_with(".vsix") {
+        return false;
+    }
+
+    // Checksums and signatures describe a release rather than being one. The
+    // picker scores them positively — verified: given only
+    // `tool-x86_64-unknown-linux-gnu.tar.gz.sha256` it returns exactly that —
+    // because mise consumes sidecars deliberately elsewhere. Here they are
+    // never a subject.
+    const SIDECAR: [&str; 9] = [
+        ".sha256",
+        ".sha512",
+        ".sha1",
+        ".md5",
+        ".asc",
+        ".sig",
+        ".pem",
+        ".sbom",
+        ".intoto.jsonl",
     ];
-    if REJECT.iter().any(|r| n.contains(r)) {
-        return None;
-    }
-    // Source drops contain no executable. Matched as whole words so a tool
-    // legitimately named e.g. `resource-cli` is not rejected.
-    if ["source", "sources", "src"]
-        .iter()
-        .any(|t| contains_token(&n, t))
-    {
-        return None;
-    }
-    if n.ends_with(".rpm") || n.ends_with(".msi") || n.ends_with(".pkg") {
-        return None;
+    if SIDECAR.iter().any(|e| n.ends_with(e)) {
+        return false;
     }
 
-    // An unrecognised host (FreeBSD, riscv64, …) leaves the token list empty.
-    // Skipping the filter in that case is the opposite of conservative: it lets
-    // a linux-x86_64 tarball match on a machine that cannot run it, and a
-    // wrong-platform binary either fails to exec or, worse, runs and measures
-    // something meaningless. Refusing to guess is the right answer.
-    if os.is_empty() || arch.is_empty() {
-        return None;
-    }
-    if !os.iter().any(|t| contains_token(&n, t)) {
-        return None;
-    }
-    if !arch.iter().any(|t| contains_token(&n, t)) {
-        return None;
+    // Source drops contain no executable. Whole-word so `resource-cli` survives.
+    let stem = n.rsplit('/').next().unwrap_or(&n);
+    if ["source", "sources", "src"].iter().any(|t| {
+        stem.split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|w| w == *t)
+    }) {
+        return false;
     }
 
-    let mut score = 100;
-    // musl is statically linked, so it runs on any distro including the slim
-    // container images this is most often executed in.
-    if n.contains("musl") {
-        score += 20;
+    // Only formats `fetch_binary` can actually open. Both sides ask `Format`
+    // rather than matching suffixes independently, so a name like `.vsix` —
+    // which is a zip — cannot pass the filter and then be rejected at unpack.
+    match Format::from_file_name(&n) {
+        // `Format::Raw` is a catch-all for "no recognised archive suffix",
+        // which also covers `tool-linux-x86_64.json`, `.yaml`, `.run` and
+        // anything else a project ships alongside its binaries. Those score on
+        // their platform tokens, and marking one executable and running it
+        // benchmarks the wrong program. A real bare binary has no extension at
+        // all, or `.exe`.
+        Format::Raw => {
+            let base = n.rsplit('/').next().unwrap_or(&n);
+            base.ends_with(".exe") || !has_file_extension(base)
+        }
+        // `tar` handles gz/xz/bz2/zst everywhere, but brotli and lz4 depend on
+        // the host build. Admitting one only to fail at extraction turns a
+        // usable release into a skipped one; excluding them lets the picker
+        // choose a different asset instead.
+        Format::Tar => !TAR_NEEDS_RARE_CODEC.iter().any(|e| n.ends_with(e)),
+        Format::Zip => true,
+        _ => false,
     }
-    if n.ends_with(".tar.gz") || n.ends_with(".tgz") {
-        score += 10;
-    } else if n.ends_with(".tar.xz") {
-        score += 8;
-    } else if n.ends_with(".zip") {
-        score += 5;
-    }
-    Some(score)
 }
 
-/// Best asset for the current platform, or `None` if nothing matches.
+/// Does this filename end in something that looks like a file extension?
+///
+/// "Contains a dot" is not the same question. A raw unix binary is routinely
+/// published as `tool-v1.2.3-linux-x86_64`, and treating the version's dots as
+/// an extension rejects a perfectly good subject. An extension is short, purely
+/// alphanumeric, and not just digits — `json` and `yaml` qualify, the `3` at
+/// the end of a version does not.
+fn has_file_extension(base: &str) -> bool {
+    match base.rsplit_once('.') {
+        None => false,
+        Some((_, ext)) => {
+            !ext.is_empty()
+                && ext.len() <= 6
+                && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                && !ext.chars().all(|c| c.is_ascii_digit())
+        }
+    }
+}
+
+/// Tar compressions that `tar` frequently cannot decompress unaided.
+const TAR_NEEDS_RARE_CODEC: [&str; 4] = [".tar.br", ".tbr", ".tar.lz4", ".tlz4"];
+
 pub fn pick_asset(assets: &[Asset]) -> Option<&Asset> {
-    let (os, arch) = platform_tokens();
-    assets
+    // The picker's platform tables cover the mainstream targets and skip the
+    // OS or arch filter entirely when it does not recognise one — which on
+    // FreeBSD or riscv64 would let a linux-x86_64 tarball match a machine that
+    // cannot run it. Refusing to guess is the right answer for a tool whose
+    // whole purpose is trustworthy numbers.
+    if !host_is_recognised() {
+        return None;
+    }
+
+    let usable: Vec<String> = assets
         .iter()
-        .filter_map(|a| score_asset(&a.name, &os, &arch).map(|s| (s, a)))
-        .max_by_key(|(s, _)| *s)
-        .map(|(_, a)| a)
+        .map(|a| a.name.clone())
+        .filter(|n| is_usable_subject(n))
+        .collect();
+
+    // If any candidate states a platform, the ones that do not are not
+    // trustworthy. Verified against the picker: a release shipping
+    // `tool-x86_64-unknown-linux-gnu.tar.gz` alongside `tool.tar.gz` hands the
+    // latter to a macOS host, because the linux asset is filtered out and the
+    // unlabelled one has nothing to filter on. In a release that publishes
+    // per-platform builds, an unlabelled archive is some other artefact — not a
+    // universal binary — so measuring it is measuring the wrong thing.
+    //
+    // A genuinely universal release, where nothing declares a platform, is
+    // untouched by this.
+    let declares_platform = |n: &String| detect_platform_from_url(n).is_some();
+    let names: Vec<String> = if usable.iter().any(declares_platform) {
+        usable
+            .into_iter()
+            .filter(|n| declares_platform(n))
+            .collect()
+    } else {
+        usable
+    };
+    let picked = AssetPicker::with_libc(
+        std::env::consts::OS.to_string(),
+        std::env::consts::ARCH.to_string(),
+        host_libc(),
+    )
+    // A macOS `.app` bundle is not something we can invoke as a subject.
+    .with_no_app(true)
+    .pick_best_asset(&names)?;
+
+    assets.iter().find(|a| a.name == picked)
 }
 
 fn run(cmd: &mut Command, what: &str) -> Result<()> {
@@ -297,10 +358,12 @@ pub fn fetch_binary(asset: &Asset, bin_name: &str, dir: &Path) -> Result<PathBuf
 
     curl(&asset.url, Some(&archive), true)?;
 
-    let n = asset.name.to_lowercase();
-    if TAR_SUFFIXES.iter().any(|e| n.ends_with(e)) {
+    // Same classifier the candidate filter used, so the two can never disagree.
+    // Matching suffixes independently in each place is what let `.vsix` pass the
+    // filter as a zip and then be rejected here as unknown.
+    match Format::from_file_name(&asset.name) {
         // `tar -xf` sniffs the compression, so gz/xz/bz2/zst all work here.
-        run(
+        Format::Tar => run(
             Command::new("tar").args([
                 "-xf",
                 &archive.to_string_lossy(),
@@ -308,9 +371,8 @@ pub fn fetch_binary(asset: &Asset, bin_name: &str, dir: &Path) -> Result<PathBuf
                 &dir.to_string_lossy(),
             ]),
             "tar",
-        )?;
-    } else if n.ends_with(".zip") {
-        run(
+        )?,
+        Format::Zip => run(
             Command::new("unzip").args([
                 "-oq",
                 &archive.to_string_lossy(),
@@ -318,41 +380,23 @@ pub fn fetch_binary(asset: &Asset, bin_name: &str, dir: &Path) -> Result<PathBuf
                 &dir.to_string_lossy(),
             ]),
             "unzip",
-        )?;
-    } else if is_bare_binary(&n) {
+        )?,
         // The download is the artefact.
-        make_executable(&archive)?;
-        return Ok(archive);
-    } else {
-        // Anything else would previously have been *executed* as if it were a
-        // binary. Skipping loudly beats benchmarking a tarball.
-        bail!("unsupported archive format: {}", asset.name);
+        Format::Raw => {
+            make_executable(&archive)?;
+            return Ok(archive);
+        }
+        // Unreachable via `pick_asset`, which filters these out, but a caller
+        // could hand one over directly. Skipping loudly beats executing a
+        // tarball as if it were a program, which is what the old suffix chain
+        // did for anything it did not recognise.
+        other => bail!("cannot unpack {} ({other:?})", asset.name),
     }
 
     let found = find_binary(dir, bin_name)
         .with_context(|| format!("no `{bin_name}` inside {}", asset.name))?;
     make_executable(&found)?;
     Ok(found)
-}
-
-/// Archive suffixes `tar` can unpack unaided.
-const TAR_SUFFIXES: [&str; 7] = [
-    ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tar.zst", ".tar",
-];
-
-/// Is this plausibly a bare executable rather than an archive?
-///
-/// Conservative on purpose: an unrecognised extension is treated as an archive
-/// we cannot open, not as something safe to run.
-fn is_bare_binary(lower_name: &str) -> bool {
-    if lower_name.ends_with(".exe") {
-        return true;
-    }
-    // No extension at all — the usual shape for a raw unix binary.
-    !Path::new(lower_name)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .is_some_and(|f| f.contains('.'))
 }
 
 /// Reduce an untrusted name to a single safe path component.
@@ -489,98 +533,6 @@ pub fn version_of(tag: &str) -> &str {
 mod tests {
     use super::*;
 
-    const LINUX: [&str; 1] = ["linux"];
-    const X64: [&str; 3] = ["x86_64", "amd64", "x64"];
-    const WINDOWS: [&str; 4] = ["windows", "win64", "win32", "win"];
-
-    #[test]
-    fn rejects_checksums_and_signatures() {
-        for n in [
-            "tool-linux-x86_64.tar.gz.sha256",
-            "tool-linux-x86_64.tar.gz.asc",
-            "tool.sbom.json",
-        ] {
-            assert_eq!(score_asset(n, &LINUX, &X64), None, "{n} should be rejected");
-        }
-    }
-
-    #[test]
-    fn rejects_other_platforms() {
-        assert_eq!(score_asset("tool-darwin-arm64.tar.gz", &LINUX, &X64), None);
-        assert_eq!(score_asset("tool-linux-aarch64.tar.gz", &LINUX, &X64), None);
-    }
-
-    #[test]
-    fn rejects_distro_packages() {
-        // These need installing, not extracting, and would silently fail later.
-        assert_eq!(score_asset("tool_1.2.3_amd64.deb", &LINUX, &X64), None);
-        assert_eq!(score_asset("tool-1.2.3.x86_64.rpm", &LINUX, &X64), None);
-    }
-
-    /// `win` is a substring of `darwin`, so substring matching would let a macOS
-    /// tarball satisfy the Windows filter and be measured on the wrong platform.
-    #[test]
-    fn win_token_does_not_match_darwin() {
-        assert_eq!(
-            score_asset("tool-x86_64-apple-darwin.tar.gz", &WINDOWS, &X64),
-            None,
-            "a darwin asset must never satisfy the windows filter"
-        );
-        assert!(score_asset("tool-x86_64-win64.zip", &WINDOWS, &X64).is_some());
-        assert!(score_asset("tool-windows-amd64.zip", &WINDOWS, &X64).is_some());
-        assert!(score_asset("tool-win-x64.zip", &WINDOWS, &X64).is_some());
-    }
-
-    #[test]
-    fn token_matching_respects_word_boundaries() {
-        assert!(contains_token("tool-linux-amd64.tar.gz", "linux"));
-        assert!(contains_token("linux", "linux"));
-        assert!(!contains_token("apple-darwin", "win"));
-        assert!(!contains_token("mylinuxish", "linux"));
-    }
-
-    /// An empty token list means "we do not know this host", which must reject
-    /// rather than match everything.
-    #[test]
-    fn an_unknown_host_matches_nothing() {
-        let none: [&str; 0] = [];
-        assert_eq!(
-            score_asset("tool-linux-x86_64.tar.gz", &none, &X64),
-            None,
-            "unknown OS must not accept a linux asset"
-        );
-        assert_eq!(
-            score_asset("tool-linux-x86_64.tar.gz", &LINUX, &none),
-            None,
-            "unknown arch must not accept an x86_64 asset"
-        );
-    }
-
-    #[test]
-    fn prefers_musl_over_gnu() {
-        let musl = score_asset("tool-x86_64-unknown-linux-musl.tar.gz", &LINUX, &X64).unwrap();
-        let gnu = score_asset("tool-x86_64-unknown-linux-gnu.tar.gz", &LINUX, &X64).unwrap();
-        assert!(musl > gnu, "musl {musl} should outrank gnu {gnu}");
-    }
-
-    #[test]
-    fn prefers_tarball_over_zip() {
-        let tgz = score_asset("tool-linux-amd64.tar.gz", &LINUX, &X64).unwrap();
-        let zip = score_asset("tool-linux-amd64.zip", &LINUX, &X64).unwrap();
-        assert!(tgz > zip);
-    }
-
-    #[test]
-    fn accepts_common_arch_spellings() {
-        for n in [
-            "tool-linux-x86_64.tar.gz",
-            "tool-linux-amd64.tar.gz",
-            "tool-linux-x64.tar.gz",
-        ] {
-            assert!(score_asset(n, &LINUX, &X64).is_some(), "{n} should match");
-        }
-    }
-
     #[test]
     fn pick_asset_chooses_the_best_candidate() {
         let assets: Vec<Asset> = [
@@ -596,10 +548,19 @@ mod tests {
         })
         .collect();
 
-        // Only meaningful on the platform whose tokens the test asserts.
+        // Only meaningful on the platform this asserts against.
         if std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64" {
             let got = pick_asset(&assets).expect("something should match");
-            assert_eq!(got.name, "tool-x86_64-unknown-linux-musl.tar.gz");
+            // gnu, not musl, on a glibc host. The two builds differ in
+            // allocator and startup cost, so the one users actually run is the
+            // one worth measuring — and it is never the darwin asset or the
+            // checksum file.
+            let want = if cfg!(target_env = "musl") {
+                "tool-x86_64-unknown-linux-musl.tar.gz"
+            } else {
+                "tool-x86_64-unknown-linux-gnu.tar.gz"
+            };
+            assert_eq!(got.name, want);
         }
     }
 
@@ -621,6 +582,182 @@ mod tests {
         }
         // An explicit .exe must not become mycli.exe.exe.
         assert_eq!(binary_candidates("mycli.exe").len(), 1);
+    }
+
+    #[test]
+    fn source_archives_are_not_benchmark_subjects() {
+        // The picker selects these when they are the only candidate; they
+        // contain no executable.
+        assert!(!is_usable_subject("tool-1.0-source.tar.gz"));
+        assert!(!is_usable_subject("tool-src.tar.gz"));
+        assert!(!is_usable_subject("sources.zip"));
+        // Whole-word, so a tool whose name merely contains "src" survives.
+        assert!(is_usable_subject("resource-cli-linux-x86_64.tar.gz"));
+        assert!(is_usable_subject("srcery-linux-amd64.tar.gz"));
+    }
+
+    #[test]
+    fn sidecars_are_never_subjects() {
+        // Verified against the real picker: given only the .sha256 it returns
+        // exactly that, so the filter has to catch them.
+        for n in [
+            "tool-x86_64-unknown-linux-gnu.tar.gz.sha256",
+            "tool-x86_64-unknown-linux-gnu.tar.gz.asc",
+            "tool.sig",
+            "tool.intoto.jsonl",
+        ] {
+            assert!(!is_usable_subject(n), "{n} should be rejected");
+        }
+    }
+
+    /// A .vsix unpacks fine — it is a zip — but never contains a CLI binary,
+    /// so admitting it costs a download and a confusing skip.
+    #[test]
+    fn vsix_is_openable_but_never_a_subject() {
+        assert_eq!(Format::from_file_name("tool.vsix"), Format::Zip);
+        assert!(!is_usable_subject("tool-linux-x86_64.vsix"));
+    }
+
+    /// `Format::Raw` means "no recognised archive suffix", which is not the
+    /// same as "an executable".
+    #[test]
+    fn platform_tagged_metadata_is_not_a_subject() {
+        for n in [
+            "tool-linux-x86_64.json",
+            "tool-linux-x86_64.yaml",
+            "tool-linux-x86_64.run",
+            "tool-linux-x86_64.txt",
+        ] {
+            assert!(!is_usable_subject(n), "{n} should be rejected");
+        }
+        // A genuine bare binary still qualifies.
+        assert!(is_usable_subject("tool-linux-x86_64"));
+        assert!(is_usable_subject("tool.exe"));
+    }
+
+    /// A version's dots are not a file extension, and rejecting on "contains a
+    /// dot" threw away raw binaries that projects really do publish.
+    #[test]
+    fn a_versioned_bare_binary_is_still_a_subject() {
+        assert!(is_usable_subject("tool-v1.2.3-linux-x86_64"));
+        assert!(is_usable_subject("tool-1.2.3"));
+        assert!(is_usable_subject("tool-linux-amd64-2024.01.15"));
+    }
+
+    #[test]
+    fn extension_detection_distinguishes_versions_from_suffixes() {
+        assert!(has_file_extension("tool.json"));
+        assert!(has_file_extension("tool.yaml"));
+        assert!(has_file_extension("tool.exe"));
+        // Trailing version components, not extensions.
+        assert!(!has_file_extension("tool-1.2.3"));
+        assert!(!has_file_extension("tool-v1.2.3-linux-x86_64"));
+        assert!(!has_file_extension("tool"));
+    }
+
+    #[test]
+    fn tar_codecs_the_host_may_lack_are_skipped() {
+        assert!(is_usable_subject("tool-linux-x86_64.tar.gz"));
+        assert!(is_usable_subject("tool-linux-x86_64.tar.zst"));
+        // Better to let the picker choose another asset than to fail at
+        // extraction and skip the release entirely.
+        assert!(!is_usable_subject("tool-linux-x86_64.tar.br"));
+        assert!(!is_usable_subject("tool-linux-x86_64.tar.lz4"));
+    }
+
+    #[test]
+    fn only_openable_formats_are_subjects() {
+        assert!(is_usable_subject("tool-linux-x86_64.tar.gz"));
+        assert!(is_usable_subject("tool-linux-x86_64.zip"));
+        assert!(is_usable_subject("tool"));
+        assert!(is_usable_subject("tool.exe"));
+        // fetch_binary cannot open these, and picking one skips the release.
+        assert!(!is_usable_subject("tool-linux-x86_64.7z"));
+        assert!(!is_usable_subject("tool-linux-x86_64.gz"));
+        assert!(!is_usable_subject("tool.rar"));
+    }
+
+    #[test]
+    fn a_platform_asset_beats_a_source_drop() {
+        let assets: Vec<Asset> = [
+            "tool-1.0-source.tar.gz",
+            "tool-x86_64-unknown-linux-gnu.tar.gz",
+        ]
+        .iter()
+        .map(|n| Asset {
+            name: n.to_string(),
+            url: format!("https://example.invalid/{n}"),
+        })
+        .collect();
+        if std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64" {
+            assert_eq!(
+                pick_asset(&assets).map(|a| a.name.as_str()),
+                Some("tool-x86_64-unknown-linux-gnu.tar.gz")
+            );
+        }
+    }
+
+    /// The picker disables a filter it cannot populate, so an unrecognised host
+    /// must be refused before it ever gets there.
+    #[test]
+    fn unrecognised_hosts_are_refused() {
+        let recognised = matches!(std::env::consts::OS, "linux" | "macos" | "windows")
+            && matches!(std::env::consts::ARCH, "x86_64" | "aarch64");
+        assert_eq!(host_is_recognised(), recognised);
+
+        if !host_is_recognised() {
+            let assets = vec![Asset {
+                name: "tool-x86_64-unknown-linux-gnu.tar.gz".to_string(),
+                url: "https://example.invalid/x".to_string(),
+            }];
+            assert!(pick_asset(&assets).is_none());
+        }
+    }
+
+    /// The case that motivated the platform-evidence rule: a release with
+    /// per-platform builds, none of them ours, plus an unlabelled archive.
+    #[test]
+    fn an_unlabelled_archive_never_substitutes_for_a_platform_build() {
+        let assets: Vec<Asset> = ["tool-x86_64-unknown-linux-gnu.tar.gz", "tool.tar.gz"]
+            .iter()
+            .map(|n| Asset {
+                name: n.to_string(),
+                url: format!("https://example.invalid/{n}"),
+            })
+            .collect();
+
+        // On linux/x86_64 the labelled asset is the right answer.
+        if std::env::consts::OS == "linux" && std::env::consts::ARCH == "x86_64" {
+            assert_eq!(
+                pick_asset(&assets).map(|a| a.name.as_str()),
+                Some("tool-x86_64-unknown-linux-gnu.tar.gz")
+            );
+        }
+        // On macOS the linux asset does not apply, and falling back to
+        // `tool.tar.gz` would benchmark whatever that happens to be.
+        if std::env::consts::OS == "macos" {
+            assert!(pick_asset(&assets).is_none());
+        }
+    }
+
+    /// A release where nothing declares a platform is still usable — that is a
+    /// real and common shape, and rejecting it would exclude those projects.
+    #[test]
+    fn a_wholly_unlabelled_release_is_still_usable() {
+        let assets = vec![Asset {
+            name: "tool.tar.gz".to_string(),
+            url: "https://example.invalid/tool.tar.gz".to_string(),
+        }];
+        assert!(pick_asset(&assets).is_some());
+    }
+
+    #[test]
+    fn a_release_of_only_source_yields_nothing() {
+        let assets = vec![Asset {
+            name: "tool-1.0-source.tar.gz".to_string(),
+            url: "https://example.invalid/x".to_string(),
+        }];
+        assert!(pick_asset(&assets).is_none());
     }
 
     #[test]
