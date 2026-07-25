@@ -97,13 +97,33 @@ Measuring and storing work. Nothing reads the data back yet.
 - [x] concurrent CI writers merge via `cat_sort_uniq`
 - [x] `tak backfill` — benchmark published release binaries to bootstrap history
 - [x] asset selection via `crates/asset-picker`, extracted from mise
+- [x] `tak.toml` — declare benchmarks so CI and a laptop measure the same thing
 - [ ] `tak compare <ref>` — interleaved A/B against another revision
-- [ ] `bench.toml`
+
 - [ ] PR reporting
 - [ ] change-point detection instead of thresholds
 
 Releases are automated with release-plz and publish to crates.io via trusted publishing —
 see [RELEASING.md](RELEASING.md). The crate is `tak-cli`; the binary is `tak`.
+
+## Declaring benchmarks
+
+`tak run` with no command runs whatever `tak.toml` declares, searching upward from the working
+directory. The point is that CI and a laptop measure the same thing — a command line in a
+workflow file drifts from the one people run locally, and the numbers stop being comparable
+without anyone noticing.
+
+```toml
+[bench.startup]
+cmd = ["./target/release/mycli", "--version"]
+
+[bench.help]
+cmd = "mycli --help"    # split on whitespace; there is no shell
+runs = 10
+```
+
+`tak run --bench startup` runs one of them. A command after `--` always wins, so ad-hoc
+measurement never depends on repository state.
 
 ## Counters on macOS and Windows
 

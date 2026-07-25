@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use std::collections::BTreeMap;
 
 use tak_cli::backfill;
+use tak_cli::config::{self, Config};
 use tak_cli::measure::{self, Plan};
 use tak_cli::notes;
 use tak_cli::record::{Record, SCHEMA_VERSION};
@@ -20,11 +21,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Benchmark a command.
+    /// Benchmark a command, or everything declared in tak.toml.
     Run {
-        /// Name to record this measurement under.
-        #[arg(long, default_value = "default")]
-        bench: String,
+        /// Name to record this measurement under. With no command, selects a
+        /// single benchmark from tak.toml instead of running all of them.
+        #[arg(long)]
+        bench: Option<String>,
         /// Timed runs.
         #[arg(long, default_value_t = 20)]
         runs: u32,
@@ -37,8 +39,8 @@ enum Cmd {
         /// Append the result to refs/notes/tak for the current commit.
         #[arg(long)]
         record: bool,
-        /// Command to benchmark, after `--`.
-        #[arg(last = true, required = true)]
+        /// Command to benchmark, after `--`. Omit to run what tak.toml declares.
+        #[arg(last = true)]
         cmd: Vec<String>,
     },
     /// Show recorded history for a commit.
@@ -137,23 +139,82 @@ fn now_rfc3339() -> String {
 }
 
 fn cmd_run(
-    bench: String,
+    bench: Option<String>,
     runs: u32,
     warmup: u32,
     no_counters: bool,
     record_it: bool,
     cmd: Vec<String>,
 ) -> Result<()> {
+    // An explicit command always wins; tak.toml is only consulted when none is
+    // given, so ad-hoc measurement never depends on repository state.
+    if cmd.is_empty() {
+        return run_declared(bench, no_counters, record_it);
+    }
+    let bench = bench.unwrap_or_else(|| "default".to_string());
     let plan = Plan {
         cmd: cmd.clone(),
         warmup,
         runs,
     };
+    measure_and_report(&bench, &plan, no_counters, record_it)
+}
 
-    let mut metrics: BTreeMap<String, f64> = measure::wall(&plan)?;
+/// Run the benchmarks declared in `tak.toml`.
+fn run_declared(only: Option<String>, no_counters: bool, record_it: bool) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let Some((path, cfg)) = Config::find(&cwd)? else {
+        bail!(
+            "no command given and no {} found in {} or any parent.\n\
+             Pass a command after `--`, or declare one:\n\n\
+             \x20   [bench.startup]\n\
+             \x20   cmd = [\"./mycli\", \"--version\"]",
+            config::FILE_NAME,
+            cwd.display()
+        );
+    };
+
+    let selected: Vec<_> = match &only {
+        Some(name) => {
+            let b = cfg.bench.get(name).with_context(|| {
+                format!(
+                    "no benchmark `{name}` in {} (found: {})",
+                    path.display(),
+                    if cfg.bench.is_empty() {
+                        "none".to_string()
+                    } else {
+                        cfg.bench.keys().cloned().collect::<Vec<_>>().join(", ")
+                    }
+                )
+            })?;
+            vec![(name.clone(), b)]
+        }
+        None => cfg.bench.iter().map(|(k, v)| (k.clone(), v)).collect(),
+    };
+
+    if selected.is_empty() {
+        println!("{} declares no benchmarks", path.display());
+        return Ok(());
+    }
+
+    for (name, b) in selected {
+        let plan = Plan {
+            cmd: b.argv()?,
+            warmup: b.warmup(),
+            runs: b.runs(),
+        };
+        measure_and_report(&name, &plan, no_counters, record_it)?;
+    }
+    Ok(())
+}
+
+/// Measure one benchmark, print it, and optionally record it.
+fn measure_and_report(bench: &str, plan: &Plan, no_counters: bool, record_it: bool) -> Result<()> {
+    let cmd = &plan.cmd;
+    let mut metrics: BTreeMap<String, f64> = measure::wall(plan)?;
 
     if !no_counters {
-        match measure::instructions(&cmd) {
+        match measure::instructions(cmd) {
             Ok(Some(c)) => {
                 metrics.insert("instructions".into(), c.min as f64);
                 if c.is_suspect() {
@@ -179,7 +240,7 @@ fn cmd_run(
         }
     }
 
-    println!("  {}", cmd.join(" "));
+    println!("  {bench}  {}", cmd.join(" "));
     for (k, v) in &metrics {
         if k == "wall_n" {
             continue;
@@ -195,7 +256,7 @@ fn cmd_run(
         let sha = notes::rev_parse("HEAD").context("not in a git repository")?;
         let rec = Record {
             v: SCHEMA_VERSION,
-            bench,
+            bench: bench.to_string(),
             tool: std::env::var("TAK_TOOL").unwrap_or_else(|_| "self".into()),
             version: None,
             runner: runner_class(),

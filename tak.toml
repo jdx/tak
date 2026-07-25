@@ -1,0 +1,8 @@
+# Benchmarks for tak itself. Startup cost is what a CLI's users feel first, and
+# it is the metric instruction counting measures best.
+[bench.version]
+cmd = ["./target/release/tak", "--version"]
+
+[bench.help]
+cmd = ["./target/release/tak", "--help"]
+runs = 10
