@@ -11,3 +11,4 @@ pub mod config;
 pub mod measure;
 pub mod notes;
 pub mod record;
+pub mod settings;

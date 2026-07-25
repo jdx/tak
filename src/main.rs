@@ -12,12 +12,23 @@ use tak_cli::config::{self, Config, DEFAULT_RUNS, DEFAULT_WARMUP};
 use tak_cli::measure::{self, Plan};
 use tak_cli::notes;
 use tak_cli::record::{Record, SCHEMA_VERSION};
+use tak_cli::settings::{self, Overrides, Settings};
 
 #[derive(Parser)]
 #[command(name = "tak", version, about = "CLI performance, tracked", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+
+    // Global so a setting is spelled the same wherever it applies, rather than
+    // being repeated per subcommand and drifting. See settings.toml.
+    /// Remove a variable from the environment of measured commands. Repeatable.
+    /// Replaces the default list rather than adding to it.
+    #[arg(long, global = true, value_name = "VAR")]
+    env_deny: Vec<String>,
+    /// Keep a variable that --env-deny would remove. Repeatable.
+    #[arg(long, global = true, value_name = "VAR")]
+    env_allow: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -95,6 +106,12 @@ enum Cmd {
     },
     /// Diagnose the git-notes plumbing.
     Doctor,
+    /// Show every setting, its resolved value, and where that value came from.
+    Settings {
+        /// Include the full description of each setting.
+        #[arg(long)]
+        docs: bool,
+    },
 }
 
 /// Identify the machine class. Series must be partitioned on this — moving
@@ -547,8 +564,68 @@ fn cmd_backfill(
     Ok(())
 }
 
+/// Resolve settings from the CLI, the environment, and `tak.toml`.
+///
+/// A missing or unreadable `tak.toml` is not fatal here: `tak run -- cmd` works
+/// in any directory, and settings must too.
+fn resolve_settings(cli: &Cli) -> Settings {
+    let config = config::Config::find(&std::env::current_dir().unwrap_or_default())
+        .ok()
+        .flatten()
+        .and_then(|(_, c)| c.env);
+    let overrides = Overrides {
+        env_deny: settings::from_cli(cli.env_deny.clone()),
+        env_allow: settings::from_cli(cli.env_allow.clone()),
+    };
+    Settings::from_process(&overrides, config.as_ref())
+}
+
+/// Print the settings registry with resolved values.
+fn cmd_settings(resolved: &Settings, docs: bool) -> Result<()> {
+    let scrubbed: Vec<&str> = resolved.scrubbed_env().collect();
+    for meta in settings::SETTINGS {
+        let value = match meta.name {
+            "env_allow" => &resolved.env_allow,
+            "env_deny" => &resolved.env_deny,
+            // Unreachable while every setting is wired above; a new one added
+            // to settings.toml lands here rather than being silently omitted.
+            other => {
+                println!("  {other}  (no accessor — wire it into cmd_settings)");
+                continue;
+            }
+        };
+        println!("{}  {}", meta.name, meta.type_);
+        println!("  value    {value:?}");
+        println!("  default  {}", meta.default);
+        if !meta.cli_flags.is_empty() {
+            println!("  cli      {}", meta.cli_flags.join(", "));
+        }
+        if !meta.env_vars.is_empty() {
+            println!("  env      {}", meta.env_vars.join(", "));
+        }
+        if !meta.config_keys.is_empty() {
+            println!("  tak.toml {}", meta.config_keys.join(", "));
+        }
+        println!("  since    {}", meta.since);
+        if docs {
+            println!();
+            for line in meta.docs.trim().lines() {
+                println!("  {line}");
+            }
+            for example in meta.examples {
+                println!("  $ {example}");
+            }
+        }
+        println!();
+    }
+    println!("removed from measured commands: {scrubbed:?}");
+    Ok(())
+}
+
 fn main() -> Result<()> {
-    match Cli::parse().cmd {
+    let cli = Cli::parse();
+    let resolved = resolve_settings(&cli);
+    match cli.cmd {
         Cmd::Run {
             bench,
             runs,
@@ -581,6 +658,7 @@ fn main() -> Result<()> {
             dry_run,
         } => cmd_backfill(repo, bin, args, bench, limit, runs, dry_run),
         Cmd::Doctor => cmd_doctor(),
+        Cmd::Settings { docs } => cmd_settings(&resolved, docs),
     }
 }
 

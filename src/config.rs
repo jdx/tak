@@ -27,6 +27,22 @@ pub struct Config {
     /// rather than following the file's incidental key order.
     #[serde(default)]
     pub bench: BTreeMap<String, Bench>,
+    /// Project-level environment settings. See `settings.toml` for what these
+    /// mean; this type only says where they can be written.
+    #[serde(default)]
+    pub env: Option<EnvSection>,
+}
+
+/// The `[env]` table in `tak.toml`.
+///
+/// Both fields are `Option` so an absent key defers to the environment and the
+/// declared default, while `deny = []` is an explicit empty list. Making them
+/// plain `Vec` would erase that distinction and turn "I did not mention this"
+/// into "I want nothing scrubbed".
+#[derive(Debug, Deserialize, Default, Clone, PartialEq, Eq)]
+pub struct EnvSection {
+    pub allow: Option<Vec<String>>,
+    pub deny: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
