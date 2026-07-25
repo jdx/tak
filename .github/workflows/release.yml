@@ -122,3 +122,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
         run: gh release upload "$TAG" release-assets/* --repo "${{ github.repository }}" --clobber
+
+      # Called from release-plz.yml, undrafting is that workflow's job — it
+      # happens after this one returns. Run by hand, nothing else will do it,
+      # and the release would sit drafted forever. Since manual dispatch is the
+      # documented recovery for a build that failed after the tag existed, that
+      # would leave the recovery path itself broken.
+      - name: Publish the release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: gh release edit "$TAG" --repo "${{ github.repository }}" --draft=false

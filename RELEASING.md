@@ -67,8 +67,11 @@ You should not need to, but:
 gh workflow run release.yml -f tag=v0.1.0
 ```
 
-builds and attaches binaries to an existing tag. Useful when a build failed after the tag was
-already created — the job is idempotent and uses `--clobber`.
+builds and attaches binaries to an existing tag, then publishes the release. Useful when a
+build failed after the tag was already created — the job is idempotent and uses `--clobber`.
+
+The undraft only happens on manual dispatch. When `release-plz.yml` calls this workflow it
+publishes the release itself, once the assets are in place.
 
 ## Targets
 
