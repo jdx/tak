@@ -1,0 +1,26 @@
+{
+  "name": "tak",
+  "short_name": "tak",
+  "description": "Benchmark CI on instruction counts, stored in git notes",
+  "start_url": "/",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "/android-chrome-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/android-chrome-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "theme_color": "#0F131A",
+  "background_color": "#0F131A",
+  "display": "standalone"
+}

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 251 194" width="251" height="194" role="img" aria-label="tak">
+  <style>
+    @media (prefers-color-scheme:dark){.ink{stroke:#F2F5F9} .ink-f{fill:#F2F5F9} .track{stroke:#333D4B} .track-f{fill:#333D4B} .tick{stroke:#6C7788} .tick-f{fill:#6C7788}}
+  </style>
+  <g transform="translate(8,0)"><path d="M 26 44 L 26 134 Q 26 150 42 150" class="ink" stroke="#12161C" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="6" y1="78" x2="52" y2="78" class="ink" stroke="#12161C" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 139.85 93.87 A 36 36 0 1 1 117.48 78.79" class="ink" stroke="#12161C" fill="none" stroke-width="14" stroke-linecap="butt"/>
+  <path d="M 117.48 78.79 A 36 36 0 0 1 139.85 93.87" class="red" stroke="#E5484D" fill="none" stroke-width="14" stroke-linecap="butt"/>
+  <line x1="146" y1="78" x2="146" y2="150" class="ink" stroke="#12161C" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 123.42 94.1 L 114.56 117.08 L 105.44 110.92 Z" class="ink-f" fill="#12161C"/>
+  <circle cx="110" cy="114" r="6.5" class="ink-f" fill="#12161C"/>
+  <line x1="188" y1="44" x2="188" y2="150" class="ink" stroke="#12161C" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="234" y1="78" x2="188" y2="120" class="ink" stroke="#12161C" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="205" y1="103" x2="236" y2="150" class="ink" stroke="#12161C" fill="none" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/></g>
+</svg>
