@@ -71,6 +71,43 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "tak-cli tag: ${tag:-<none released>}"
 
+  # release-plz writes the body from commit subjects via cliff.toml. communique
+  # replaces it with prose written from the commits, PRs and diffs. It runs
+  # against the draft, in parallel with the seven binary builds, so the raw
+  # version is never visible and the rewrite costs no extra wall clock.
+  #
+  # Nothing here is worth holding a release for: the cliff.toml notes are
+  # already on the draft and perfectly serviceable. `continue-on-error` at the
+  # job level — rather than on the communique step — so an install or checkout
+  # failure is survivable too. The job still shows as failed, it just does not
+  # block `publish-release`.
+  enhance-release:
+    name: Enhance release notes
+    needs: release-plz-release
+    if: ${{ needs.release-plz-release.outputs.tag != '' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # communique diffs the new tag against the previous one, so it needs
+          # the tags and the history between them.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+
+      # The token has to be the PAT: the /releases/tags endpoint hides drafts,
+      # so communique falls back to listing releases, which needs write access.
+      - name: Rewrite the release body with communique
+        env:
+          TAG: ${{ needs.release-plz-release.outputs.tag }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: communique generate "$TAG" --github-release
+
   # Binaries are attached to the draft, then the draft is published — so a
   # release is never visible without its assets.
   upload-assets:
@@ -85,7 +122,7 @@ jobs:
 
   publish-release:
     name: Publish release
-    needs: [release-plz-release, upload-assets]
+    needs: [release-plz-release, upload-assets, enhance-release]
     if: ${{ needs.release-plz-release.outputs.tag != '' }}
     runs-on: ubuntu-latest
     permissions:
