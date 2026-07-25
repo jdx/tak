@@ -33,6 +33,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
+      # The tasks live in mise.toml so that a laptop and this runner invoke the
+      # same commands — the same reason tak.toml exists for benchmarks.
+      # `install: false` because the only tool declared there is communique,
+      # which the release workflow needs and this job does not.
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+        with:
+          install: false
+
       # The whole premise of this project is that instruction counts are stable
       # enough to gate on. That path is a subprocess call, so it can only be
       # exercised where valgrind exists — and it once shipped having never run.
@@ -42,9 +50,8 @@ jobs:
 
       - run: valgrind --version
 
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --all-targets
+      - run: mise run lint
+      - run: mise run test
 
   # macOS has no usable cachegrind, so counters are expected to be absent here.
   # This job asserts the degradation path rather than the measurement path.
@@ -57,7 +64,10 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo test --all-targets
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+        with:
+          install: false
+      - run: mise run test
 
   # Single fan-in gate, so branch protection requires one check instead of an
   # enumerated list that goes stale every time a job is added or renamed. It
