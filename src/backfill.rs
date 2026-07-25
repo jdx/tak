@@ -62,7 +62,13 @@ fn github_token() -> Option<String> {
 /// directives. A crafted `browser_download_url` could then add its own `url =`
 /// line and receive the Authorization header meant for GitHub.
 fn curl(url: &str, output: Option<&Path>, auth: bool) -> Result<Vec<u8>> {
-    let mut cfg = String::from("silent\nshow-error\nlocation\nfail\n");
+    // `proto`/`proto-redir` are the load-bearing part: `location` follows
+    // redirects, and without pinning the redirect protocol a downgrade to
+    // http:// on the same host would carry the Authorization header in clear.
+    // Checking only the initial URL is not enough.
+    let mut cfg = String::from(
+        "silent\nshow-error\nlocation\nfail\nproto = \"=https\"\nproto-redir = \"=https\"\n",
+    );
     cfg.push_str("header = \"User-Agent: tak\"\n");
     if auth && let Some(token) = github_token() {
         // curl's config format has no escape for `"` inside a quoted value, and

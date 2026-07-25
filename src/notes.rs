@@ -49,16 +49,23 @@ fn git(args: &[&str]) -> Result<String> {
 /// useful failure. Only applied when the user has not set one, so a real
 /// identity is never overridden.
 fn identity_args() -> Vec<&'static str> {
-    let configured = Command::new("git")
-        .args(["config", "--get", "user.email"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if configured {
-        vec![]
-    } else {
-        vec!["-c", "user.name=tak", "-c", "user.email=tak@localhost"]
+    let configured = |key: &str| {
+        Command::new("git")
+            .args(["config", "--get", key])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    // Checked independently: a machine with `user.name` set but no email would
+    // otherwise have its real name replaced by the placeholder.
+    let mut args = Vec::new();
+    if !configured("user.name") {
+        args.extend_from_slice(&["-c", "user.name=tak"]);
     }
+    if !configured("user.email") {
+        args.extend_from_slice(&["-c", "user.email=tak@localhost"]);
+    }
+    args
 }
 
 /// Like [`git`] but prepends a fallback identity, for commands that commit.
