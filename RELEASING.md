@@ -2,7 +2,7 @@
 
 Releases are automated with [release-plz](https://release-plz.dev). Merge to `main`, and
 release-plz opens a release PR that bumps versions and writes the changelog. Merging *that*
-tags, publishes to crates.io, builds binaries for eight targets, attaches them, and publishes
+tags, publishes to crates.io, builds binaries for seven targets, attaches them, and publishes
 the GitHub release.
 
 The release stays a draft until its binaries are attached, so it never appears without them.
@@ -34,7 +34,7 @@ trigger other workflows, so the release PR it opened would never run CI.
 gh workflow run release.yml -f tag=v0.1.0
 ```
 
-Builds all eight targets, attaches them with `--clobber`, and publishes the release. It is
+Builds all seven targets, attaches them with `--clobber`, and publishes the release. It is
 idempotent. The tag and the GitHub release must already exist — release-plz creates both, and
 this workflow only rebuilds and reattaches.
 
@@ -47,15 +47,17 @@ only when they differ. "already up to date" means the published crate really is 
 
 ## Targets
 
-Eight targets. musl is not only about portability: `tak backfill` runs inside slim containers,
+Seven targets. musl is not only about portability: `tak backfill` runs inside slim containers,
 and a static binary needs no libc to match.
 
 ```
-x86_64-unknown-linux-gnu     x86_64-apple-darwin
-x86_64-unknown-linux-musl    aarch64-apple-darwin
-aarch64-unknown-linux-gnu    x86_64-pc-windows-msvc
-aarch64-unknown-linux-musl   aarch64-pc-windows-msvc
+x86_64-unknown-linux-gnu     aarch64-apple-darwin
+x86_64-unknown-linux-musl    x86_64-pc-windows-msvc
+aarch64-unknown-linux-gnu    aarch64-pc-windows-msvc
+aarch64-unknown-linux-musl
 ```
+
+macOS is Apple Silicon only. Intel Macs are not a target we publish for.
 
 `SHA256SUMS` is attached alongside. `tak backfill` skips checksum sidecars when choosing an
 asset, so this costs nothing downstream.
