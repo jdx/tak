@@ -246,7 +246,7 @@ fn is_usable_subject(name: &str) -> bool {
         // all, or `.exe`.
         Format::Raw => {
             let base = n.rsplit('/').next().unwrap_or(&n);
-            base.ends_with(".exe") || !base.contains('.')
+            base.ends_with(".exe") || !has_file_extension(base)
         }
         // `tar` handles gz/xz/bz2/zst everywhere, but brotli and lz4 depend on
         // the host build. Admitting one only to fail at extraction turns a
@@ -255,6 +255,25 @@ fn is_usable_subject(name: &str) -> bool {
         Format::Tar => !TAR_NEEDS_RARE_CODEC.iter().any(|e| n.ends_with(e)),
         Format::Zip => true,
         _ => false,
+    }
+}
+
+/// Does this filename end in something that looks like a file extension?
+///
+/// "Contains a dot" is not the same question. A raw unix binary is routinely
+/// published as `tool-v1.2.3-linux-x86_64`, and treating the version's dots as
+/// an extension rejects a perfectly good subject. An extension is short, purely
+/// alphanumeric, and not just digits — `json` and `yaml` qualify, the `3` at
+/// the end of a version does not.
+fn has_file_extension(base: &str) -> bool {
+    match base.rsplit_once('.') {
+        None => false,
+        Some((_, ext)) => {
+            !ext.is_empty()
+                && ext.len() <= 6
+                && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                && !ext.chars().all(|c| c.is_ascii_digit())
+        }
     }
 }
 
@@ -594,6 +613,26 @@ mod tests {
         // A genuine bare binary still qualifies.
         assert!(is_usable_subject("tool-linux-x86_64"));
         assert!(is_usable_subject("tool.exe"));
+    }
+
+    /// A version's dots are not a file extension, and rejecting on "contains a
+    /// dot" threw away raw binaries that projects really do publish.
+    #[test]
+    fn a_versioned_bare_binary_is_still_a_subject() {
+        assert!(is_usable_subject("tool-v1.2.3-linux-x86_64"));
+        assert!(is_usable_subject("tool-1.2.3"));
+        assert!(is_usable_subject("tool-linux-amd64-2024.01.15"));
+    }
+
+    #[test]
+    fn extension_detection_distinguishes_versions_from_suffixes() {
+        assert!(has_file_extension("tool.json"));
+        assert!(has_file_extension("tool.yaml"));
+        assert!(has_file_extension("tool.exe"));
+        // Trailing version components, not extensions.
+        assert!(!has_file_extension("tool-1.2.3"));
+        assert!(!has_file_extension("tool-v1.2.3-linux-x86_64"));
+        assert!(!has_file_extension("tool"));
     }
 
     #[test]
