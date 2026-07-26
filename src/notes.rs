@@ -21,8 +21,30 @@ use std::process::Command;
 use crate::record::{Record, parse_note};
 
 pub const NOTES_REF: &str = "refs/notes/tak";
-/// Force refspec: the local copy is a cache of the remote, never a divergent branch.
-const REFSPEC: &str = "+refs/notes/tak:refs/notes/tak";
+
+/// Scratch ref the remote is fetched into, so a fetch never lands directly on
+/// the ref holding records that have not been pushed yet.
+const REMOTE_REF: &str = "refs/notes/tak-remote";
+
+/// Refspec for reading. Forced, which is safe because it only ever overwrites
+/// the scratch ref.
+const FETCH_REFSPEC: &str = "+refs/notes/tak:refs/notes/tak-remote";
+
+/// Refspec for writing, deliberately **not** forced.
+///
+/// A forced push always succeeds. That makes the retry-and-merge loop below
+/// unreachable and lets any writer with a stale or empty local ref replace the
+/// entire remote history in one shot. It is not a hypothetical: a CI job whose
+/// checkout had never fetched notes recorded one measurement, pushed, and
+/// destroyed 60 backfilled ones in jdx/aube.
+///
+/// Without the `+`, that push is rejected as a non-fast-forward, and the loop
+/// fetches the remote, merges it in with cat_sort_uniq, and tries again.
+const PUSH_REFSPEC: &str = "refs/notes/tak:refs/notes/tak";
+
+/// Refspec suggested to users for plain `git fetch`, which has no local records
+/// to lose because it is a read-only convenience for people who never run tak.
+const USER_FETCH_REFSPEC: &str = "+refs/notes/tak:refs/notes/tak";
 /// Number of fetch/merge/push attempts before giving up on a contended push.
 const PUSH_ATTEMPTS: u32 = 5;
 
@@ -95,8 +117,38 @@ fn git_ok(args: &[&str]) -> Result<(bool, String)> {
 /// Never fatal: a developer may be offline, or the remote may have no notes yet.
 /// Callers fall back to whatever is in the local ref.
 pub fn fetch(remote: &str) -> Result<bool> {
-    let (ok, _) = git_ok(&["fetch", "--quiet", "--depth", "1", remote, REFSPEC])?;
-    Ok(ok)
+    let (ok, _) = git_ok(&["fetch", "--quiet", "--depth", "1", remote, FETCH_REFSPEC])?;
+    if !ok {
+        return Ok(false);
+    }
+    absorb_remote()?;
+    Ok(true)
+}
+
+/// Fold the fetched remote notes into the local ref, keeping both sides.
+///
+/// Reading used to fetch straight onto `refs/notes/tak`, so `tak history` after
+/// a local `tak run --record` threw the local record away before it could be
+/// pushed. Merging instead of overwriting is the same choice the push path
+/// makes, for the same reason: neither side of this ref is authoritative.
+fn absorb_remote() -> Result<()> {
+    // Nothing local yet: adopt the remote wholesale. `notes merge` needs a ref
+    // to merge into and would fail here.
+    let (has_local, _) = git_ok(&["rev-parse", "--verify", "--quiet", NOTES_REF])?;
+    if !has_local {
+        git(&["update-ref", NOTES_REF, REMOTE_REF])?;
+        return Ok(());
+    }
+    git_committing(&[
+        "notes",
+        "--ref",
+        NOTES_REF,
+        "merge",
+        "-s",
+        "cat_sort_uniq",
+        REMOTE_REF,
+    ])?;
+    Ok(())
 }
 
 /// Read every record attached to `commit`, after refreshing from the remote.
@@ -155,7 +207,7 @@ pub fn append(commit: &str, records: &[Record]) -> Result<()> {
 /// runners' measurements survive the merge.
 pub fn push(remote: &str) -> Result<()> {
     for attempt in 1..=PUSH_ATTEMPTS {
-        let (ok, err) = git_ok(&["push", "--quiet", remote, REFSPEC])?;
+        let (ok, err) = git_ok(&["push", "--quiet", remote, PUSH_REFSPEC])?;
         if ok {
             return Ok(());
         }
@@ -163,21 +215,8 @@ pub fn push(remote: &str) -> Result<()> {
             bail!("could not push {NOTES_REF} after {PUSH_ATTEMPTS} attempts: {err}");
         }
         // Fetch the winner's ref to a scratch location, then merge into ours.
-        git(&[
-            "fetch",
-            "--quiet",
-            remote,
-            "+refs/notes/tak:refs/notes/tak-remote",
-        ])?;
-        git_committing(&[
-            "notes",
-            "--ref",
-            NOTES_REF,
-            "merge",
-            "-s",
-            "cat_sort_uniq",
-            "refs/notes/tak-remote",
-        ])?;
+        git(&["fetch", "--quiet", remote, FETCH_REFSPEC])?;
+        absorb_remote()?;
     }
     unreachable!()
 }
@@ -193,9 +232,9 @@ pub fn rev_parse(rev: &str) -> Result<String> {
 pub fn install_refspec(remote: &str) -> Result<()> {
     let key = format!("remote.{remote}.fetch");
     let (_, existing) = git_ok(&["config", "--get-all", &key])?;
-    if existing.lines().any(|l| l.trim() == REFSPEC) {
+    if existing.lines().any(|l| l.trim() == USER_FETCH_REFSPEC) {
         return Ok(());
     }
-    git(&["config", "--add", &key, REFSPEC])?;
+    git(&["config", "--add", &key, USER_FETCH_REFSPEC])?;
     Ok(())
 }
