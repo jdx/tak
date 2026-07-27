@@ -794,9 +794,20 @@ fn main() -> Result<()> {
             remote,
             no_gate,
         } => cmd_compare(base, rev, remote, no_gate, &resolve_settings(&overrides)?),
-        // Tolerant on purpose: doctor diagnoses a broken setup, so a
-        // tak.toml it cannot read must not stop it from running.
-        Cmd::Doctor => cmd_doctor(&resolve_settings(&overrides).unwrap_or_default()),
+        // Tolerant on purpose: doctor diagnoses a broken setup, so a tak.toml
+        // it cannot read must not stop it from running. Falling all the way
+        // back to the defaults threw away the flag and the environment too, so
+        // doctor reported a derived runner class while a recording would have
+        // used the one the user asked for.
+        Cmd::Doctor => {
+            let resolved = resolve_settings(&overrides).unwrap_or_else(|_| {
+                eprintln!("warning: could not read tak.toml; showing settings without it");
+                Settings::resolve(&overrides, &config::SettingsSections::default(), &|key| {
+                    std::env::var(key).ok()
+                })
+            });
+            cmd_doctor(&resolved)
+        }
         Cmd::Settings { docs } => cmd_settings(&resolve_settings(&overrides)?, docs),
     }
 }

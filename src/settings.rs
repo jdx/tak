@@ -87,6 +87,11 @@ impl Settings {
             runner_class: cli
                 .runner_class
                 .clone()
+                // Blank on the command line means the same as blank anywhere
+                // else: derive it. Treating `--runner ""` as a set value would
+                // block the environment and the config beneath it, and record
+                // every machine under one empty class.
+                .filter(|v| !v.trim().is_empty())
                 // An exported-but-empty variable means "derive it", the same as
                 // not setting it at all — so it falls through rather than
                 // recording every measurement under the empty class.
@@ -267,6 +272,25 @@ mod tests {
         let env = |k: &str| (k == "TAK_ENV_DENY").then(|| " A , B ,, C ".to_string());
         let s = Settings::resolve(&Overrides::default(), &SettingsSections::default(), &env);
         assert_eq!(s.env_deny, ["A", "B", "C"]);
+    }
+
+    /// A blank flag must defer, like a blank variable and a blank config key.
+    /// Otherwise `--runner ""` blocks every lower-precedence source and records
+    /// under an empty class, merging every machine into one series.
+    #[test]
+    fn a_blank_cli_runner_falls_through() {
+        let cfg = SettingsSections {
+            runner: Some(crate::config::RunnerSection {
+                class: Some("from-config".into()),
+            }),
+            ..Default::default()
+        };
+        let cli = Overrides {
+            runner_class: Some("   ".into()),
+            ..Default::default()
+        };
+        let s = Settings::resolve(&cli, &cfg, &no_env);
+        assert_eq!(s.runner_class, "from-config");
     }
 
     #[test]
