@@ -151,6 +151,62 @@ pub fn compare(base: &[Record], head: &[Record]) -> Comparison {
 /// Recent values for each series, oldest first.
 pub type Trend = BTreeMap<Key, Vec<f64>>;
 
+/// Assemble a trend from trunk history plus the revision under comparison.
+///
+/// `walked` is oldest-first, each entry a commit and the records attached to it.
+///
+/// The head's point is appended only when the walk did not already contain it.
+/// Appending unconditionally put it last even when it belongs in the middle —
+/// `tak compare v1.33.0 --rev v1.30.0` compares against an *ancestor*, and the
+/// line then ended on a value from earlier in the history while reading as
+/// though time ran left to right.
+pub fn build_trend(
+    walked: &[(String, Vec<Record>)],
+    head_sha: &str,
+    head_records: &[Record],
+) -> Trend {
+    let mut trend = Trend::new();
+    let mut head_in_history = false;
+    for (sha, records) in walked {
+        if sha == head_sha {
+            head_in_history = true;
+            // Its own measurements, in its own place in the timeline.
+            add_point(&mut trend, head_records);
+        } else {
+            add_point(&mut trend, records);
+        }
+    }
+    if !head_in_history {
+        add_point(&mut trend, head_records);
+    }
+    trend
+}
+
+/// Append one point per series, taking the minimum across a commit's records.
+///
+/// The minimum, matching how `compare` folds duplicates. A commit can carry
+/// several records for one series — a CI re-run, a retry — and taking each as
+/// its own point let a noisy re-run put a spike in the trend that the table,
+/// which reduces to the minimum, does not show.
+fn add_point(trend: &mut Trend, records: &[Record]) {
+    let mut lowest: BTreeMap<Key, f64> = BTreeMap::new();
+    for r in records {
+        if let Some(v) = r.metrics.get(GATED_METRIC) {
+            lowest
+                .entry((r.bench.clone(), r.tool.clone(), r.runner.clone()))
+                .and_modify(|e| {
+                    if v < e {
+                        *e = *v;
+                    }
+                })
+                .or_insert(*v);
+        }
+    }
+    for (key, value) in lowest {
+        trend.entry(key).or_default().push(value);
+    }
+}
+
 /// Eight levels of block, low to high.
 const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
@@ -387,6 +443,10 @@ fn outliers(c: &Comparison) -> String {
 mod tests {
     use super::*;
 
+    fn key(bench: &str) -> Key {
+        (bench.to_string(), "self".to_string(), "gha".to_string())
+    }
+
     fn rec(bench: &str, runner: &str, ins: f64, wall: f64) -> Record {
         Record {
             v: 1,
@@ -569,6 +629,48 @@ mod tests {
         let md = markdown(&c, &Trend::new(), 1.0, false);
         assert!(md.contains("`install` on `gha`"), "{md}");
         assert!(md.contains("`install` (pnpm) on `gha`"), "{md}");
+    }
+
+    /// The common case: the revision under comparison is a branch commit, so
+    /// it is not in trunk history and its point ends the line.
+    #[test]
+    fn a_branch_head_is_appended_last() {
+        let walked = vec![
+            ("c1".to_string(), vec![rec("a", "gha", 10.0, 1.0)]),
+            ("c2".to_string(), vec![rec("a", "gha", 20.0, 1.0)]),
+        ];
+        let t = build_trend(&walked, "branch", &[rec("a", "gha", 30.0, 1.0)]);
+        assert_eq!(t[&key("a")], vec![10.0, 20.0, 30.0]);
+    }
+
+    /// Comparing against an ancestor — `tak compare v1.33.0 --rev v1.30.0` —
+    /// puts the head *inside* the walked history. Appending it at the end as
+    /// well would draw a line that reads as time and is not in time order.
+    #[test]
+    fn a_head_inside_history_stays_in_its_place() {
+        let walked = vec![
+            ("c1".to_string(), vec![rec("a", "gha", 10.0, 1.0)]),
+            ("head".to_string(), vec![rec("a", "gha", 20.0, 1.0)]),
+            ("c3".to_string(), vec![rec("a", "gha", 30.0, 1.0)]),
+        ];
+        let t = build_trend(&walked, "head", &[rec("a", "gha", 99.0, 1.0)]);
+        assert_eq!(
+            t[&key("a")],
+            vec![10.0, 99.0, 30.0],
+            "the head's own measurement belongs where the head is, once"
+        );
+    }
+
+    /// Duplicate records within one commit collapse to the minimum, the same
+    /// rule the table uses — otherwise the two halves of a report disagree.
+    #[test]
+    fn a_commit_contributes_one_point() {
+        let walked = vec![(
+            "c1".to_string(),
+            vec![rec("a", "gha", 50.0, 1.0), rec("a", "gha", 10.0, 1.0)],
+        )];
+        let t = build_trend(&walked, "branch", &[]);
+        assert_eq!(t[&key("a")], vec![10.0]);
     }
 
     #[test]
