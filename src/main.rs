@@ -36,6 +36,9 @@ struct Cli {
     /// Leave the line naming tak off the end of generated reports.
     #[arg(long, global = true)]
     no_credit: bool,
+    /// Machine class to record under. Overrides the derived name.
+    #[arg(long, global = true, value_name = "CLASS")]
+    runner: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -142,9 +145,13 @@ enum Cmd {
 /// Identify the machine class. Series must be partitioned on this — moving
 /// between runner types shifts absolute numbers enough to look like a regression,
 /// which is a documented failure mode of every threshold-based CI benchmark.
-fn runner_class() -> String {
-    if let Ok(v) = std::env::var("TAK_RUNNER") {
-        return v;
+///
+/// An explicit `runner_class` wins. It is how a project partitions on something
+/// the derived name cannot see: a compiler or image upgrade changes the numbers
+/// without changing the machine, and tak has no way to detect that on its own.
+fn runner_class(settings: &Settings) -> String {
+    if !settings.runner_class.trim().is_empty() {
+        return settings.runner_class.clone();
     }
     if std::env::var("GITHUB_ACTIONS").is_ok() {
         let os = std::env::var("RUNNER_OS").unwrap_or_else(|_| "unknown".into());
@@ -346,7 +353,7 @@ fn measure_and_report(bench: &str, plan: &Plan, no_counters: bool) -> Result<Rec
         bench: bench.to_string(),
         tool: std::env::var("TAK_TOOL").unwrap_or_else(|_| "self".into()),
         version: None,
-        runner: runner_class(),
+        runner: runner_class(&plan.settings),
         ts: now_rfc3339(),
         metrics,
     })
@@ -441,7 +448,12 @@ fn cmd_compare(
     )
 }
 
-fn cmd_doctor() -> Result<()> {
+/// Diagnose the plumbing.
+///
+/// Takes settings by value so a `tak.toml` that will not parse cannot stop the
+/// command whose job is to tell you about it — main resolves them tolerantly
+/// and falls back to the defaults.
+fn cmd_doctor(settings: &Settings) -> Result<()> {
     println!("tak doctor\n");
 
     match notes::rev_parse("HEAD") {
@@ -478,7 +490,7 @@ fn cmd_doctor() -> Result<()> {
         Err(e) => println!("  ! notes fetch           {e}"),
     }
 
-    println!("  · runner class          {}", runner_class());
+    println!("  · runner class          {}", runner_class(settings));
     Ok(())
 }
 
@@ -636,7 +648,7 @@ fn cmd_backfill(
             bench: bench.clone(),
             tool: bin.clone(),
             version: Some(backfill::version_of(&rel.tag).to_string()),
-            runner: runner_class(),
+            runner: runner_class(settings),
             // The release's own date, not now: this is when the code existed.
             ts: rel.published_at.clone().unwrap_or_else(now_rfc3339),
             metrics,
@@ -725,6 +737,7 @@ fn main() -> Result<()> {
         // Only a flag that was passed says anything; its absence must defer to
         // tak.toml rather than assert `credit = true`.
         credit: cli.no_credit.then_some(false),
+        runner_class: cli.runner.clone(),
     };
     match cli.cmd {
         Cmd::Run {
@@ -781,7 +794,20 @@ fn main() -> Result<()> {
             remote,
             no_gate,
         } => cmd_compare(base, rev, remote, no_gate, &resolve_settings(&overrides)?),
-        Cmd::Doctor => cmd_doctor(),
+        // Tolerant on purpose: doctor diagnoses a broken setup, so a tak.toml
+        // it cannot read must not stop it from running. Falling all the way
+        // back to the defaults threw away the flag and the environment too, so
+        // doctor reported a derived runner class while a recording would have
+        // used the one the user asked for.
+        Cmd::Doctor => {
+            let resolved = resolve_settings(&overrides).unwrap_or_else(|_| {
+                eprintln!("warning: could not read tak.toml; showing settings without it");
+                Settings::resolve(&overrides, &config::SettingsSections::default(), &|key| {
+                    std::env::var(key).ok()
+                })
+            });
+            cmd_doctor(&resolved)
+        }
         Cmd::Settings { docs } => cmd_settings(&resolve_settings(&overrides)?, docs),
     }
 }
@@ -799,11 +825,29 @@ mod tests {
         assert_eq!(&ts[10..11], "T");
     }
 
+    /// An explicit class wins over the derived one. This is how a project
+    /// partitions its series across a toolchain bump, which tak cannot detect.
     #[test]
-    fn runner_class_is_overridable() {
-        // SAFETY: single-threaded test, no concurrent env access.
-        unsafe { std::env::set_var("TAK_RUNNER", "ns-endev-linux-amd64") };
-        assert_eq!(runner_class(), "ns-endev-linux-amd64");
-        unsafe { std::env::remove_var("TAK_RUNNER") };
+    fn an_explicit_runner_class_wins() {
+        let s = Settings {
+            runner_class: "gha-linux-x64-rust1.85".into(),
+            ..Settings::default()
+        };
+        assert_eq!(runner_class(&s), "gha-linux-x64-rust1.85");
+    }
+
+    /// Empty means derive, and whitespace is empty. Recording under a blank
+    /// class would silently merge every machine into one series.
+    #[test]
+    fn a_blank_class_falls_back_to_the_derived_name() {
+        for blank in ["", "   "] {
+            let s = Settings {
+                runner_class: blank.into(),
+                ..Settings::default()
+            };
+            let got = runner_class(&s);
+            assert!(!got.trim().is_empty(), "{blank:?} produced {got:?}");
+            assert!(got.contains('-'), "expected a derived name, got {got:?}");
+        }
     }
 }

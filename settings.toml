@@ -139,3 +139,37 @@ examples = [
   "TAK_CREDIT=0 tak compare origin/main",
 ]
 since = "0.0.4"
+
+[runner_class]
+type = "string"
+default = ""
+sources.cli = ["--runner"]
+sources.env = ["TAK_RUNNER"]
+sources.config = ["runner.class"]
+docs = """
+The machine class a measurement is recorded under, and compared within.
+
+Empty means derive it: `gha-<os>-<arch>` under GitHub Actions, `local-<os>-<arch>`
+otherwise. That is right until something about the machine changes without the
+name changing.
+
+Series are partitioned on this, and must be. Absolute instruction counts shift
+between machine types by more than a real regression does, so tak will not
+compare across classes — it reports the old series as removed and the new one as
+added rather than inventing a step change.
+
+Set it when the *environment* changes in a way the derived name cannot see. The
+common case is a toolchain bump: a hosted runner image or a compiler upgrade
+between the base measurement and this one is attributed to the code otherwise,
+and on a one-percent gate that is a false failure. Encoding the compiler version
+into the class starts a fresh series at the bump, which is honest — the numbers
+either side genuinely are not comparable.
+
+tak cannot detect this for you. It measures programs, not build systems, and has
+no way to know what produced the binary it is timing.
+"""
+examples = [
+  "TAK_RUNNER=gha-linux-x64-rust1.85 tak run --record",
+  "tak run --runner gha-linux-x64-glibc2.39",
+]
+since = "0.0.6"

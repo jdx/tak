@@ -14,7 +14,7 @@ use std::{env, fs, path::Path};
 /// Widened when a setting needs it, never in advance. A generator that silently
 /// accepted an unknown type would emit a field nothing could set — the setting
 /// would appear in `tak settings`, appear in the docs, and do nothing.
-const SUPPORTED_TYPES: [&str; 3] = ["list<string>", "float", "bool"];
+const SUPPORTED_TYPES: [&str; 4] = ["list<string>", "float", "bool", "string"];
 
 /// The Rust type emitted for a registry type.
 fn rust_type(ty: &str) -> &'static str {
@@ -22,6 +22,7 @@ fn rust_type(ty: &str) -> &'static str {
         "list<string>" => "Vec<String>",
         "float" => "f64",
         "bool" => "bool",
+        "string" => "String",
         other => panic!("no Rust type for `{other}`"),
     }
 }
@@ -67,6 +68,12 @@ fn main() {
                     .or_else(|| default_value.as_integer().map(|i| i as f64))
                     .unwrap_or_else(|| panic!("setting `{name}`: default must be a number"));
                 (format!("{v:?}"), format!("{v}"))
+            }
+            "string" => {
+                let v = default_value
+                    .as_str()
+                    .unwrap_or_else(|| panic!("setting `{name}`: default must be a string"));
+                (format!("{v:?}.to_string()"), format!("{v:?}"))
             }
             "bool" => {
                 let v = default_value

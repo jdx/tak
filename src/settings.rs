@@ -26,6 +26,7 @@ pub struct Overrides {
     pub env_allow: Option<Vec<String>>,
     pub gate_pct: Option<f64>,
     pub credit: Option<bool>,
+    pub runner_class: Option<String>,
 }
 
 /// Treat an empty vector from clap as "flag not given".
@@ -83,6 +84,26 @@ impl Settings {
         let defaults = Self::default();
         let envs = config.env.as_ref();
         Self {
+            runner_class: cli
+                .runner_class
+                .clone()
+                // Blank on the command line means the same as blank anywhere
+                // else: derive it. Treating `--runner ""` as a set value would
+                // block the environment and the config beneath it, and record
+                // every machine under one empty class.
+                .filter(|v| !v.trim().is_empty())
+                // An exported-but-empty variable means "derive it", the same as
+                // not setting it at all — so it falls through rather than
+                // recording every measurement under the empty class.
+                .or_else(|| env("TAK_RUNNER").filter(|v| !v.trim().is_empty()))
+                .or_else(|| {
+                    config
+                        .runner
+                        .as_ref()
+                        .and_then(|r| r.class.clone())
+                        .filter(|v| !v.trim().is_empty())
+                })
+                .unwrap_or(defaults.runner_class),
             credit: cli
                 .credit
                 .or_else(|| bool_from_env(env, "TAK_CREDIT"))
@@ -135,6 +156,11 @@ impl Settings {
             "env_allow" => Some(format!("{:?}", self.env_allow)),
             "env_deny" => Some(format!("{:?}", self.env_deny)),
             "credit" => Some(format!("{}", self.credit)),
+            "runner_class" => Some(if self.runner_class.is_empty() {
+                "(derived)".to_string()
+            } else {
+                self.runner_class.clone()
+            }),
             "gate_pct" => Some(format!("{}", self.gate_pct)),
             _ => None,
         }
@@ -169,6 +195,7 @@ mod tests {
             }),
             gate: None,
             report: None,
+            runner: None,
         }
     }
 
@@ -185,8 +212,7 @@ mod tests {
         let s = Settings {
             env_deny: vec!["A".into(), "B".into()],
             env_allow: vec!["B".into()],
-            gate_pct: Settings::default().gate_pct,
-            credit: Settings::default().credit,
+            ..Settings::default()
         };
         assert_eq!(s.scrubbed_env().collect::<Vec<_>>(), ["A"]);
     }
@@ -198,8 +224,7 @@ mod tests {
         let s = Settings {
             env_deny: vec!["A".into()],
             env_allow: vec!["ZZZ".into()],
-            gate_pct: Settings::default().gate_pct,
-            credit: Settings::default().credit,
+            ..Settings::default()
         };
         assert_eq!(s.scrubbed_env().collect::<Vec<_>>(), ["A"]);
     }
@@ -249,6 +274,25 @@ mod tests {
         assert_eq!(s.env_deny, ["A", "B", "C"]);
     }
 
+    /// A blank flag must defer, like a blank variable and a blank config key.
+    /// Otherwise `--runner ""` blocks every lower-precedence source and records
+    /// under an empty class, merging every machine into one series.
+    #[test]
+    fn a_blank_cli_runner_falls_through() {
+        let cfg = SettingsSections {
+            runner: Some(crate::config::RunnerSection {
+                class: Some("from-config".into()),
+            }),
+            ..Default::default()
+        };
+        let cli = Overrides {
+            runner_class: Some("   ".into()),
+            ..Default::default()
+        };
+        let s = Settings::resolve(&cli, &cfg, &no_env);
+        assert_eq!(s.runner_class, "from-config");
+    }
+
     #[test]
     fn an_unused_cli_flag_is_not_an_empty_list() {
         assert_eq!(from_cli(vec![]), None);
@@ -277,6 +321,7 @@ mod tests {
             "float" => "12345.0".to_string(),
             // The opposite of every bool default, so flipping it always shows.
             "bool" => "false".to_string(),
+            "string" => "\"SENTINEL\"".to_string(),
             other => panic!("the drift check has no sentinel for type `{other}`"),
         }
     }

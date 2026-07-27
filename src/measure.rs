@@ -275,8 +275,7 @@ mod tests {
         let removed = removals(&Settings {
             env_deny: vec!["CUSTOM_SECRET".into()],
             env_allow: Vec::new(),
-            gate_pct: Settings::default().gate_pct,
-            credit: Settings::default().credit,
+            ..Settings::default()
         });
         assert!(removed.contains(&"CUSTOM_SECRET".to_string()));
         assert!(!removed.contains(&"GITHUB_TOKEN".to_string()));
@@ -289,8 +288,7 @@ mod tests {
         let removed = removals(&Settings {
             env_deny: vec!["GITHUB_TOKEN".into(), "GH_TOKEN".into()],
             env_allow: vec!["GITHUB_TOKEN".into()],
-            gate_pct: Settings::default().gate_pct,
-            credit: Settings::default().credit,
+            ..Settings::default()
         });
         assert!(!removed.contains(&"GITHUB_TOKEN".to_string()));
         assert!(removed.contains(&"GH_TOKEN".to_string()));
