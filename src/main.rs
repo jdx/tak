@@ -572,19 +572,22 @@ fn cmd_backfill(
 
 /// Resolve settings from the CLI, the environment, and `tak.toml`.
 ///
-/// A *missing* `tak.toml` is fine — `tak run -- cmd` works in any directory, so
-/// settings must too. A *malformed* one is an error: swallowing the parse
-/// failure would have `tak settings` print defaults the project never asked
-/// for, with nothing to suggest its configuration had been skipped.
-fn resolve_settings(cli: &Cli) -> Result<Settings> {
-    let config = config::Config::find(&std::env::current_dir()?)
-        .context("could not read settings")?
-        .and_then(|(_, c)| c.env);
-    let overrides = Overrides {
-        env_deny: settings::from_cli(cli.env_deny.clone()),
-        env_allow: settings::from_cli(cli.env_allow.clone()),
-    };
-    Ok(Settings::from_process(&overrides, config.as_ref()))
+/// Called only by the commands that measure something or report settings.
+/// `push`, `init`, `history` and `doctor` do not consult `tak.toml` at all, so a
+/// broken one cannot stop you from pushing measurements you already took.
+///
+/// Reads the `[env]` table only, via [`Config::find_env`], so an invalid
+/// `[bench.x]` does not abort `tak run -- somecmd` — an explicit command has
+/// never depended on the declared benchmarks and still does not.
+///
+/// A *missing* `tak.toml` is fine. A *syntax-broken* one is an error even here:
+/// it may carry `[env]` settings that change what gets scrubbed from a
+/// subject's environment, and silently applying a weaker filter than the
+/// project asked for is not a good failure.
+fn resolve_settings(overrides: &Overrides) -> Result<Settings> {
+    let config =
+        config::Config::find_env(&std::env::current_dir()?).context("could not read settings")?;
+    Ok(Settings::from_process(overrides, config.as_ref()))
 }
 
 /// Print the settings registry with resolved values.
@@ -628,7 +631,10 @@ fn cmd_settings(resolved: &Settings, docs: bool) -> Result<()> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let resolved = resolve_settings(&cli)?;
+    let overrides = Overrides {
+        env_deny: settings::from_cli(cli.env_deny),
+        env_allow: settings::from_cli(cli.env_allow),
+    };
     match cli.cmd {
         Cmd::Run {
             bench,
@@ -637,7 +643,15 @@ fn main() -> Result<()> {
             no_counters,
             record,
             cmd,
-        } => cmd_run(bench, runs, warmup, no_counters, record, cmd, &resolved),
+        } => cmd_run(
+            bench,
+            runs,
+            warmup,
+            no_counters,
+            record,
+            cmd,
+            &resolve_settings(&overrides)?,
+        ),
         Cmd::History { rev, remote } => cmd_history(rev, remote),
         Cmd::Push { remote } => {
             notes::push(&remote)?;
@@ -660,9 +674,18 @@ fn main() -> Result<()> {
             limit,
             runs,
             dry_run,
-        } => cmd_backfill(repo, bin, args, bench, limit, runs, dry_run, &resolved),
+        } => cmd_backfill(
+            repo,
+            bin,
+            args,
+            bench,
+            limit,
+            runs,
+            dry_run,
+            &resolve_settings(&overrides)?,
+        ),
         Cmd::Doctor => cmd_doctor(),
-        Cmd::Settings { docs } => cmd_settings(&resolved, docs),
+        Cmd::Settings { docs } => cmd_settings(&resolve_settings(&overrides)?, docs),
     }
 }
 

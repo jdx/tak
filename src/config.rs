@@ -100,6 +100,37 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Read only the `[env]` table, without validating benchmarks.
+    ///
+    /// Settings and benchmarks live in the same file but are needed at
+    /// different times. Resolving settings through [`Config::parse`] would make
+    /// a broken `[bench.x]` abort `tak run -- somecmd`, which does not read
+    /// benchmarks at all, and `tak settings`, which reads none of them either.
+    ///
+    /// Unknown keys are ignored, so `[bench]` is not even looked at here. A TOML
+    /// *syntax* error still fails: the file may carry `[env]` settings that
+    /// change what gets scrubbed from a subject's environment, and quietly
+    /// falling back to defaults would apply a weaker filter than the project
+    /// asked for without saying so.
+    pub fn find_env(start: &Path) -> Result<Option<EnvSection>> {
+        #[derive(Deserialize)]
+        struct EnvOnly {
+            #[serde(default)]
+            env: Option<EnvSection>,
+        }
+        for dir in start.ancestors() {
+            let path = dir.join(FILE_NAME);
+            if path.is_file() {
+                let text = std::fs::read_to_string(&path)
+                    .with_context(|| format!("could not read {}", path.display()))?;
+                let parsed: EnvOnly = toml::from_str(&text)
+                    .with_context(|| format!("could not parse {}", path.display()))?;
+                return Ok(parsed.env);
+            }
+        }
+        Ok(None)
+    }
+
     /// Find and load `tak.toml`, searching upward from `start`.
     ///
     /// Walking up means `tak run` behaves the same from a subdirectory as from
