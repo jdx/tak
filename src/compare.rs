@@ -344,6 +344,21 @@ fn table(c: &Comparison, trend: &Trend, gate_pct: f64) -> String {
     out
 }
 
+/// How a series is named in prose: bench, plus the tool when it is not the
+/// project itself, plus the runner.
+///
+/// Dropping the tool made two series that differ only by tool render
+/// identically, so a report could say the same benchmark both started and
+/// stopped gating and mean two different programs.
+fn describe(key: &Key) -> String {
+    let (bench, tool, runner) = key;
+    if tool == "self" {
+        format!("`{bench}` on `{runner}`")
+    } else {
+        format!("`{bench}` ({tool}) on `{runner}`")
+    }
+}
+
 /// Series that exist on only one side. Always reported, including when nothing
 /// overlapped — that is the case where they matter most.
 fn outliers(c: &Comparison) -> String {
@@ -351,11 +366,7 @@ fn outliers(c: &Comparison) -> String {
     if !c.added.is_empty() {
         out.push_str(&format!(
             "\nNew, nothing to compare against: {}\n",
-            c.added
-                .iter()
-                .map(|(b, _, r)| format!("`{b}` on `{r}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            c.added.iter().map(describe).collect::<Vec<_>>().join(", ")
         ));
     }
     if !c.removed.is_empty() {
@@ -364,7 +375,7 @@ fn outliers(c: &Comparison) -> String {
              running also stops gating: {}\n",
             c.removed
                 .iter()
-                .map(|(b, _, r)| format!("`{b}` on `{r}`"))
+                .map(describe)
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -545,6 +556,19 @@ mod tests {
     fn zero_to_zero_is_not_a_regression() {
         let c = compare(&[rec("a", "gha", 0.0, 1.0)], &[rec("a", "gha", 0.0, 1.0)]);
         assert!(c.regressions(1.0).is_empty());
+    }
+
+    /// Two series that differ only by tool must not render identically, or the
+    /// report can say the same benchmark both started and stopped gating while
+    /// meaning two different programs.
+    #[test]
+    fn outliers_keep_their_tool() {
+        let mut pnpm = rec("install", "gha", 1.0, 1.0);
+        pnpm.tool = "pnpm".into();
+        let c = compare(&[], &[rec("install", "gha", 1.0, 1.0), pnpm]);
+        let md = markdown(&c, &Trend::new(), 1.0, false);
+        assert!(md.contains("`install` on `gha`"), "{md}");
+        assert!(md.contains("`install` (pnpm) on `gha`"), "{md}");
     }
 
     #[test]
