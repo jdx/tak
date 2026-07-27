@@ -3,7 +3,7 @@ members = ["crates/asset-picker"]
 
 [package]
 name = "tak-cli"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2024"
 description = "Benchmark command-line programs and track their performance over time. Experimental; do not use."
 keywords = ["benchmark", "performance", "cli", "git-notes"]
