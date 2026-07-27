@@ -215,3 +215,34 @@ fn reading_does_not_discard_unpushed_records() {
         "reading threw away the unpushed record"
     );
 }
+
+/// Notes hang off commits, but `git rev-parse v1.2.3` on an *annotated* tag
+/// returns the tag object. Without peeling, `tak history` and `tak compare`
+/// silently find nothing on exactly the revisions people are most likely to
+/// name — and "no measurements" reads as "nothing recorded", not "looked in the
+/// wrong place".
+#[test]
+fn an_annotated_tag_resolves_to_its_commit() {
+    let (scratch, remote) = remote_with_a_commit("annotated");
+
+    let a = scratch.join("a");
+    git(
+        &scratch,
+        &["clone", "--quiet", remote.to_str().unwrap(), "a"],
+    );
+    record(&a, "from-a");
+    git(&a, &["tag", "-a", "v1.0.0", "-m", "release"]);
+
+    // The tag object and the commit are different objects; that is the trap.
+    let tag_object = git(&a, &["rev-parse", "v1.0.0"]);
+    let commit = git(&a, &["rev-parse", "v1.0.0^{commit}"]);
+    assert_ne!(tag_object, commit, "expected an annotated tag");
+
+    let out = tak(&a, &["history", "v1.0.0"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    std::fs::remove_dir_all(&scratch).ok();
+    assert!(
+        stdout.contains("from-a"),
+        "history on an annotated tag found nothing: {stdout}"
+    );
+}

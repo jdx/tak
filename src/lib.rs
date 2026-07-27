@@ -7,6 +7,7 @@
 //! written-but-never-executed, which is exactly the failure this guards against.
 
 pub mod backfill;
+pub mod compare;
 pub mod config;
 pub mod measure;
 pub mod notes;

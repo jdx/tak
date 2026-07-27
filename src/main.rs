@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use tak_cli::backfill;
+use tak_cli::compare;
 use tak_cli::config::{self, Config, DEFAULT_RUNS, DEFAULT_WARMUP};
 use tak_cli::measure::{self, Plan};
 use tak_cli::notes;
@@ -29,6 +30,9 @@ struct Cli {
     /// Keep a variable that --env-deny would remove. Repeatable.
     #[arg(long, global = true, value_name = "VAR")]
     env_allow: Vec<String>,
+    /// Percentage an instruction count may rise before `compare` fails.
+    #[arg(long, global = true, value_name = "PCT")]
+    gate_pct: Option<f64>,
 }
 
 #[derive(Subcommand)]
@@ -103,6 +107,24 @@ enum Cmd {
         /// Measure but do not write to refs/notes/tak.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Compare this commit's measurements against another's.
+    ///
+    /// Fails when an instruction count has risen by more than `gate_pct`. Wall
+    /// clock is reported and never gated.
+    Compare {
+        /// Revision to compare against.
+        #[arg(default_value = "origin/main")]
+        base: String,
+        /// Revision to compare. Defaults to HEAD.
+        #[arg(long, default_value = "HEAD")]
+        rev: String,
+        /// Remote to refresh notes from.
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        /// Report without failing, whatever the numbers say.
+        #[arg(long)]
+        no_gate: bool,
     },
     /// Diagnose the git-notes plumbing.
     Doctor,
@@ -354,6 +376,38 @@ fn cmd_history(rev: String, remote: String) -> Result<()> {
     Ok(())
 }
 
+/// Compare `rev` against `base`, print the report, and gate on it.
+fn cmd_compare(
+    base: String,
+    rev: String,
+    remote: String,
+    no_gate: bool,
+    settings: &Settings,
+) -> Result<()> {
+    let base_sha = notes::rev_parse(&base).with_context(|| format!("cannot resolve {base}"))?;
+    let head_sha = notes::rev_parse(&rev).with_context(|| format!("cannot resolve {rev}"))?;
+
+    // One fetch, not two: `read` refreshes from the remote, and doing it twice
+    // doubles the round trip for the same ref.
+    let base_records = notes::read(Some(&remote), &base_sha)?;
+    let head_records = notes::read(None, &head_sha)?;
+
+    let comparison = compare::compare(&base_records, &head_records);
+    print!("{}", compare::markdown(&comparison, settings.gate_pct));
+
+    let regressions = comparison.regressions(settings.gate_pct);
+    if regressions.is_empty() || no_gate {
+        return Ok(());
+    }
+    // A non-zero exit is the gate. The table above already says which and by
+    // how much, so this only has to be unambiguous about why the job failed.
+    bail!(
+        "{} benchmark(s) regressed by more than {}%",
+        regressions.len(),
+        settings.gate_pct
+    )
+}
+
 fn cmd_doctor() -> Result<()> {
     println!("tak doctor\n");
 
@@ -585,9 +639,9 @@ fn cmd_backfill(
 /// subject's environment, and silently applying a weaker filter than the
 /// project asked for is not a good failure.
 fn resolve_settings(overrides: &Overrides) -> Result<Settings> {
-    let config =
-        config::Config::find_env(&std::env::current_dir()?).context("could not read settings")?;
-    Ok(Settings::from_process(overrides, config.as_ref()))
+    let config = config::Config::find_settings(&std::env::current_dir()?)
+        .context("could not read settings")?;
+    Ok(Settings::from_process(overrides, &config))
 }
 
 /// Print the settings registry with resolved values.
@@ -597,12 +651,12 @@ fn cmd_settings(resolved: &Settings, docs: bool) -> Result<()> {
         // `Settings::get` rather than a match here: a test asserts it answers
         // for every registry entry, so a new setting cannot reach this display
         // without a value behind it.
-        let Some(value) = resolved.get(meta.name) else {
+        let Some(value) = resolved.display_value(meta.name) else {
             println!("{}  (no accessor — wire it into Settings::get)", meta.name);
             continue;
         };
         println!("{}  {}", meta.name, meta.type_);
-        println!("  value    {value:?}");
+        println!("  value    {value}");
         println!("  default  {}", meta.default);
         if !meta.cli_flags.is_empty() {
             println!("  cli      {}", meta.cli_flags.join(", "));
@@ -634,6 +688,7 @@ fn main() -> Result<()> {
     let overrides = Overrides {
         env_deny: settings::from_cli(cli.env_deny),
         env_allow: settings::from_cli(cli.env_allow),
+        gate_pct: cli.gate_pct,
     };
     match cli.cmd {
         Cmd::Run {
@@ -684,6 +739,12 @@ fn main() -> Result<()> {
             dry_run,
             &resolve_settings(&overrides)?,
         ),
+        Cmd::Compare {
+            base,
+            rev,
+            remote,
+            no_gate,
+        } => cmd_compare(base, rev, remote, no_gate, &resolve_settings(&overrides)?),
         Cmd::Doctor => cmd_doctor(),
         Cmd::Settings { docs } => cmd_settings(&resolve_settings(&overrides)?, docs),
     }

@@ -221,9 +221,15 @@ pub fn push(remote: &str) -> Result<()> {
     unreachable!()
 }
 
-/// Resolve a revision to a full SHA.
+/// Resolve a revision to the full SHA of the commit it names.
+///
+/// `^{commit}` matters: `git rev-parse v1.2.3` on an *annotated* tag returns the
+/// tag object, not the commit, and notes are attached to commits. Without the
+/// peel, `tak history v1.2.3` and `tak compare v1.2.3` silently find nothing on
+/// exactly the revisions people are most likely to name. Harmless for branches
+/// and raw SHAs, which peel to themselves.
 pub fn rev_parse(rev: &str) -> Result<String> {
-    git(&["rev-parse", rev])
+    git(&["rev-parse", &format!("{rev}^{{commit}}")])
 }
 
 /// Teach plain `git fetch` about the notes ref, so the data is visible to users

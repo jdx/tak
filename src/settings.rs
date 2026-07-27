@@ -10,7 +10,7 @@
 //! empty, so setting a value in `tak.toml` is not undone by the flag being
 //! unused.
 
-use crate::config::EnvSection;
+use crate::config::SettingsSections;
 
 include!(concat!(env!("OUT_DIR"), "/settings_generated.rs"));
 
@@ -20,10 +20,11 @@ include!(concat!(env!("OUT_DIR"), "/settings_generated.rs"));
 /// empty list — the first defers to lower-precedence sources, the second would
 /// override them. Repeated flags accumulate, and clap yields an empty vector
 /// when a flag is absent, so [`from_cli`] does that conversion in one place.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Overrides {
     pub env_deny: Option<Vec<String>>,
     pub env_allow: Option<Vec<String>>,
+    pub gate_pct: Option<f64>,
 }
 
 /// Treat an empty vector from clap as "flag not given".
@@ -60,26 +61,42 @@ fn list_from_env(env: EnvLookup, key: &str) -> Option<Vec<String>> {
 
 impl Settings {
     /// Resolve every setting from the sources declared in `settings.toml`.
-    pub fn resolve(cli: &Overrides, config: Option<&EnvSection>, env: EnvLookup) -> Self {
+    pub fn resolve(cli: &Overrides, config: &SettingsSections, env: EnvLookup) -> Self {
         let defaults = Self::default();
+        let envs = config.env.as_ref();
         Self {
+            gate_pct: cli
+                .gate_pct
+                .or_else(|| {
+                    env("TAK_GATE_PCT").and_then(|raw| match raw.trim().parse::<f64>() {
+                        Ok(v) => Some(v),
+                        // A typo must not silently become the default and let a
+                        // regression through a gate the user thought they set.
+                        Err(_) => {
+                            eprintln!("warning: TAK_GATE_PCT is not a number: {raw:?}");
+                            None
+                        }
+                    })
+                })
+                .or_else(|| config.gate.as_ref().and_then(|g| g.pct))
+                .unwrap_or(defaults.gate_pct),
             env_allow: cli
                 .env_allow
                 .clone()
                 .or_else(|| list_from_env(env, "TAK_ENV_ALLOW"))
-                .or_else(|| config.and_then(|c| c.allow.clone()))
+                .or_else(|| envs.and_then(|c| c.allow.clone()))
                 .unwrap_or(defaults.env_allow),
             env_deny: cli
                 .env_deny
                 .clone()
                 .or_else(|| list_from_env(env, "TAK_ENV_DENY"))
-                .or_else(|| config.and_then(|c| c.deny.clone()))
+                .or_else(|| envs.and_then(|c| c.deny.clone()))
                 .unwrap_or(defaults.env_deny),
         }
     }
 
     /// Resolve against the real process environment.
-    pub fn from_process(cli: &Overrides, config: Option<&EnvSection>) -> Self {
+    pub fn from_process(cli: &Overrides, config: &SettingsSections) -> Self {
         Self::resolve(cli, config, &|key| std::env::var(key).ok())
     }
 
@@ -90,10 +107,11 @@ impl Settings {
     /// anything can produce its value. A test asserts this returns `Some` for
     /// every registry entry, which turns "added a setting, forgot the
     /// accessor" into a build failure instead of a blank row.
-    pub fn get(&self, name: &str) -> Option<&Vec<String>> {
+    pub fn display_value(&self, name: &str) -> Option<String> {
         match name {
-            "env_allow" => Some(&self.env_allow),
-            "env_deny" => Some(&self.env_deny),
+            "env_allow" => Some(format!("{:?}", self.env_allow)),
+            "env_deny" => Some(format!("{:?}", self.env_deny)),
+            "gate_pct" => Some(format!("{}", self.gate_pct)),
             _ => None,
         }
     }
@@ -118,6 +136,17 @@ mod tests {
         None
     }
 
+    /// A `tak.toml` with just an `[env]` table.
+    fn env_config(deny: Option<&[&str]>, allow: Option<&[&str]>) -> SettingsSections {
+        SettingsSections {
+            env: Some(crate::config::EnvSection {
+                deny: deny.map(|v| v.iter().map(|s| s.to_string()).collect()),
+                allow: allow.map(|v| v.iter().map(|s| s.to_string()).collect()),
+            }),
+            gate: None,
+        }
+    }
+
     #[test]
     fn the_default_protects_forge_tokens() {
         let s = Settings::default();
@@ -131,6 +160,7 @@ mod tests {
         let s = Settings {
             env_deny: vec!["A".into(), "B".into()],
             env_allow: vec!["B".into()],
+            gate_pct: Settings::default().gate_pct,
         };
         assert_eq!(s.scrubbed_env().collect::<Vec<_>>(), ["A"]);
     }
@@ -142,40 +172,35 @@ mod tests {
         let s = Settings {
             env_deny: vec!["A".into()],
             env_allow: vec!["ZZZ".into()],
+            gate_pct: Settings::default().gate_pct,
         };
         assert_eq!(s.scrubbed_env().collect::<Vec<_>>(), ["A"]);
     }
 
     #[test]
     fn cli_beats_env_beats_config() {
-        let cfg = EnvSection {
-            deny: Some(vec!["FROM_CONFIG".into()]),
-            allow: None,
-        };
+        let cfg = env_config(Some(&["FROM_CONFIG"]), None);
         let env = |k: &str| (k == "TAK_ENV_DENY").then(|| "FROM_ENV".to_string());
 
-        let from_config = Settings::resolve(&Overrides::default(), Some(&cfg), &no_env);
+        let from_config = Settings::resolve(&Overrides::default(), &cfg, &no_env);
         assert_eq!(from_config.env_deny, ["FROM_CONFIG"]);
 
-        let from_env = Settings::resolve(&Overrides::default(), Some(&cfg), &env);
+        let from_env = Settings::resolve(&Overrides::default(), &cfg, &env);
         assert_eq!(from_env.env_deny, ["FROM_ENV"]);
 
         let cli = Overrides {
             env_deny: Some(vec!["FROM_CLI".into()]),
             ..Default::default()
         };
-        let from_cli = Settings::resolve(&cli, Some(&cfg), &env);
+        let from_cli = Settings::resolve(&cli, &cfg, &env);
         assert_eq!(from_cli.env_deny, ["FROM_CLI"]);
     }
 
     #[test]
     fn an_absent_source_defers_rather_than_clearing() {
-        let cfg = EnvSection {
-            deny: Some(vec!["FROM_CONFIG".into()]),
-            allow: None,
-        };
+        let cfg = env_config(Some(&["FROM_CONFIG"]), None);
         // No CLI flag and no variable: the config value survives.
-        let s = Settings::resolve(&Overrides::default(), Some(&cfg), &no_env);
+        let s = Settings::resolve(&Overrides::default(), &cfg, &no_env);
         assert_eq!(s.env_deny, ["FROM_CONFIG"]);
     }
 
@@ -184,19 +209,16 @@ mod tests {
     /// opposite of what it looks like.
     #[test]
     fn an_empty_variable_means_an_empty_list() {
-        let cfg = EnvSection {
-            deny: Some(vec!["FROM_CONFIG".into()]),
-            allow: None,
-        };
+        let cfg = env_config(Some(&["FROM_CONFIG"]), None);
         let env = |k: &str| (k == "TAK_ENV_DENY").then(String::new);
-        let s = Settings::resolve(&Overrides::default(), Some(&cfg), &env);
+        let s = Settings::resolve(&Overrides::default(), &cfg, &env);
         assert!(s.env_deny.is_empty());
     }
 
     #[test]
     fn a_variable_is_split_on_commas_and_trimmed() {
         let env = |k: &str| (k == "TAK_ENV_DENY").then(|| " A , B ,, C ".to_string());
-        let s = Settings::resolve(&Overrides::default(), None, &env);
+        let s = Settings::resolve(&Overrides::default(), &SettingsSections::default(), &env);
         assert_eq!(s.env_deny, ["A", "B", "C"]);
     }
 
@@ -211,12 +233,28 @@ mod tests {
     /// `resolve`. This asserts every declared environment variable actually
     /// changes the resolved settings, so adding one and forgetting the wiring
     /// fails here rather than shipping a setting that reads as supported.
+    /// A value that differs from every default and parses as every supported
+    /// type: a list sees `["12345"]`, a float sees `12345`. Using a word here
+    /// would make the float settings silently fall through to their default and
+    /// the drift check would pass while proving nothing.
+    const ENV_SENTINEL: &str = "12345";
+
+    /// The TOML literal for a sentinel of this registry type.
+    fn config_sentinel(type_: &str) -> String {
+        match type_ {
+            "list<string>" => "[\"SENTINEL\"]".to_string(),
+            "float" => "12345.0".to_string(),
+            other => panic!("the drift check has no sentinel for type `{other}`"),
+        }
+    }
+
     #[test]
     fn every_declared_env_var_is_honoured() {
         for setting in SETTINGS {
             for var in setting.env_vars {
-                let env = |k: &str| (k == *var).then(|| "SENTINEL".to_string());
-                let got = Settings::resolve(&Overrides::default(), None, &env);
+                let env = |k: &str| (k == *var).then(|| ENV_SENTINEL.to_string());
+                let got =
+                    Settings::resolve(&Overrides::default(), &SettingsSections::default(), &env);
                 assert_ne!(
                     got,
                     Settings::default(),
@@ -236,14 +274,14 @@ mod tests {
     fn every_declared_config_key_is_honoured() {
         for setting in SETTINGS {
             for key in setting.config_keys {
-                let text = format!("{key} = [\"SENTINEL\"]\n");
-                let cfg: crate::config::Config = toml::from_str(&text).unwrap_or_else(|e| {
+                let text = format!("{key} = {}\n", config_sentinel(setting.type_));
+                let cfg: SettingsSections = toml::from_str(&text).unwrap_or_else(|e| {
                     panic!(
                         "`{}` declares config key `{key}`, which does not parse: {e}",
                         setting.name
                     )
                 });
-                let got = Settings::resolve(&Overrides::default(), cfg.env.as_ref(), &no_env);
+                let got = Settings::resolve(&Overrides::default(), &cfg, &no_env);
                 assert_ne!(
                     got,
                     Settings::default(),
@@ -262,7 +300,7 @@ mod tests {
         let s = Settings::default();
         for setting in SETTINGS {
             assert!(
-                s.get(setting.name).is_some(),
+                s.display_value(setting.name).is_some(),
                 "`{}` has no accessor in Settings::get",
                 setting.name
             );

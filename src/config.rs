@@ -31,6 +31,24 @@ pub struct Config {
     /// mean; this type only says where they can be written.
     #[serde(default)]
     pub env: Option<EnvSection>,
+    /// Regression-gate settings.
+    #[serde(default)]
+    pub gate: Option<GateSection>,
+}
+
+/// The `[gate]` table in `tak.toml`.
+#[derive(Debug, Deserialize, Default, Clone, PartialEq)]
+pub struct GateSection {
+    pub pct: Option<f64>,
+}
+
+/// Every `tak.toml` table that feeds a setting.
+#[derive(Debug, Deserialize, Default)]
+pub struct SettingsSections {
+    #[serde(default)]
+    pub env: Option<EnvSection>,
+    #[serde(default)]
+    pub gate: Option<GateSection>,
 }
 
 /// The `[env]` table in `tak.toml`.
@@ -100,7 +118,7 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Read only the `[env]` table, without validating benchmarks.
+    /// Read the setting tables, without validating benchmarks.
     ///
     /// Settings and benchmarks live in the same file but are needed at
     /// different times. Resolving settings through [`Config::parse`] would make
@@ -112,23 +130,18 @@ impl Config {
     /// change what gets scrubbed from a subject's environment, and quietly
     /// falling back to defaults would apply a weaker filter than the project
     /// asked for without saying so.
-    pub fn find_env(start: &Path) -> Result<Option<EnvSection>> {
-        #[derive(Deserialize)]
-        struct EnvOnly {
-            #[serde(default)]
-            env: Option<EnvSection>,
-        }
+    pub fn find_settings(start: &Path) -> Result<SettingsSections> {
         for dir in start.ancestors() {
             let path = dir.join(FILE_NAME);
             if path.is_file() {
                 let text = std::fs::read_to_string(&path)
                     .with_context(|| format!("could not read {}", path.display()))?;
-                let parsed: EnvOnly = toml::from_str(&text)
+                let parsed: SettingsSections = toml::from_str(&text)
                     .with_context(|| format!("could not parse {}", path.display()))?;
-                return Ok(parsed.env);
+                return Ok(parsed);
             }
         }
-        Ok(None)
+        Ok(SettingsSections::default())
     }
 
     /// Find and load `tak.toml`, searching upward from `start`.
