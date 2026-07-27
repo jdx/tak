@@ -11,9 +11,15 @@
 
 use std::process::Command;
 
-/// The value passed to every flag. Unlikely to appear in `tak settings` output
-/// by chance, so finding it means the flag reached the resolver.
-const SENTINEL: &str = "TAK_SENTINEL_VALUE";
+/// The value passed to every flag.
+///
+/// Numeric, and deliberately so: the registry holds both list and float
+/// settings, and a word would be rejected outright by clap on a float flag. A
+/// number is a legal value for every supported type, so one sentinel covers
+/// them all — a list renders it as `["918273"]`, a float as `918273`. It is
+/// implausible enough not to appear in the output by chance, so finding it
+/// means the flag reached the resolver.
+const SENTINEL: &str = "918273";
 
 fn settings_output(args: &[&str]) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_tak"))
@@ -23,6 +29,8 @@ fn settings_output(args: &[&str]) -> String {
         // otherwise be able to mask a missing flag.
         .env_remove("TAK_ENV_DENY")
         .env_remove("TAK_ENV_ALLOW")
+        .env_remove("TAK_GATE_PCT")
+        .env_remove("TAK_CREDIT")
         .current_dir(std::env::temp_dir())
         .output()
         .expect("failed to run tak settings");
@@ -36,8 +44,20 @@ fn settings_output(args: &[&str]) -> String {
 
 #[test]
 fn every_declared_cli_flag_reaches_the_resolver() {
+    let baseline = settings_output(&[]);
     for setting in tak_cli::settings::SETTINGS {
         for flag in setting.cli_flags {
+            // A boolean flag takes no value, so there is no sentinel to look
+            // for — the proof is that passing it changes the listing at all.
+            if setting.type_ == "bool" {
+                let output = settings_output(&[flag]);
+                assert_ne!(
+                    output, baseline,
+                    "`{}` declares {flag} but passing it changed nothing",
+                    setting.name
+                );
+                continue;
+            }
             let output = settings_output(&[flag, SENTINEL]);
             assert!(
                 output.contains(SENTINEL),

@@ -89,3 +89,53 @@ environment.
 """
 examples = ["tak run --env-deny GITHUB_TOKEN --env-allow GITHUB_TOKEN"]
 since = "0.0.3"
+
+[gate_pct]
+type = "float"
+default = 1.0
+sources.cli = ["--gate-pct"]
+sources.env = ["TAK_GATE_PCT"]
+sources.config = ["gate.pct"]
+docs = """
+How much an instruction count may rise before `tak compare` fails.
+
+A percentage of the base measurement. Only instruction counts are gated. Wall
+clock is reported and never gated: on the same hardware it moves 4-20% run to
+run, so a threshold tight enough to catch a real regression would fire
+constantly, and one loose enough to stay quiet would catch nothing.
+
+The default of 1% is about fifty times the ~0.02% instruction counting
+reproduces to, leaving room for the small differences a compiler or dependency
+bump can produce without turning the gate into noise.
+
+Raise it to report without effectively failing. Setting it to zero fails on any
+increase at all, which sounds appealing and is not: one extra instruction on a
+startup path is not worth blocking a pull request over.
+"""
+examples = [
+  "tak compare origin/main --gate-pct 0.5",
+  "TAK_GATE_PCT=5 tak compare origin/main",
+]
+since = "0.0.4"
+
+[credit]
+type = "bool"
+default = true
+sources.cli = ["--no-credit"]
+sources.env = ["TAK_CREDIT"]
+sources.config = ["report.credit"]
+docs = """
+Whether generated reports end with a line naming tak.
+
+On by default. A report that appears in someone's pull request should say what
+put it there — a reader who has never heard of tak needs a way to find out, and
+a maintainer evaluating the comment needs to know what to turn off.
+
+Turn it off with `--no-credit`, `TAK_CREDIT=0`, or `credit = false` under
+`[report]`. Nothing else about the report changes.
+"""
+examples = [
+  "tak compare origin/main --no-credit",
+  "TAK_CREDIT=0 tak compare origin/main",
+]
+since = "0.0.4"
