@@ -66,6 +66,81 @@ fn every_setting_appears_in_the_listing() {
     );
 }
 
+/// Make a scratch directory holding exactly this `tak.toml`.
+fn dir_with_config(tag: &str, contents: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("tak-cfg-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("tak.toml"), contents).unwrap();
+    dir
+}
+
+fn run_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_tak"))
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("failed to run tak")
+}
+
+/// An explicit command has never depended on the declared benchmarks, and
+/// resolving settings must not quietly change that. A `[bench]` entry tak would
+/// reject is irrelevant to `tak run -- somecmd`.
+#[cfg(unix)]
+#[test]
+fn an_invalid_benchmark_does_not_block_an_ad_hoc_run() {
+    let dir = dir_with_config("badbench", "[bench.broken]\ncmd = []\n");
+    let out = run_in(
+        &dir,
+        &[
+            "run",
+            "--no-counters",
+            "--runs",
+            "1",
+            "--warmup",
+            "0",
+            "--",
+            "/bin/echo",
+            "hi",
+        ],
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(
+        out.status.success(),
+        "an unrelated broken benchmark blocked an explicit run: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Same reasoning for the settings listing: it reads `[env]`, not `[bench]`.
+#[test]
+fn an_invalid_benchmark_does_not_block_the_listing() {
+    let dir = dir_with_config("badbench2", "[bench.broken]\ncmd = []\n");
+    let out = run_in(&dir, &["settings"]);
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(
+        out.status.success(),
+        "a broken benchmark blocked `tak settings`: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Commands that measure nothing do not read `tak.toml` at all, so a file that
+/// cannot be parsed must not stand between you and pushing results you already
+/// have. `history` needs no network and no notes to exit cleanly.
+#[test]
+fn a_broken_config_does_not_block_commands_that_ignore_it() {
+    let dir = dir_with_config("syntax", "this is not toml at all\n");
+    // Not a git repository either, so this fails for git reasons if at all —
+    // what matters is that the failure is never about tak.toml.
+    let out = run_in(&dir, &["history"]);
+    std::fs::remove_dir_all(&dir).ok();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("tak.toml"),
+        "a command that ignores tak.toml complained about it: {stderr}"
+    );
+}
+
 /// A malformed `tak.toml` must be reported, not silently replaced by defaults —
 /// otherwise `tak settings` confidently prints values the project did not ask
 /// for and gives no hint that its configuration was skipped.
