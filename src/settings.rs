@@ -26,6 +26,7 @@ pub struct Overrides {
     pub env_allow: Option<Vec<String>>,
     pub gate_pct: Option<f64>,
     pub credit: Option<bool>,
+    pub runner_class: Option<String>,
 }
 
 /// Treat an empty vector from clap as "flag not given".
@@ -83,6 +84,21 @@ impl Settings {
         let defaults = Self::default();
         let envs = config.env.as_ref();
         Self {
+            runner_class: cli
+                .runner_class
+                .clone()
+                // An exported-but-empty variable means "derive it", the same as
+                // not setting it at all — so it falls through rather than
+                // recording every measurement under the empty class.
+                .or_else(|| env("TAK_RUNNER").filter(|v| !v.trim().is_empty()))
+                .or_else(|| {
+                    config
+                        .runner
+                        .as_ref()
+                        .and_then(|r| r.class.clone())
+                        .filter(|v| !v.trim().is_empty())
+                })
+                .unwrap_or(defaults.runner_class),
             credit: cli
                 .credit
                 .or_else(|| bool_from_env(env, "TAK_CREDIT"))
@@ -135,6 +151,11 @@ impl Settings {
             "env_allow" => Some(format!("{:?}", self.env_allow)),
             "env_deny" => Some(format!("{:?}", self.env_deny)),
             "credit" => Some(format!("{}", self.credit)),
+            "runner_class" => Some(if self.runner_class.is_empty() {
+                "(derived)".to_string()
+            } else {
+                self.runner_class.clone()
+            }),
             "gate_pct" => Some(format!("{}", self.gate_pct)),
             _ => None,
         }
@@ -169,6 +190,7 @@ mod tests {
             }),
             gate: None,
             report: None,
+            runner: None,
         }
     }
 
@@ -185,8 +207,7 @@ mod tests {
         let s = Settings {
             env_deny: vec!["A".into(), "B".into()],
             env_allow: vec!["B".into()],
-            gate_pct: Settings::default().gate_pct,
-            credit: Settings::default().credit,
+            ..Settings::default()
         };
         assert_eq!(s.scrubbed_env().collect::<Vec<_>>(), ["A"]);
     }
@@ -198,8 +219,7 @@ mod tests {
         let s = Settings {
             env_deny: vec!["A".into()],
             env_allow: vec!["ZZZ".into()],
-            gate_pct: Settings::default().gate_pct,
-            credit: Settings::default().credit,
+            ..Settings::default()
         };
         assert_eq!(s.scrubbed_env().collect::<Vec<_>>(), ["A"]);
     }
@@ -277,6 +297,7 @@ mod tests {
             "float" => "12345.0".to_string(),
             // The opposite of every bool default, so flipping it always shows.
             "bool" => "false".to_string(),
+            "string" => "\"SENTINEL\"".to_string(),
             other => panic!("the drift check has no sentinel for type `{other}`"),
         }
     }

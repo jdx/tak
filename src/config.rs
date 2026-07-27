@@ -37,6 +37,8 @@ pub struct Config {
     /// Report-rendering settings.
     #[serde(default)]
     pub report: Option<ReportSection>,
+    #[serde(default)]
+    pub runner: Option<RunnerSection>,
 }
 
 /// The `[gate]` table in `tak.toml`.
@@ -51,6 +53,12 @@ pub struct ReportSection {
     pub credit: Option<bool>,
 }
 
+/// The `[runner]` table in `tak.toml`.
+#[derive(Debug, Deserialize, Default, Clone, PartialEq)]
+pub struct RunnerSection {
+    pub class: Option<String>,
+}
+
 /// Every `tak.toml` table that feeds a setting.
 #[derive(Debug, Deserialize, Default)]
 pub struct SettingsSections {
@@ -60,6 +68,9 @@ pub struct SettingsSections {
     pub gate: Option<GateSection>,
     #[serde(default)]
     pub report: Option<ReportSection>,
+    /// Runner identity.
+    #[serde(default)]
+    pub runner: Option<RunnerSection>,
 }
 
 /// The `[env]` table in `tak.toml`.
