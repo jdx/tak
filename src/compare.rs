@@ -156,18 +156,48 @@ fn signed_pct(p: f64) -> String {
 /// One format rather than two. A markdown table is readable unrendered, so a
 /// second plain-text renderer would be a second thing to keep correct for no
 /// gain.
-pub fn markdown(c: &Comparison, gate_pct: f64) -> String {
+/// The line naming tak, appended unless the `credit` setting is off.
+///
+/// A report that turns up in someone's pull request should say what put it
+/// there: a reader who has never seen tak needs a way to find out, and a
+/// maintainer deciding whether to keep the comment needs to know what to turn
+/// off. Small, last, and one line — advertising that gets in the way of the
+/// numbers would be its own argument for removing it.
+const CREDIT: &str = "\n<sub>Measured by [tak](https://github.com/jdx/tak) — instruction-counted \
+     CLI benchmarks, stored in this repository's git notes.</sub>\n";
+
+pub fn markdown(c: &Comparison, gate_pct: f64, credit: bool) -> String {
     let mut out = String::new();
 
     if c.is_empty() {
+        // No early return. `added` and `removed` are often *most* interesting
+        // here — a runner migration produces exactly this state, and the useful
+        // half of the report is which benchmarks stopped being comparable.
         out.push_str(
-            "No overlapping measurements to compare. Either the base commit has \
-             none recorded, or the two were measured on different runner classes \
-             — counts are not comparable across machine types.\n",
+            "**Nothing was compared, and so nothing was gated.** No series \
+             appears on both sides: either the base has no measurements \
+             recorded, or the two were measured on different runner classes, \
+             which are deliberately not comparable — counts shift between \
+             machine types by more than a real regression does.\n",
         );
-        return out;
+    } else {
+        out.push_str(&table(c, gate_pct));
     }
 
+    out.push_str(&outliers(c));
+    out.push_str(
+        "\n<sub>Only instruction counts gate. Wall clock is shown for context — \
+         on identical hardware it moves 4-20% run to run.</sub>\n",
+    );
+    if credit {
+        out.push_str(CREDIT);
+    }
+    out
+}
+
+/// The comparison table and its verdict.
+fn table(c: &Comparison, gate_pct: f64) -> String {
+    let mut out = String::new();
     // One row per series, both metrics side by side: reading them together is
     // what tells you whether a wall-clock move is real.
     let mut series: BTreeMap<Key, (Option<&Change>, Option<&Change>)> = BTreeMap::new();
@@ -237,12 +267,19 @@ pub fn markdown(c: &Comparison, gate_pct: f64) -> String {
         ));
     }
 
+    out
+}
+
+/// Series that exist on only one side. Always reported, including when nothing
+/// overlapped — that is the case where they matter most.
+fn outliers(c: &Comparison) -> String {
+    let mut out = String::new();
     if !c.added.is_empty() {
         out.push_str(&format!(
             "\nNew, nothing to compare against: {}\n",
             c.added
                 .iter()
-                .map(|(b, _, _)| format!("`{b}`"))
+                .map(|(b, _, r)| format!("`{b}` on `{r}`"))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -253,17 +290,11 @@ pub fn markdown(c: &Comparison, gate_pct: f64) -> String {
              running also stops gating: {}\n",
             c.removed
                 .iter()
-                .map(|(b, _, _)| format!("`{b}`"))
+                .map(|(b, _, r)| format!("`{b}` on `{r}`"))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
     }
-
-    // Said once, in the report, rather than left for someone to rediscover.
-    out.push_str(
-        "\n<sub>Only instruction counts gate. Wall clock is shown for context — \
-         on identical hardware it moves 4-20% run to run.</sub>\n",
-    );
     out
 }
 
@@ -339,6 +370,40 @@ mod tests {
         assert_eq!(c.added.len(), 1);
         assert_eq!(c.removed.len(), 1);
         assert!(c.regressions(1.0).is_empty());
+
+        // The report has to say so. Asserting only on the struct let an early
+        // return hide both lists from every reader of the actual output.
+        let md = markdown(&c, 1.0, false);
+        assert!(md.contains("nothing was gated"), "{md}");
+        assert!(md.contains("gha-macos"), "the new runner is unnamed: {md}");
+        assert!(md.contains("gha-linux"), "the old runner is unnamed: {md}");
+    }
+
+    /// A head with nothing recorded is the quietest possible failure: every
+    /// benchmark stops gating at once and the gate still exits 0. It has to be
+    /// loud in the report, and it has to name what vanished.
+    #[test]
+    fn a_head_with_no_measurements_names_what_vanished() {
+        let c = compare(
+            &[
+                rec("a", "gha", 1_000_000.0, 10.0),
+                rec("b", "gha", 2.0, 2.0),
+            ],
+            &[],
+        );
+        let md = markdown(&c, 1.0, false);
+        assert!(c.regressions(1.0).is_empty());
+        assert!(md.contains("nothing was gated"), "{md}");
+        assert!(md.contains("`a`") && md.contains("`b`"), "{md}");
+        assert!(md.contains("stops gating"), "{md}");
+    }
+
+    /// The footnote about what gates belongs on every report, including the
+    /// ones with no table.
+    #[test]
+    fn the_gating_caveat_survives_an_empty_comparison() {
+        let md = markdown(&compare(&[], &[]), 1.0, false);
+        assert!(md.contains("Only instruction counts gate"), "{md}");
     }
 
     #[test]
@@ -369,7 +434,7 @@ mod tests {
             &[rec("a", "gha", 1_000_000.0, 10.0)],
         );
         assert_eq!(c.removed.len(), 1);
-        assert!(markdown(&c, 1.0).contains("stops gating"));
+        assert!(markdown(&c, 1.0, false).contains("stops gating"));
     }
 
     /// Several records for one series collapse to the minimum, not the mean:
@@ -390,7 +455,7 @@ mod tests {
     fn nothing_in_common_says_so_rather_than_passing_quietly() {
         let c = compare(&[], &[rec("a", "gha", 1.0, 1.0)]);
         assert!(c.is_empty());
-        assert!(markdown(&c, 1.0).contains("No overlapping measurements"));
+        assert!(markdown(&c, 1.0, false).contains("nothing was gated"));
     }
 
     #[test]

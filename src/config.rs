@@ -34,12 +34,21 @@ pub struct Config {
     /// Regression-gate settings.
     #[serde(default)]
     pub gate: Option<GateSection>,
+    /// Report-rendering settings.
+    #[serde(default)]
+    pub report: Option<ReportSection>,
 }
 
 /// The `[gate]` table in `tak.toml`.
 #[derive(Debug, Deserialize, Default, Clone, PartialEq)]
 pub struct GateSection {
     pub pct: Option<f64>,
+}
+
+/// The `[report]` table in `tak.toml`.
+#[derive(Debug, Deserialize, Default, Clone, PartialEq)]
+pub struct ReportSection {
+    pub credit: Option<bool>,
 }
 
 /// Every `tak.toml` table that feeds a setting.
@@ -49,6 +58,8 @@ pub struct SettingsSections {
     pub env: Option<EnvSection>,
     #[serde(default)]
     pub gate: Option<GateSection>,
+    #[serde(default)]
+    pub report: Option<ReportSection>,
 }
 
 /// The `[env]` table in `tak.toml`.

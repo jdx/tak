@@ -30,6 +30,7 @@ fn settings_output(args: &[&str]) -> String {
         .env_remove("TAK_ENV_DENY")
         .env_remove("TAK_ENV_ALLOW")
         .env_remove("TAK_GATE_PCT")
+        .env_remove("TAK_CREDIT")
         .current_dir(std::env::temp_dir())
         .output()
         .expect("failed to run tak settings");
@@ -43,8 +44,20 @@ fn settings_output(args: &[&str]) -> String {
 
 #[test]
 fn every_declared_cli_flag_reaches_the_resolver() {
+    let baseline = settings_output(&[]);
     for setting in tak_cli::settings::SETTINGS {
         for flag in setting.cli_flags {
+            // A boolean flag takes no value, so there is no sentinel to look
+            // for — the proof is that passing it changes the listing at all.
+            if setting.type_ == "bool" {
+                let output = settings_output(&[flag]);
+                assert_ne!(
+                    output, baseline,
+                    "`{}` declares {flag} but passing it changed nothing",
+                    setting.name
+                );
+                continue;
+            }
             let output = settings_output(&[flag, SENTINEL]);
             assert!(
                 output.contains(SENTINEL),

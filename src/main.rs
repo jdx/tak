@@ -33,6 +33,9 @@ struct Cli {
     /// Percentage an instruction count may rise before `compare` fails.
     #[arg(long, global = true, value_name = "PCT")]
     gate_pct: Option<f64>,
+    /// Leave the line naming tak off the end of generated reports.
+    #[arg(long, global = true)]
+    no_credit: bool,
 }
 
 #[derive(Subcommand)]
@@ -393,7 +396,10 @@ fn cmd_compare(
     let head_records = notes::read(None, &head_sha)?;
 
     let comparison = compare::compare(&base_records, &head_records);
-    print!("{}", compare::markdown(&comparison, settings.gate_pct));
+    print!(
+        "{}",
+        compare::markdown(&comparison, settings.gate_pct, settings.credit)
+    );
 
     let regressions = comparison.regressions(settings.gate_pct);
     if regressions.is_empty() || no_gate {
@@ -689,6 +695,9 @@ fn main() -> Result<()> {
         env_deny: settings::from_cli(cli.env_deny),
         env_allow: settings::from_cli(cli.env_allow),
         gate_pct: cli.gate_pct,
+        // Only a flag that was passed says anything; its absence must defer to
+        // tak.toml rather than assert `credit = true`.
+        credit: cli.no_credit.then_some(false),
     };
     match cli.cmd {
         Cmd::Run {

@@ -25,6 +25,7 @@ pub struct Overrides {
     pub env_deny: Option<Vec<String>>,
     pub env_allow: Option<Vec<String>>,
     pub gate_pct: Option<f64>,
+    pub credit: Option<bool>,
 }
 
 /// Treat an empty vector from clap as "flag not given".
@@ -43,6 +44,23 @@ pub fn from_cli(v: Vec<String>) -> Option<Vec<String>> {
 /// variables without mutating the environment of the whole test binary, which
 /// races every other test in it.
 pub type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// Read a boolean setting from the environment.
+///
+/// The usual spellings, because someone writing `TAK_CREDIT=0` in a workflow
+/// should not have to discover that only `false` counts. Anything unrecognised
+/// warns rather than silently meaning one of them.
+fn bool_from_env(env: EnvLookup, key: &str) -> Option<bool> {
+    let raw = env(key)?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => {
+            eprintln!("warning: {key} is not a boolean: {raw:?}");
+            None
+        }
+    }
+}
 
 /// Read a list-valued setting from the environment.
 ///
@@ -65,6 +83,11 @@ impl Settings {
         let defaults = Self::default();
         let envs = config.env.as_ref();
         Self {
+            credit: cli
+                .credit
+                .or_else(|| bool_from_env(env, "TAK_CREDIT"))
+                .or_else(|| config.report.as_ref().and_then(|r| r.credit))
+                .unwrap_or(defaults.credit),
             gate_pct: cli
                 .gate_pct
                 .or_else(|| {
@@ -111,6 +134,7 @@ impl Settings {
         match name {
             "env_allow" => Some(format!("{:?}", self.env_allow)),
             "env_deny" => Some(format!("{:?}", self.env_deny)),
+            "credit" => Some(format!("{}", self.credit)),
             "gate_pct" => Some(format!("{}", self.gate_pct)),
             _ => None,
         }
@@ -144,6 +168,7 @@ mod tests {
                 allow: allow.map(|v| v.iter().map(|s| s.to_string()).collect()),
             }),
             gate: None,
+            report: None,
         }
     }
 
@@ -161,6 +186,7 @@ mod tests {
             env_deny: vec!["A".into(), "B".into()],
             env_allow: vec!["B".into()],
             gate_pct: Settings::default().gate_pct,
+            credit: Settings::default().credit,
         };
         assert_eq!(s.scrubbed_env().collect::<Vec<_>>(), ["A"]);
     }
@@ -173,6 +199,7 @@ mod tests {
             env_deny: vec!["A".into()],
             env_allow: vec!["ZZZ".into()],
             gate_pct: Settings::default().gate_pct,
+            credit: Settings::default().credit,
         };
         assert_eq!(s.scrubbed_env().collect::<Vec<_>>(), ["A"]);
     }
@@ -239,11 +266,17 @@ mod tests {
     /// the drift check would pass while proving nothing.
     const ENV_SENTINEL: &str = "12345";
 
+    /// Booleans need their own: `12345` is not one, and the drift check would
+    /// pass while proving the setting was never wired.
+    const BOOL_ENV_SENTINEL: &str = "false";
+
     /// The TOML literal for a sentinel of this registry type.
     fn config_sentinel(type_: &str) -> String {
         match type_ {
             "list<string>" => "[\"SENTINEL\"]".to_string(),
             "float" => "12345.0".to_string(),
+            // The opposite of every bool default, so flipping it always shows.
+            "bool" => "false".to_string(),
             other => panic!("the drift check has no sentinel for type `{other}`"),
         }
     }
@@ -252,7 +285,12 @@ mod tests {
     fn every_declared_env_var_is_honoured() {
         for setting in SETTINGS {
             for var in setting.env_vars {
-                let env = |k: &str| (k == *var).then(|| ENV_SENTINEL.to_string());
+                let sentinel = if setting.type_ == "bool" {
+                    BOOL_ENV_SENTINEL
+                } else {
+                    ENV_SENTINEL
+                };
+                let env = |k: &str| (k == *var).then(|| sentinel.to_string());
                 let got =
                     Settings::resolve(&Overrides::default(), &SettingsSections::default(), &env);
                 assert_ne!(

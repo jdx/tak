@@ -117,3 +117,25 @@ examples = [
   "TAK_GATE_PCT=5 tak compare origin/main",
 ]
 since = "0.0.4"
+
+[credit]
+type = "bool"
+default = true
+sources.cli = ["--no-credit"]
+sources.env = ["TAK_CREDIT"]
+sources.config = ["report.credit"]
+docs = """
+Whether generated reports end with a line naming tak.
+
+On by default. A report that appears in someone's pull request should say what
+put it there — a reader who has never heard of tak needs a way to find out, and
+a maintainer evaluating the comment needs to know what to turn off.
+
+Turn it off with `--no-credit`, `TAK_CREDIT=0`, or `credit = false` under
+`[report]`. Nothing else about the report changes.
+"""
+examples = [
+  "tak compare origin/main --no-credit",
+  "TAK_CREDIT=0 tak compare origin/main",
+]
+since = "0.0.4"
