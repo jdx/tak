@@ -393,29 +393,14 @@ const TREND_COMMITS: usize = 20;
 /// Reading the trunk and then the pull request in one line is the point: a
 /// number that has drifted for weeks and a number this branch just moved look
 /// nothing alike, and the base-versus-head columns alone cannot tell them apart.
-fn gather_trend(base: &str, head_records: &[Record]) -> Result<compare::Trend> {
-    let mut trend: compare::Trend = std::collections::BTreeMap::new();
+fn gather_trend(base: &str, head_sha: &str, head_records: &[Record]) -> Result<compare::Trend> {
     let commits = notes::rev_list(base, TREND_COMMITS)?;
     // rev-list is newest first; a trend reads oldest to newest.
+    let mut walked = Vec::with_capacity(commits.len());
     for sha in commits.iter().rev() {
-        for r in notes::read(None, sha)? {
-            if let Some(v) = r.metrics.get(compare::GATED_METRIC) {
-                trend
-                    .entry((r.bench.clone(), r.tool.clone(), r.runner.clone()))
-                    .or_default()
-                    .push(*v);
-            }
-        }
+        walked.push((sha.clone(), notes::read(None, sha)?));
     }
-    for r in head_records {
-        if let Some(v) = r.metrics.get(compare::GATED_METRIC) {
-            trend
-                .entry((r.bench.clone(), r.tool.clone(), r.runner.clone()))
-                .or_default()
-                .push(*v);
-        }
-    }
-    Ok(trend)
+    Ok(compare::build_trend(&walked, head_sha, head_records))
 }
 
 /// Compare `rev` against `base`, print the report, and gate on it.
@@ -437,7 +422,7 @@ fn cmd_compare(
     let comparison = compare::compare(&base_records, &head_records);
     // Never fatal: a shallow checkout has no history to walk, and a missing
     // sparkline is a smaller loss than a failed gate.
-    let trend = gather_trend(&base_sha, &head_records).unwrap_or_default();
+    let trend = gather_trend(&base_sha, &head_sha, &head_records).unwrap_or_default();
     print!(
         "{}",
         compare::markdown(&comparison, &trend, settings.gate_pct, settings.credit)
