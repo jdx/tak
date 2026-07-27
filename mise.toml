@@ -4,6 +4,9 @@
 # build jobs run mise-action with `install: false` rather than downloading it
 # on every run. The Rust toolchain comes from rust-toolchain in CI, rustup
 # locally — mise wraps the commands, it does not supply the compiler.
+# Resolved by mise.lock, not floating: 1.2.3 cleared a draft release's tag_name
+# while rewriting the body, and v0.0.3, v0.0.4 and v0.0.5 each shipped as an
+# untagged draft because of it. Bump with `mise lock`, deliberately.
 communique = "latest"
 
 [tasks.build]

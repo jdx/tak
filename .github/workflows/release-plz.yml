@@ -97,7 +97,13 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # MISE_LOCKED makes a stale mise.lock a hard failure rather than a quiet
+      # re-resolve. The whole point of locking communique is that this job stops
+      # depending on what `latest` means today; without this it could drift back
+      # without anyone noticing.
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+        env:
+          MISE_LOCKED: "1"
 
       # The token has to be the PAT: the /releases/tags endpoint hides drafts,
       # so communique falls back to listing releases, which needs write access.
