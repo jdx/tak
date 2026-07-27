@@ -393,29 +393,47 @@ const TREND_COMMITS: usize = 20;
 /// Reading the trunk and then the pull request in one line is the point: a
 /// number that has drifted for weeks and a number this branch just moved look
 /// nothing alike, and the base-versus-head columns alone cannot tell them apart.
-fn gather_trend(base: &str, head_records: &[Record]) -> Result<compare::Trend> {
+fn gather_trend(base: &str, head_sha: &str, head_records: &[Record]) -> Result<compare::Trend> {
     let mut trend: compare::Trend = std::collections::BTreeMap::new();
     let commits = notes::rev_list(base, TREND_COMMITS)?;
+
     // rev-list is newest first; a trend reads oldest to newest.
     for sha in commits.iter().rev() {
-        for r in notes::read(None, sha)? {
-            if let Some(v) = r.metrics.get(compare::GATED_METRIC) {
-                trend
-                    .entry((r.bench.clone(), r.tool.clone(), r.runner.clone()))
-                    .or_default()
-                    .push(*v);
-            }
+        // Skip the head if the walk already covers it — otherwise its value is
+        // plotted twice and the line ends in a flat step that never happened.
+        if sha == head_sha {
+            continue;
         }
+        add_point(&mut trend, &notes::read(None, sha)?);
     }
-    for r in head_records {
-        if let Some(v) = r.metrics.get(compare::GATED_METRIC) {
-            trend
-                .entry((r.bench.clone(), r.tool.clone(), r.runner.clone()))
-                .or_default()
-                .push(*v);
-        }
-    }
+    add_point(&mut trend, head_records);
     Ok(trend)
+}
+
+/// Append one point per series from a single commit's records.
+///
+/// The minimum, matching how `compare` folds duplicates. A commit can carry
+/// several records for one series — a CI re-run, a retry — and taking each of
+/// them as its own point let a noisy re-run put a spike in the trend that the
+/// table, which reduces to the minimum, does not show.
+fn add_point(trend: &mut compare::Trend, records: &[Record]) {
+    let mut lowest: BTreeMap<(String, String, String), f64> = BTreeMap::new();
+    for r in records {
+        if let Some(v) = r.metrics.get(compare::GATED_METRIC) {
+            let key = (r.bench.clone(), r.tool.clone(), r.runner.clone());
+            lowest
+                .entry(key)
+                .and_modify(|e| {
+                    if v < e {
+                        *e = *v;
+                    }
+                })
+                .or_insert(*v);
+        }
+    }
+    for (key, value) in lowest {
+        trend.entry(key).or_default().push(value);
+    }
 }
 
 /// Compare `rev` against `base`, print the report, and gate on it.
@@ -437,7 +455,7 @@ fn cmd_compare(
     let comparison = compare::compare(&base_records, &head_records);
     // Never fatal: a shallow checkout has no history to walk, and a missing
     // sparkline is a smaller loss than a failed gate.
-    let trend = gather_trend(&base_sha, &head_records).unwrap_or_default();
+    let trend = gather_trend(&base_sha, &head_sha, &head_records).unwrap_or_default();
     print!(
         "{}",
         compare::markdown(&comparison, &trend, settings.gate_pct, settings.credit)
