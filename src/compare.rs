@@ -39,18 +39,32 @@ pub struct Change {
 }
 
 impl Change {
-    /// Change as a percentage of the base. Zero when the base is zero, since
-    /// the alternative is an infinity that renders as noise.
-    pub fn pct(&self) -> f64 {
+    /// Change as a percentage of the base, or `None` when the base is zero.
+    ///
+    /// `None` rather than `0.0`. Returning zero was worse than imprecise: the
+    /// gate compares this against the threshold, so a rise from a zero baseline
+    /// read as no change at all and passed silently, however large the head.
+    /// A percentage of nothing is undefined, and the type should say so.
+    pub fn pct(&self) -> Option<f64> {
         if self.base == 0.0 {
-            return 0.0;
+            return None;
         }
-        (self.head - self.base) / self.base * 100.0
+        Some((self.head - self.base) / self.base * 100.0)
     }
 
     /// Is this a regression the gate should fail on?
+    ///
+    /// From a zero base, any increase counts. There is no threshold that means
+    /// anything against zero, and passing would be the one outcome that is
+    /// certainly wrong.
     pub fn regressed(&self, gate_pct: f64) -> bool {
-        self.metric == GATED_METRIC && self.pct() > gate_pct
+        if self.metric != GATED_METRIC {
+            return false;
+        }
+        match self.pct() {
+            Some(p) => p > gate_pct,
+            None => self.head > 0.0,
+        }
     }
 }
 
@@ -182,8 +196,12 @@ fn thousands(v: f64) -> String {
     if v < 0.0 { format!("-{out}") } else { out }
 }
 
-fn signed_pct(p: f64) -> String {
-    format!("{}{:.2}%", if p >= 0.0 { "+" } else { "" }, p)
+/// A percentage for display, or `new` when there is no base to compare to.
+fn signed_pct(p: Option<f64>) -> String {
+    match p {
+        Some(p) => format!("{}{:.2}%", if p >= 0.0 { "+" } else { "" }, p),
+        None => "new".to_string(),
+    }
 }
 
 /// Render a comparison as markdown, suitable for a PR comment or a terminal.
@@ -390,15 +408,8 @@ mod tests {
             &[rec("a", "gha", 500_000.0, 10.0)],
         );
         assert!(c.regressions(1.0).is_empty());
-        assert_eq!(
-            c.changes
-                .iter()
-                .find(|c| c.metric == GATED_METRIC)
-                .unwrap()
-                .pct()
-                .round(),
-            -50.0
-        );
+        let ins = c.changes.iter().find(|c| c.metric == GATED_METRIC).unwrap();
+        assert_eq!(ins.pct().unwrap().round(), -50.0);
     }
 
     /// The reason the gate is narrow. A doubling of wall clock is ordinary
@@ -411,7 +422,7 @@ mod tests {
         );
         assert!(c.regressions(0.001).is_empty());
         let wall = c.changes.iter().find(|c| c.metric == WALL_METRIC).unwrap();
-        assert_eq!(wall.pct().round(), 900.0);
+        assert_eq!(wall.pct().unwrap().round(), 900.0);
     }
 
     /// Different runner classes are different series. Comparing across them
@@ -512,6 +523,28 @@ mod tests {
         let c = compare(&[], &[rec("a", "gha", 1.0, 1.0)]);
         assert!(c.is_empty());
         assert!(markdown(&c, &Trend::new(), 1.0, false).contains("nothing was gated"));
+    }
+
+    /// A percentage of zero is undefined, and the gate used to read that as
+    /// "no change" — so a base of zero disabled the gate for that benchmark
+    /// entirely, whatever the head measured.
+    #[test]
+    fn a_rise_from_a_zero_base_still_gates() {
+        let c = compare(
+            &[rec("a", "gha", 0.0, 10.0)],
+            &[rec("a", "gha", 5_000_000.0, 10.0)],
+        );
+        let ins = c.changes.iter().find(|c| c.metric == GATED_METRIC).unwrap();
+        assert_eq!(ins.pct(), None, "no percentage exists against zero");
+        assert_eq!(c.regressions(1.0).len(), 1, "it must still fail the gate");
+        assert!(markdown(&c, &Trend::new(), 1.0, false).contains("new"));
+    }
+
+    /// Zero to zero is not a regression; there is nothing to report.
+    #[test]
+    fn zero_to_zero_is_not_a_regression() {
+        let c = compare(&[rec("a", "gha", 0.0, 1.0)], &[rec("a", "gha", 0.0, 1.0)]);
+        assert!(c.regressions(1.0).is_empty());
     }
 
     #[test]
