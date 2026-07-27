@@ -232,6 +232,18 @@ pub fn rev_parse(rev: &str) -> Result<String> {
     git(&["rev-parse", &format!("{rev}^{{commit}}")])
 }
 
+/// The most recent `n` commits reachable from `rev`, newest first.
+///
+/// First-parent only. A merge commit's second parent is the branch that was
+/// merged, and walking into it interleaves a feature branch's measurements with
+/// the trunk's — which makes a trend line jump around for reasons that have
+/// nothing to do with the trunk.
+pub fn rev_list(rev: &str, n: usize) -> Result<Vec<String>> {
+    let n = n.to_string();
+    let out = git(&["rev-list", "--first-parent", "-n", &n, rev])?;
+    Ok(out.lines().map(str::to_string).collect())
+}
+
 /// Teach plain `git fetch` about the notes ref, so the data is visible to users
 /// who never run `tak`. A convenience, not load-bearing — every `tak` read path
 /// fetches for itself.

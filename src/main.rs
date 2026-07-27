@@ -379,6 +379,45 @@ fn cmd_history(rev: String, remote: String) -> Result<()> {
     Ok(())
 }
 
+/// How many commits of trunk history the sparkline covers.
+///
+/// A constant rather than a setting: it changes how a picture looks, not what
+/// the gate decides, and the registry should hold things worth a project
+/// arguing about. Twenty is enough to see a step change and short enough that
+/// the column stays narrow in a comment.
+const TREND_COMMITS: usize = 20;
+
+/// Recent values for each series along `base`'s first-parent history, oldest
+/// first, with `head`'s own value appended.
+///
+/// Reading the trunk and then the pull request in one line is the point: a
+/// number that has drifted for weeks and a number this branch just moved look
+/// nothing alike, and the base-versus-head columns alone cannot tell them apart.
+fn gather_trend(base: &str, head_records: &[Record]) -> Result<compare::Trend> {
+    let mut trend: compare::Trend = std::collections::BTreeMap::new();
+    let commits = notes::rev_list(base, TREND_COMMITS)?;
+    // rev-list is newest first; a trend reads oldest to newest.
+    for sha in commits.iter().rev() {
+        for r in notes::read(None, sha)? {
+            if let Some(v) = r.metrics.get(compare::GATED_METRIC) {
+                trend
+                    .entry((r.bench.clone(), r.tool.clone(), r.runner.clone()))
+                    .or_default()
+                    .push(*v);
+            }
+        }
+    }
+    for r in head_records {
+        if let Some(v) = r.metrics.get(compare::GATED_METRIC) {
+            trend
+                .entry((r.bench.clone(), r.tool.clone(), r.runner.clone()))
+                .or_default()
+                .push(*v);
+        }
+    }
+    Ok(trend)
+}
+
 /// Compare `rev` against `base`, print the report, and gate on it.
 fn cmd_compare(
     base: String,
@@ -396,9 +435,12 @@ fn cmd_compare(
     let head_records = notes::read(None, &head_sha)?;
 
     let comparison = compare::compare(&base_records, &head_records);
+    // Never fatal: a shallow checkout has no history to walk, and a missing
+    // sparkline is a smaller loss than a failed gate.
+    let trend = gather_trend(&base_sha, &head_records).unwrap_or_default();
     print!(
         "{}",
-        compare::markdown(&comparison, settings.gate_pct, settings.credit)
+        compare::markdown(&comparison, &trend, settings.gate_pct, settings.credit)
     );
 
     let regressions = comparison.regressions(settings.gate_pct);

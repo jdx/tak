@@ -134,6 +134,41 @@ pub fn compare(base: &[Record], head: &[Record]) -> Comparison {
     }
 }
 
+/// Recent values for each series, oldest first.
+pub type Trend = BTreeMap<Key, Vec<f64>>;
+
+/// Eight levels of block, low to high.
+const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// A sparkline, scaled to the series' own range.
+///
+/// Per-series scaling is the only useful choice: an install benchmark at 100M
+/// instructions and a startup one at 7M share no axis, and a shared one would
+/// flatten every series but the largest into a straight line.
+///
+/// A flat series renders mid-height rather than at the floor. All-`▁` reads as
+/// "bottomed out" when it actually means "did not move", which for a
+/// deterministic metric is the best possible outcome and should not look like
+/// the worst.
+pub fn sparkline(values: &[f64]) -> String {
+    if values.len() < 2 {
+        return String::new();
+    }
+    let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if max <= min {
+        return BARS[BARS.len() / 2].to_string().repeat(values.len());
+    }
+    values
+        .iter()
+        .map(|v| {
+            let t = (v - min) / (max - min);
+            let i = (t * (BARS.len() - 1) as f64).round() as usize;
+            BARS[i.min(BARS.len() - 1)]
+        })
+        .collect()
+}
+
 /// `12345678` -> `12,345,678`
 fn thousands(v: f64) -> String {
     let n = format!("{:.0}", v.abs());
@@ -166,7 +201,7 @@ fn signed_pct(p: f64) -> String {
 const CREDIT: &str = "\n<sub>Measured by [tak](https://github.com/jdx/tak) — instruction-counted \
      CLI benchmarks, stored in this repository's git notes.</sub>\n";
 
-pub fn markdown(c: &Comparison, gate_pct: f64, credit: bool) -> String {
+pub fn markdown(c: &Comparison, trend: &Trend, gate_pct: f64, credit: bool) -> String {
     let mut out = String::new();
 
     if c.is_empty() {
@@ -181,7 +216,7 @@ pub fn markdown(c: &Comparison, gate_pct: f64, credit: bool) -> String {
              machine types by more than a real regression does.\n",
         );
     } else {
-        out.push_str(&table(c, gate_pct));
+        out.push_str(&table(c, trend, gate_pct));
     }
 
     out.push_str(&outliers(c));
@@ -196,7 +231,7 @@ pub fn markdown(c: &Comparison, gate_pct: f64, credit: bool) -> String {
 }
 
 /// The comparison table and its verdict.
-fn table(c: &Comparison, gate_pct: f64) -> String {
+fn table(c: &Comparison, trend: &Trend, gate_pct: f64) -> String {
     let mut out = String::new();
     // One row per series, both metrics side by side: reading them together is
     // what tells you whether a wall-clock move is real.
@@ -215,9 +250,18 @@ fn table(c: &Comparison, gate_pct: f64) -> String {
         }
     }
 
-    out.push_str("| benchmark | instructions | Δ | wall (min) | Δ |\n");
-    out.push_str("|---|---:|---:|---:|---:|\n");
-    for ((bench, tool, _runner), (ins, wall)) in &series {
+    let any_trend = series
+        .keys()
+        .any(|k| trend.get(k).is_some_and(|v| v.len() > 1));
+    if any_trend {
+        out.push_str("| benchmark | trend | instructions | Δ | wall (min) | Δ |\n");
+        out.push_str("|---|---|---:|---:|---:|---:|\n");
+    } else {
+        out.push_str("| benchmark | instructions | Δ | wall (min) | Δ |\n");
+        out.push_str("|---|---:|---:|---:|---:|\n");
+    }
+    for (key, (ins, wall)) in &series {
+        let (bench, tool, _runner) = key;
         let name = if tool == "self" {
             bench.clone()
         } else {
@@ -244,9 +288,21 @@ fn table(c: &Comparison, gate_pct: f64) -> String {
             ),
             None => ("—".into(), "—".into()),
         };
-        out.push_str(&format!(
-            "| {name} | {ins_cell} | {ins_delta} | {wall_cell} | {wall_delta} |\n"
-        ));
+        if any_trend {
+            let spark = trend
+                .get(key)
+                .map(|v| sparkline(v))
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("`{s}`"))
+                .unwrap_or_else(|| "—".into());
+            out.push_str(&format!(
+                "| {name} | {spark} | {ins_cell} | {ins_delta} | {wall_cell} | {wall_delta} |\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "| {name} | {ins_cell} | {ins_delta} | {wall_cell} | {wall_delta} |\n"
+            ));
+        }
     }
 
     let regressions = c.regressions(gate_pct);
@@ -373,7 +429,7 @@ mod tests {
 
         // The report has to say so. Asserting only on the struct let an early
         // return hide both lists from every reader of the actual output.
-        let md = markdown(&c, 1.0, false);
+        let md = markdown(&c, &Trend::new(), 1.0, false);
         assert!(md.contains("nothing was gated"), "{md}");
         assert!(md.contains("gha-macos"), "the new runner is unnamed: {md}");
         assert!(md.contains("gha-linux"), "the old runner is unnamed: {md}");
@@ -391,7 +447,7 @@ mod tests {
             ],
             &[],
         );
-        let md = markdown(&c, 1.0, false);
+        let md = markdown(&c, &Trend::new(), 1.0, false);
         assert!(c.regressions(1.0).is_empty());
         assert!(md.contains("nothing was gated"), "{md}");
         assert!(md.contains("`a`") && md.contains("`b`"), "{md}");
@@ -402,7 +458,7 @@ mod tests {
     /// ones with no table.
     #[test]
     fn the_gating_caveat_survives_an_empty_comparison() {
-        let md = markdown(&compare(&[], &[]), 1.0, false);
+        let md = markdown(&compare(&[], &[]), &Trend::new(), 1.0, false);
         assert!(md.contains("Only instruction counts gate"), "{md}");
     }
 
@@ -434,7 +490,7 @@ mod tests {
             &[rec("a", "gha", 1_000_000.0, 10.0)],
         );
         assert_eq!(c.removed.len(), 1);
-        assert!(markdown(&c, 1.0, false).contains("stops gating"));
+        assert!(markdown(&c, &Trend::new(), 1.0, false).contains("stops gating"));
     }
 
     /// Several records for one series collapse to the minimum, not the mean:
@@ -455,7 +511,58 @@ mod tests {
     fn nothing_in_common_says_so_rather_than_passing_quietly() {
         let c = compare(&[], &[rec("a", "gha", 1.0, 1.0)]);
         assert!(c.is_empty());
-        assert!(markdown(&c, 1.0, false).contains("nothing was gated"));
+        assert!(markdown(&c, &Trend::new(), 1.0, false).contains("nothing was gated"));
+    }
+
+    #[test]
+    fn a_sparkline_spans_the_full_range() {
+        let s = sparkline(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(s.chars().count(), 5);
+        assert_eq!(s.chars().next().unwrap(), '▁');
+        assert_eq!(s.chars().last().unwrap(), '█');
+    }
+
+    /// A deterministic metric that never moves is the best possible outcome.
+    /// Drawing it at the floor would make it look like the worst.
+    #[test]
+    fn a_flat_series_sits_mid_height() {
+        let s = sparkline(&[7.0, 7.0, 7.0]);
+        assert_eq!(s, "▅▅▅");
+    }
+
+    /// One point is not a trend, and a single bar would imply a shape that was
+    /// never measured.
+    #[test]
+    fn one_point_draws_nothing() {
+        assert_eq!(sparkline(&[1.0]), "");
+        assert_eq!(sparkline(&[]), "");
+    }
+
+    /// Each series is scaled to itself. A shared axis would flatten a 7M
+    /// startup benchmark into a straight line beside a 100M install one.
+    #[test]
+    fn series_are_scaled_independently() {
+        let small = sparkline(&[7_000_000.0, 7_100_000.0]);
+        let large = sparkline(&[100_000_000.0, 101_000_000.0]);
+        assert_eq!(small, large, "both rise by the same shape");
+    }
+
+    #[test]
+    fn the_trend_column_appears_only_when_there_is_a_trend() {
+        let c = compare(
+            &[rec("a", "gha", 1_000_000.0, 10.0)],
+            &[rec("a", "gha", 1_000_000.0, 10.0)],
+        );
+        assert!(!markdown(&c, &Trend::new(), 1.0, false).contains("| trend |"));
+
+        let mut trend = Trend::new();
+        trend.insert(
+            ("a".into(), "self".into(), "gha".into()),
+            vec![1.0, 2.0, 3.0],
+        );
+        let md = markdown(&c, &trend, 1.0, false);
+        assert!(md.contains("| trend |"), "{md}");
+        assert!(md.contains('█'), "{md}");
     }
 
     #[test]
