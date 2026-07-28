@@ -1,0 +1,60 @@
+# Getting started
+
+::: warning Experimental
+This page explains how to try tak, not how to adopt it. tak has no support or stability
+guarantees.
+:::
+
+## Install
+
+Install the published crate:
+
+```sh
+cargo install tak-cli
+```
+
+Prebuilt binaries may also be available on the
+[GitHub releases page](https://github.com/jdx/tak/releases).
+
+Instruction counting requires [Valgrind](https://valgrind.org) and is unavailable on Apple
+Silicon and Windows. Without it, tak records timing only.
+
+## Measure one command
+
+Put the command after `--` so tak never interprets its flags:
+
+```sh
+tak run -- mycli --version
+```
+
+Use `--bench` to give an ad-hoc measurement a stable name:
+
+```sh
+tak run --bench startup -- mycli --version
+```
+
+## Declare repeatable benchmarks
+
+Create `tak.toml` in the project root:
+
+```toml
+[bench.startup]
+cmd = ["./target/release/mycli", "--version"]
+
+[bench.help]
+cmd = "mycli --help"
+runs = 10
+```
+
+Then run every declaration or select one:
+
+```sh
+tak run
+tak run --bench startup
+```
+
+String commands are split on whitespace. There is no shell, quoting, globbing, or pipeline
+syntax. Use an argument list when boundaries matter.
+
+Continue with [benchmark configuration](/guide/configuration) or
+[record results in git notes](/guide/ci).
