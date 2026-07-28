@@ -42,7 +42,7 @@ run = [
 
 [tasks.ci]
 description = "Everything CI runs"
-depends = ["build", "test", "lint", "docs:build"]
+depends = ["build", "test", "lint", "docs:check"]
 
 [tasks.docs]
 description = "Run the documentation site locally"
@@ -51,6 +51,12 @@ run = "npm install && exec npm run docs:dev"
 
 [tasks."docs:build"]
 description = "Build the documentation site"
+dir = "docs"
+run = "npm ci && exec npm run docs:build"
+
+[tasks."docs:check"]
+description = "Check generated references and build the documentation site"
+depends = ["render:check"]
 dir = "docs"
 run = "npm ci && exec npm run docs:build"
 
@@ -63,6 +69,11 @@ run = [
     "usage generate markdown --multi -f tak.usage.kdl --out-dir docs/cli --url-prefix /cli",
     "usage generate json -f tak.usage.kdl > docs/cli/commands.json",
 ]
+
+[tasks."render:check"]
+description = "Fail when the generated CLI reference is stale"
+depends = ["render"]
+run = "git diff --exit-code -- tak.usage.kdl docs/cli"
 
 [tasks.docker]
 description = "Build the container image that carries valgrind"

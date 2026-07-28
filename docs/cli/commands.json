@@ -637,7 +637,6 @@
   "config": {
     "props": {}
   },
-  "version": "0.0.5",
   "usage": "Usage: tak [OPTIONS] <COMMAND>",
   "complete": {},
   "about": "CLI performance, tracked"

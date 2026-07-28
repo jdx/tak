@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - docs/**
+      - Cargo.toml
   workflow_dispatch:
 
 permissions: {}

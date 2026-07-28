@@ -1,6 +1,5 @@
 name tak
 bin tak
-version "0.0.5"
 about "CLI performance, tracked"
 usage "Usage: tak [OPTIONS] <COMMAND>"
 flag --env-deny help="Remove a variable from the environment of measured commands. Repeatable. Replaces the default list rather than adding to it" var=#true global=#true {

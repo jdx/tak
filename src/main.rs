@@ -814,7 +814,12 @@ fn main() -> Result<()> {
         Cmd::Settings { docs } => cmd_settings(&resolve_settings(&overrides)?, docs),
         Cmd::Usage => {
             let mut command = Cli::command();
-            let spec = clap_usage::spec(&mut command, "tak");
+            let mut spec = clap_usage::spec(&mut command, "tak");
+            // VitePress reads the release version directly from Cargo.toml.
+            // Committing it here as well would make release-plz's version-only
+            // PR fail the generated-reference check until another bot rewrote
+            // the same value into the CLI pages.
+            spec.version = None;
             println!("{}", spec.to_string().trim());
             Ok(())
         }
