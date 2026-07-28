@@ -17,7 +17,7 @@
 # Measuring a *host-built* binary works too, as long as the container's glibc is
 # at least as new as the one it was linked against.
 
-FROM rust:1-slim-trixie AS build
+FROM rust:1-slim-trixie@sha256:5c6f46a6e4472ab1ca7ba7d494e6677f2f219ebc02f32025d3986f057635ec9c AS build
 WORKDIR /src
 # settings.toml and build.rs travel together: the build script generates the
 # settings code from the registry, so omitting either fails the compile rather
@@ -27,7 +27,7 @@ COPY crates ./crates
 COPY src ./src
 RUN cargo build --release --bin tak
 
-FROM debian:trixie-slim
+FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       valgrind curl tar gzip xz-utils unzip git ca-certificates \
