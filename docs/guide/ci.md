@@ -20,22 +20,25 @@ tak push
 
 ## Fetch measurements
 
-Teach the repository's `origin` remote to fetch the notes ref:
+`tak history` and `tak compare` fetch remote measurements into the scratch ref
+`refs/notes/tak-remote`, then merge them into the local notes without discarding records that
+have not been pushed. Normally no manual fetch is needed.
+
+For a read-only checkout that will never record measurements locally, teach its `origin`
+remote to fetch the notes ref with plain `git fetch`:
 
 ```sh
 tak init
 git fetch
 ```
 
-Or fetch it explicitly:
-
-```sh
-git fetch --depth 1 origin '+refs/notes/tak:refs/notes/tak'
-```
-
 The notes tree uses commit SHAs as path names rather than object references. A shallow fetch of
 the notes ref can therefore retrieve the full measurement history without fetching the
 annotated project commits.
+
+Do not use that direct-fetch configuration in a checkout where you run `tak run --record`:
+plain git fetch has no way to merge unpushed local notes. Let `tak history`, `tak compare`, and
+`tak push` use the scratch ref instead.
 
 ## Compare revisions
 
