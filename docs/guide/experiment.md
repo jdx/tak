@@ -46,5 +46,18 @@ Moving between machine or toolchain classes shifts absolute measurements enough 
 regression. Every series must be partitioned by `runner`; otherwise a threshold compares
 unrelated populations.
 
-Read the [repository README](https://github.com/jdx/tak#readme) for the full measurements and
-prior art.
+## Prior art
+
+tak borrows heavily from:
+
+- [hyperfine](https://github.com/sharkdp/hyperfine) and
+  [poop](https://github.com/andrewrk/poop) for command benchmarking
+- [git-appraise](https://github.com/google/git-appraise) and
+  [git-perf](https://github.com/kaihowl/git-perf) for git-notes storage
+- [Chronologer](https://github.com/dandavison/chronologer) for benchmarking backward through
+  history
+- [Nyrkiö](https://nyrkio.com) and
+  [Hunter](https://github.com/datastax-labs/hunter) for change-point detection
+
+The release-asset selection in `crates/asset-picker` was extracted from
+[mise](https://github.com/jdx/mise).
