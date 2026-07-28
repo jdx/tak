@@ -6,7 +6,8 @@ hero:
   text: A tachometer for code
   tagline: A half-baked experiment in measuring CLI work with retired instruction counts.
   image:
-    src: /favicon.svg
+    light: /logo-light.svg
+    dark: /logo-dark.svg
     alt: tak logo
   actions:
     - theme: brand

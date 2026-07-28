@@ -60,7 +60,11 @@ export default defineConfig({
   ],
 
   themeConfig: {
-    logo: "/favicon.svg",
+    logo: {
+      light: "/logo-light.svg",
+      dark: "/logo-dark.svg",
+      alt: "tak logo",
+    },
 
     nav: [
       { text: "The experiment", link: "/guide/experiment" },
