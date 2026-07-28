@@ -73,7 +73,17 @@ run = [
 [tasks."render:check"]
 description = "Fail when the generated CLI reference is stale"
 depends = ["render"]
-run = "git diff --exit-code -- tak.usage.kdl docs/cli"
+run = [
+    "git diff --exit-code -- tak.usage.kdl docs/cli",
+    '''
+untracked=$(git ls-files --others --exclude-standard -- tak.usage.kdl docs/cli)
+if [ -n "$untracked" ]; then
+  echo "untracked generated files:" >&2
+  echo "$untracked" >&2
+  exit 1
+fi
+''',
+]
 
 [tasks.docker]
 description = "Build the container image that carries valgrind"
