@@ -1,13 +1,15 @@
 [tools]
-# Used by the enhance-release job in .github/workflows/release-plz.yml to
-# rewrite the generated release body. Not needed to build or test tak, so CI's
-# build jobs run mise-action with `install: false` rather than downloading it
-# on every run. The Rust toolchain comes from rust-toolchain in CI, rustup
-# locally — mise wraps the commands, it does not supply the compiler.
+# communique rewrites release bodies; Node builds the docs; usage renders the
+# CLI reference. Rust-only CI jobs run mise-action with `install: false` and
+# dedicated jobs install only what they need. Rust itself comes from
+# rust-toolchain in CI and rustup locally.
+#
 # Resolved by mise.lock, not floating: 1.2.3 cleared a draft release's tag_name
 # while rewriting the body, and v0.0.3, v0.0.4 and v0.0.5 each shipped as an
 # untagged draft because of it. Bump with `mise lock`, deliberately.
 communique = "latest"
+node = "24"
+usage = "latest"
 
 [tasks.build]
 description = "Build the debug binary"
@@ -40,7 +42,27 @@ run = [
 
 [tasks.ci]
 description = "Everything CI runs"
-depends = ["build", "test", "lint"]
+depends = ["build", "test", "lint", "docs:build"]
+
+[tasks.docs]
+description = "Run the documentation site locally"
+dir = "docs"
+run = "npm install && exec npm run docs:dev"
+
+[tasks."docs:build"]
+description = "Build the documentation site"
+dir = "docs"
+run = "npm ci && exec npm run docs:build"
+
+[tasks.render]
+description = "Regenerate the CLI reference from clap metadata"
+depends = ["build"]
+run = [
+    "./target/debug/tak usage > tak.usage.kdl",
+    "rm -rf docs/cli && mkdir -p docs/cli",
+    "usage generate markdown --multi -f tak.usage.kdl --out-dir docs/cli --url-prefix /cli",
+    "usage generate json -f tak.usage.kdl > docs/cli/commands.json",
+]
 
 [tasks.docker]
 description = "Build the container image that carries valgrind"

@@ -3,7 +3,7 @@
 //! Experimental. See README.md, which asks you to use hyperfine instead.
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -140,6 +140,9 @@ enum Cmd {
         #[arg(long)]
         docs: bool,
     },
+    /// Generate the CLI specification used to build the documentation.
+    #[command(hide = true)]
+    Usage,
 }
 
 /// Identify the machine class. Series must be partitioned on this — moving
@@ -809,6 +812,12 @@ fn main() -> Result<()> {
             cmd_doctor(&resolved)
         }
         Cmd::Settings { docs } => cmd_settings(&resolve_settings(&overrides)?, docs),
+        Cmd::Usage => {
+            let mut command = Cli::command();
+            let spec = clap_usage::spec(&mut command, "tak");
+            println!("{}", spec.to_string().trim());
+            Ok(())
+        }
     }
 }
 
