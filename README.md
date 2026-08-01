@@ -9,16 +9,14 @@
 </p>
 
 > [!CAUTION]
-> ## 🚧 GO AWAY 🚧
+> ## Pre-v1 software
 >
-> **This is a half-baked experiment. Do not use it. Do not depend on it. Do not package it.**
+> **tak is pre-v1. Its CLI, configuration, storage format, and behavior are not finalized.**
 >
-> tak has no support, stability guarantees, or roadmap. It may be renamed, rewritten, or
-> deleted. If you need to benchmark a command, use
+> Breaking changes may land between releases, including changes that require existing
+> configuration or recorded data to be updated. If you need a stable benchmark tool, use
 > [hyperfine](https://github.com/sharkdp/hyperfine). If you need CI benchmark tracking, use
 > [Bencher](https://bencher.dev) or [CodSpeed](https://codspeed.io).
->
-> **Please do not file issues or open pull requests.**
 
 ## The experiment
 

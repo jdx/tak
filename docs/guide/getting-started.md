@@ -1,8 +1,11 @@
 # Getting started
 
-::: warning Experimental
-This page explains how to try tak, not how to adopt it. tak has no support or stability
-guarantees.
+::: warning Pre-v1 software
+tak's CLI, configuration, storage format, and behavior are not finalized. Expect breaking
+changes between releases.
+
+These docs are currently AI slop and have not been fully reviewed. They will be reviewed and
+finished later.
 :::
 
 ## Install

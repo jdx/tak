@@ -1,6 +1,6 @@
 //! tak — benchmark command-line programs and track their performance over time.
 //!
-//! Experimental. See README.md, which asks you to use hyperfine instead.
+//! Pre-v1: interfaces and behavior are not finalized and may change between releases.
 //!
 //! Exposed as a library so the measurement and storage layers can be exercised
 //! by integration tests. `measure::instructions` in particular went a long time

@@ -11,11 +11,10 @@ release-asset selection library extracted from mise, which gets no GitHub releas
 """
 
 system_extra = """
-tak is an unfinished experiment and says so in a large box at the top of its README: no
-stability guarantees, no roadmap, interfaces change without warning. Match that. Do not write
-upgrade recommendations, do not imply production readiness, and do not use marketing language
-about what the release unlocks. Describe what changed and why, and let breaking changes read as
-the ordinary events they are here.
+tak is pre-v1 and says so in a warning at the top of its README. Its interfaces, configuration,
+storage format, and behavior are not finalized and may change incompatibly between releases.
+Match that. Do not imply production readiness or use marketing language about what the release
+unlocks. Describe what changed and why, and call out breaking changes plainly.
 """
 
 [defaults]
