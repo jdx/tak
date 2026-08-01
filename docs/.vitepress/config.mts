@@ -31,7 +31,7 @@ const latestVersion = versionMatch?.[1] ?? "0.0.0";
 
 export default defineConfig({
   title: "tak",
-  description: "Pre-v1 deterministic CLI benchmarking with instruction counts",
+  description: "Deterministic CLI benchmarking with instruction counts",
   cleanUrls: true,
   lastUpdated: true,
 
@@ -46,7 +46,7 @@ export default defineConfig({
       "meta",
       {
         property: "og:description",
-        content: "Pre-v1 deterministic CLI benchmarking with instruction counts",
+        content: "Deterministic CLI benchmarking with instruction counts",
       },
     ],
     [
