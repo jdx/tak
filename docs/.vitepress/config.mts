@@ -82,6 +82,7 @@ export default defineConfig({
         items: [
           { text: "The experiment", link: "/guide/experiment" },
           { text: "Getting started", link: "/guide/getting-started" },
+          { text: "Adopt tak in a project", link: "/guide/adopting" },
           { text: "Benchmark configuration", link: "/guide/configuration" },
           { text: "CI and git notes", link: "/guide/ci" },
         ],
