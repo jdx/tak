@@ -9,9 +9,8 @@ tak is most useful as a small loop rather than as a one-off timer:
 
 This is the pattern used by
 [mise](https://github.com/jdx/mise/blob/main/tak.toml) and
-[aube](https://github.com/jdx/aube/blob/main/tak.toml). Both projects are still early tak
-adopters, not compatibility promises. Their checked-in files are useful examples, but tak is
-pre-v1 and the details may change.
+[aube](https://github.com/jdx/aube/blob/main/tak.toml). They are useful examples of tak in real
+CI. tak is pre-v1, so check which version each repository pins before copying its config.
 
 ## Choose work that can be measured
 
