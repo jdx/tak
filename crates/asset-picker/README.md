@@ -5,8 +5,8 @@ you want — distinguishing `tool-x86_64-unknown-linux-musl.tar.gz` from
 `tool-x86_64-apple-darwin.tar.gz`, `tool_amd64.deb`, and `tool-linux-x86_64.tar.gz.sha256`.
 
 > [!CAUTION]
-> Extracted for [tak](https://github.com/jdx/tak), which is itself an experiment. Published so
-> the version can be depended on, not because anyone should.
+> This crate is pre-v1. Its API and behavior are not finalized and may change incompatibly
+> between releases.
 
 ## Provenance
 

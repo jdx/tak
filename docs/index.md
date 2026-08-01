@@ -4,7 +4,7 @@ layout: home
 hero:
   name: tak
   text: A tachometer for code
-  tagline: A half-baked experiment in measuring CLI work with retired instruction counts.
+  tagline: Pre-v1 CLI performance tracking with retired instruction counts.
   image:
     light: /logo-light.svg
     dark: /logo-dark.svg
@@ -29,8 +29,11 @@ features:
     link: /guide/ci
 ---
 
-::: danger GO AWAY
-tak is a half-baked experiment. Do not use it, depend on it, package it, or expect support,
-stability, or a roadmap. If you actually need to benchmark a command, use
+::: warning Pre-v1 software
+tak is pre-v1. Its CLI, configuration, storage format, and behavior are not finalized and may
+change incompatibly between releases. If you need a stable benchmark tool, use
 [hyperfine](https://github.com/sharkdp/hyperfine).
+
+These docs are currently AI slop and have not been fully reviewed. They will be reviewed and
+finished later.
 :::

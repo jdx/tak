@@ -2,7 +2,7 @@
 
 tak measures how much work a command does by counting instructions, and stores the results in
 the repository as git notes. Read the README before changing anything: the premise, the
-measured numbers behind it, and the deliberate "do not use this" framing are all there.
+measured numbers behind it, and the pre-v1 compatibility warning are all there.
 
 ## The invariant everything else serves
 
@@ -151,7 +151,8 @@ When posting comments on PRs or discussions, note that the comment was AI-genera
 
 ## Tone
 
-The README opens with a large box saying this is a half-baked experiment with no support, no
-stability guarantees and no roadmap. Match that in anything user-facing — release notes, docs,
-PR descriptions. No marketing language, no upgrade recommendations, no implying production
-readiness. `communique.toml` carries the same instruction for generated release notes.
+The README opens with a warning that tak is pre-v1 and its interfaces, configuration, storage
+format, and behavior are not finalized. Match that in anything user-facing — release notes,
+docs, PR descriptions. No marketing language or implying production readiness. Call out
+breaking changes plainly. `communique.toml` carries the same instruction for generated release
+notes.

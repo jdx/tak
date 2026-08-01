@@ -1,10 +1,14 @@
 # The experiment
 
-::: danger This is not a recommendation
-tak is an unsupported experiment. It may be renamed, rewritten, or deleted. For real command
-benchmarking, use [hyperfine](https://github.com/sharkdp/hyperfine); for CI benchmark tracking,
-use a maintained tool such as [Bencher](https://bencher.dev) or
+::: warning Pre-v1 software
+tak is pre-v1. Its interfaces and behavior are not finalized and may change incompatibly
+between releases. If you need a stable command benchmark, use
+[hyperfine](https://github.com/sharkdp/hyperfine); for CI benchmark tracking, use
+[Bencher](https://bencher.dev) or
 [CodSpeed](https://codspeed.io).
+
+These docs are currently AI slop and have not been fully reviewed. They will be reviewed and
+finished later.
 :::
 
 tak asks whether retired instruction counts can make small CLI regressions visible in shared

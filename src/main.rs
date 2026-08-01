@@ -1,6 +1,6 @@
 //! tak — benchmark command-line programs and track their performance over time.
 //!
-//! Experimental. See README.md, which asks you to use hyperfine instead.
+//! Pre-v1: interfaces and behavior are not finalized and may change between releases.
 
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
