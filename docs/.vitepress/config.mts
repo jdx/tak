@@ -31,7 +31,7 @@ const latestVersion = versionMatch?.[1] ?? "0.0.0";
 
 export default defineConfig({
   title: "tak",
-  description: "A half-baked experiment in deterministic CLI benchmarking",
+  description: "Deterministic CLI benchmarking with instruction counts",
   cleanUrls: true,
   lastUpdated: true,
 
@@ -46,7 +46,7 @@ export default defineConfig({
       "meta",
       {
         property: "og:description",
-        content: "A half-baked experiment in deterministic CLI benchmarking",
+        content: "Deterministic CLI benchmarking with instruction counts",
       },
     ],
     [
@@ -67,7 +67,7 @@ export default defineConfig({
     },
 
     nav: [
-      { text: "The experiment", link: "/guide/experiment" },
+      { text: "Methodology", link: "/guide/methodology" },
       { text: "Getting started", link: "/guide/getting-started" },
       { text: "CLI reference", link: "/cli/" },
       {
@@ -80,7 +80,7 @@ export default defineConfig({
       {
         text: "Guide",
         items: [
-          { text: "The experiment", link: "/guide/experiment" },
+          { text: "Methodology", link: "/guide/methodology" },
           { text: "Getting started", link: "/guide/getting-started" },
           { text: "Adopt tak in a project", link: "/guide/adopting" },
           { text: "Benchmark configuration", link: "/guide/configuration" },

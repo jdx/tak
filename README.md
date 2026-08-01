@@ -18,7 +18,7 @@
 > [hyperfine](https://github.com/sharkdp/hyperfine). If you need CI benchmark tracking, use
 > [Bencher](https://bencher.dev) or [CodSpeed](https://codspeed.io).
 
-## The experiment
+## Why instruction counts
 
 Wall-clock time on a shared CI runner has roughly the same noise floor as the regressions
 people want to catch. tak asks whether retired instruction counts can provide a deterministic
@@ -38,8 +38,8 @@ enough for a tight threshold.
 Measurements stay in the repository as JSON lines under `refs/notes/tak`, merged with git's
 `cat_sort_uniq` strategy. There is no database, account, or hosted service.
 
-Read [the full experiment](https://tak.jdx.dev/guide/experiment) for the measurements,
-limitations, and reasoning.
+Read [the methodology](https://tak.jdx.dev/guide/methodology) for the measurements, limitations,
+and reasoning.
 
 ## What exists
 
