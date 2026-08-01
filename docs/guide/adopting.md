@@ -3,7 +3,7 @@
 tak is most useful as a small loop rather than as a one-off timer:
 
 1. declare repeatable benchmarks in `tak.toml`;
-2. record every commit that lands on the main branch;
+2. record the tip of every push to the main branch;
 3. compare a pull request with the commit it branched from; and
 4. fail only when an instruction count crosses the configured gate.
 
@@ -84,8 +84,8 @@ runner class on the machine that will produce the shared series.
 
 ## Record the main branch
 
-The main-branch workflow owns the history. It measures a commit after it lands, appends the
-result to `refs/notes/tak`, and pushes that ref:
+The main-branch workflow owns the history. It measures the tip of each push after it lands,
+appends the result to `refs/notes/tak`, and pushes that ref:
 
 ```yaml
 name: perf
@@ -107,11 +107,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: jdx/mise-action@v4
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
 
       - name: Install Valgrind
         run: |
@@ -134,10 +134,11 @@ jobs:
         run: tak history >> "$GITHUB_STEP_SUMMARY"
 ```
 
-Pin actions by commit SHA in a production workflow. Keep one runner class for the series and
-serialise writers. `tak push` retries by fetching and merging if another writer wins the race,
-but serialisation avoids unnecessary retries. Do not cancel an in-progress main run: that
-would leave a hole in the history.
+Keep one runner class for the series and serialise writers. `tak push` retries by fetching and
+merging if another writer wins the race, but serialisation avoids unnecessary retries. Do not
+cancel an in-progress main run: that would leave a hole in the push-tip history. A push that
+contains multiple commits records only its final commit; use one commit per push if every
+intermediate commit must have a measurement.
 
 The hosted runner label alone does not capture every input. If its image, compiler, standard
 library, build profile, or CPU class changes, update `[runner].class` to start a new series.
@@ -171,13 +172,29 @@ jobs:
   compare:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
-          persist-credentials: false
+          # Kept only for the trusted fetch below, before project code runs.
+          persist-credentials: true
 
-      - uses: jdx/mise-action@v4
+      - name: Fetch the comparison inputs
+        id: base
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --quiet origin "+$BASE_REF:refs/remotes/origin/$BASE_REF"
+          git fetch --quiet --depth 1 origin '+refs/notes/tak:refs/notes/tak'
+          base=$(git merge-base "origin/$BASE_REF" HEAD)
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+
+      # Remove the checkout token before any action reads PR-controlled files
+      # or any project build or benchmark command executes.
+      - name: Remove checkout credentials
+        run: git config --local --unset-all http.https://github.com/.extraheader
+
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
 
       - name: Install Valgrind
         run: |
@@ -186,15 +203,6 @@ jobs:
 
       - name: Measure this pull request
         run: mise run perf:record
-
-      - name: Find the merge base
-        id: base
-        env:
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          git fetch --quiet origin "$BASE_REF"
-          base=$(git merge-base "origin/$BASE_REF" HEAD)
-          echo "sha=$base" >> "$GITHUB_OUTPUT"
 
       - name: Compare and gate
         env:
@@ -206,6 +214,10 @@ jobs:
           set -e
           cat /tmp/tak-report.md
           cat /tmp/tak-report.md >> "$GITHUB_STEP_SUMMARY"
+          if grep -Fq '**Nothing was compared' /tmp/tak-report.md; then
+            echo "::error::no comparable baseline was found"
+            status=1
+          fi
           exit "$status"
 ```
 
@@ -213,10 +225,16 @@ Checking out the pull request's head SHA avoids measuring GitHub's synthetic mer
 Using the merge base avoids attributing unrelated changes that landed on main after the branch
 was created to the pull request.
 
-The example has a read-only token and reports through the job summary. If the workflow also
-posts a sticky pull-request comment, keep the write token in a separate reporting job that
-checks out no code and executes nothing from the pull request. Pass the Markdown report and
-exit status to it as an artifact. mise's
+The example fetches the base branch and notes while its read-only checkout token is available,
+then removes that credential before mise or any project command runs. `tak compare` falls back
+to the prefetched local notes when its unauthenticated refresh fails. This keeps private
+repositories readable without exposing their token to pull-request-controlled code.
+
+An empty comparison is not a passing gate: it can mean that the base was never recorded or
+that the runner classes differ. The explicit report check fails either case. If the workflow
+also posts a sticky pull-request comment, keep the write token in a separate reporting job
+that checks out no code and executes nothing from the pull request. Pass the Markdown report
+and exit status to it as an artifact. mise's
 [pull-request workflow](https://github.com/jdx/mise/blob/main/.github/workflows/perf-pr.yml)
 shows that separation.
 
@@ -227,18 +245,30 @@ commits. This works when releases contain executable assets and one command is c
 across the releases being measured:
 
 ```sh
+git fetch --force --tags origin
 tak backfill --bench release-startup --limit 20 -- --help
+if [ -z "$(git notes --ref=tak list)" ]; then
+  echo "backfill recorded no releases" >&2
+  exit 1
+fi
 tak push
 ```
+
+`tak backfill` resolves each release tag to the commit that produced it. Run it from a full
+clone or fetch all release tags first, as above. Missing tags are skipped, so checking the
+notes before pushing prevents a shallow checkout from publishing no release history without
+warning.
 
 Keep backfilled release artifacts in a separate benchmark series from binaries built by the
 ongoing CI workflow. Different build pipelines can produce different instruction counts even
 for the same source commit.
 
-Downloaded release binaries are untrusted executables. A workflow that backfills them should
-measure in a read-only job and pass only the notes to a separate publishing job. Aube's
+Only backfill release assets that you trust: tak downloads and executes them. A workflow
+should run them on an ephemeral runner with no credentials, restrict network egress, and pass
+only the generated notes artifact to a separate publishing job. If that isolation is not
+available, limit backfill to binaries produced by a release pipeline you trust. Aube's
 [backfill workflow](https://github.com/jdx/aube/blob/main/.github/workflows/perf-backfill.yml)
-is the complete example.
+shows the separate measurement and publishing jobs; it does not provide an execution sandbox.
 
 ## Check the rollout
 
@@ -247,7 +277,7 @@ Before treating the comparison as a required check:
 - `tak doctor` reports Valgrind and the runner class you intended;
 - every measured command succeeds with its network pointed at a dead port;
 - setup and cache warming happen before `tak run`;
-- main is the only branch pushed into `refs/notes/tak`;
+- only main push tips are pushed into `refs/notes/tak`;
 - main and pull requests use the same build inputs and runner class; and
 - only instruction counts gate CI; timing remains report-only.
 
