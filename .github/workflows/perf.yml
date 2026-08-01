@@ -84,7 +84,7 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPOSITORY}.git"
-          tak push
+          ./target/release/tak push
 
       - name: Summary
-        run: tak history >> "$GITHUB_STEP_SUMMARY"
+        run: ./target/release/tak history >> "$GITHUB_STEP_SUMMARY"

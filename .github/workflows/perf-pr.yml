@@ -99,7 +99,7 @@ jobs:
           BASE_SHA: ${{ steps.base.outputs.sha }}
         run: |
           set +e
-          tak compare "$BASE_SHA" > /tmp/tak-report.md
+          ./target/release/tak compare "$BASE_SHA" > /tmp/tak-report.md
           echo $? > /tmp/tak-gate-status
           set -e
           cat /tmp/tak-report.md
