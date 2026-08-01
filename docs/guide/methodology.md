@@ -1,4 +1,4 @@
-# The experiment
+# Methodology
 
 ::: warning Pre-v1 software
 tak is pre-v1. Its interfaces and behavior are not finalized and may change incompatibly
