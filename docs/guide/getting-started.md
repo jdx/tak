@@ -59,5 +59,6 @@ tak run --bench startup
 String commands are split on whitespace. There is no shell, quoting, globbing, or pipeline
 syntax. Use an argument list when boundaries matter.
 
-Continue with [benchmark configuration](/guide/configuration) or
-[record results in git notes](/guide/ci).
+Continue with [adopting tak in a project](/guide/adopting),
+[benchmark configuration](/guide/configuration), or
+[recording results in git notes](/guide/ci).

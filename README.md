@@ -54,6 +54,7 @@ PR reporting and change-point detection do not exist.
 ## Documentation
 
 - [Getting started](https://tak.jdx.dev/guide/getting-started)
+- [Adopt tak in a project](https://tak.jdx.dev/guide/adopting)
 - [Benchmark configuration](https://tak.jdx.dev/guide/configuration)
 - [CI and git notes](https://tak.jdx.dev/guide/ci)
 - [CLI reference](https://tak.jdx.dev/cli/)
