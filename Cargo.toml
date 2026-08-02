@@ -3,7 +3,7 @@ members = ["crates/asset-picker"]
 
 [package]
 name = "tak-cli"
-version = "0.0.5"
+version = "0.0.6"
 edition = "2024"
 description = "Pre-v1 command-line benchmarking and performance tracking"
 keywords = ["benchmark", "performance", "cli", "git-notes"]
@@ -39,7 +39,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-asset-picker = { path = "crates/asset-picker", version = "0.0.1" }
+asset-picker = { path = "crates/asset-picker", version = "0.0.2" }
 clap = { version = "4", features = ["derive"] }
 clap_usage = "4"
 serde = { version = "1", features = ["derive"] }
