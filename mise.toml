@@ -15,6 +15,19 @@ usage = "latest"
 description = "Build the debug binary"
 run = "cargo build"
 
+# Instruction-counted benchmarks (see tak.toml). The just-built release binary
+# is the measuring instrument, so this exercises the same source revision as
+# the benchmark subject without relying on a separately installed tak.
+[tasks.perf]
+description = "Build release mode and run the performance benchmarks"
+run = ["cargo build --release", "./target/release/tak run"]
+
+# Same measurement, appended to refs/notes/tak for this commit. Nothing leaves
+# the machine until `tak push`; the perf workflows are the publisher.
+[tasks."perf:record"]
+description = "Record the performance benchmarks in git notes"
+run = ["cargo build --release", "./target/release/tak run --record"]
+
 [tasks.test]
 description = "Run the test suite, including the cachegrind integration tests"
 # --all-targets so tests/counters.rs is included. Without valgrind installed it
