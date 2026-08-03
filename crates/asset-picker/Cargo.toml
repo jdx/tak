@@ -1,6 +1,6 @@
 [package]
 name = "asset-picker"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 description = "Pick the right release asset for a target platform. Extracted from mise."
 keywords = ["release", "assets", "platform", "github"]
