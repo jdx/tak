@@ -114,6 +114,12 @@ CI writers avoid conflicts without a custom merge driver. It dedupes on **exact 
 - A single malformed line must not render a commit's history unreadable — `parse_note` skips
   what it cannot parse.
 
+## Dependency updates
+
+- Use the lowest compatibility-significant specificity in `Cargo.toml` (for example, `"1"` for stable 1.x dependencies).
+- When the existing manifest requirement accepts a routine dependency update, change only `Cargo.lock`.
+- Keep lockfile updates focused and avoid unrelated transitive dependency churn.
+
 ## Conventional commits
 
 `<type>(<scope>): <description>`, lowercase, imperative mood.
