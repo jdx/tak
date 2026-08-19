@@ -1,6 +1,5 @@
 name "tak"
 bin "tak"
-version "0.0.6"
 unknown_flags "error"
 flag "--env-deny" help="Remove a variable from the environment of measured commands. Repeatable. Replaces the default list rather than adding to it." global=#true var=#true {
     long_help "Remove a variable from the environment of measured commands. Repeatable.\nReplaces the default list rather than adding to it."
@@ -32,18 +31,18 @@ cmd "run" help="Benchmark a command, or everything declared in tak.toml." {
     arg "[CMD]..." help="Command to benchmark, after `--`. Omit to run what tak.toml declares." double_dash="required"
 }
 cmd "history" help="Show recorded history for a commit." {
-    flag "--remote" help="Remote to refresh notes from." required=#true default="origin" {
+    flag "--remote" help="Remote to refresh notes from." default="origin" {
         arg "<REMOTE>"
     }
-    arg "<REV>" help="Revision to read. Defaults to HEAD." default="HEAD"
+    arg "[REV]" help="Revision to read. Defaults to HEAD." default="HEAD"
 }
 cmd "push" help="Push recorded measurements to the remote." {
-    flag "--remote" help="Remote to push notes to." required=#true default="origin" {
+    flag "--remote" help="Remote to push notes to." default="origin" {
         arg "<REMOTE>"
     }
 }
 cmd "init" help="Teach plain `git fetch` about the notes ref." {
-    flag "--remote" help="Remote whose fetch configuration should include the notes ref." required=#true default="origin" {
+    flag "--remote" help="Remote whose fetch configuration should include the notes ref." default="origin" {
         arg "<REMOTE>"
     }
 }
@@ -57,13 +56,13 @@ cmd "backfill" help="Benchmark published release binaries to bootstrap history."
         long_help "Executable name to look for inside each release archive. Defaults to\nthe repository name."
         arg "<BIN>"
     }
-    flag "--bench" help="Name to record measurements under." required=#true default="release" {
+    flag "--bench" help="Name to record measurements under." default="release" {
         arg "<BENCH>"
     }
-    flag "--limit" help="Most recent releases to measure." required=#true default="20" {
+    flag "--limit" help="Most recent releases to measure." default="20" {
         arg "<LIMIT>"
     }
-    flag "--runs" help="Timed runs per release." required=#true default="10" {
+    flag "--runs" help="Timed runs per release." default="10" {
         arg "<RUNS>"
     }
     flag "--dry-run" help="Measure but do not write to refs/notes/tak."
@@ -73,14 +72,14 @@ cmd "backfill" help="Benchmark published release binaries to bootstrap history."
 }
 cmd "compare" help="Compare this commit's measurements against another's." {
     long_help "Compare this commit's measurements against another's.\n\nFails when an instruction count has risen by more than `gate_pct`. Wall\nclock is reported and never gated."
-    flag "--rev" help="Revision to compare. Defaults to HEAD." required=#true default="HEAD" {
+    flag "--rev" help="Revision to compare. Defaults to HEAD." default="HEAD" {
         arg "<REV>"
     }
-    flag "--remote" help="Remote to refresh notes from." required=#true default="origin" {
+    flag "--remote" help="Remote to refresh notes from." default="origin" {
         arg "<REMOTE>"
     }
     flag "--no-gate" help="Report without failing, whatever the numbers say."
-    arg "<BASE>" help="Revision to compare against." default="origin/main"
+    arg "[BASE]" help="Revision to compare against." default="origin/main"
 }
 cmd "doctor" help="Diagnose the git-notes plumbing." {
 }

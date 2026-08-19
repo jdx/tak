@@ -816,7 +816,7 @@ fn main() -> Result<()> {
         }
         Cmd::Settings { docs } => cmd_settings(&resolve_settings(&overrides)?, docs),
         Cmd::Usage => {
-            print!("{}", Cli::to_kdl());
+            print!("{}", Cli::spec().view().omit_version().to_kdl());
             Ok(())
         }
     }
