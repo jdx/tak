@@ -3,6 +3,8 @@
 
 - **Usage**: `tak backfill [FLAGS] [-- ARGS]…`
 
+Benchmark published release binaries to bootstrap history.
+
 A new adopter's first chart is empty. Rather than rebuilding a project at
 a hundred historical commits, download what it already published.
 

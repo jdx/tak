@@ -5,7 +5,7 @@
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::path::Path;
-use usage_derive::{Args, Cli, Subcommands};
+use usage_derive::{Cli, Subcommands};
 
 use tak_cli::backfill;
 use tak_cli::compare;
@@ -44,126 +44,107 @@ struct Cli {
 #[derive(Subcommands)]
 enum Cmd {
     /// Benchmark a command, or everything declared in tak.toml.
-    Run(Box<RunArgs>),
+    Run {
+        /// Name to record this measurement under. With no command, selects a
+        /// single benchmark from tak.toml instead of running all of them.
+        #[arg(long)]
+        bench: Option<String>,
+        /// Timed runs. Overrides tak.toml when both are given.
+        #[arg(long)]
+        runs: Option<u32>,
+        /// Untimed warmup runs. Overrides tak.toml when both are given.
+        #[arg(long)]
+        warmup: Option<u32>,
+        /// Skip instruction counting even where valgrind is available.
+        #[arg(long)]
+        no_counters: bool,
+        /// Append the result to refs/notes/tak for the current commit.
+        #[arg(long)]
+        record: bool,
+        /// Command to benchmark, after `--`. Omit to run what tak.toml declares.
+        #[usage(arg, double_dash = "required")]
+        cmd: Vec<String>,
+    },
     /// Show recorded history for a commit.
-    History(HistoryArgs),
+    History {
+        /// Revision to read. Defaults to HEAD.
+        #[usage(arg, default = "HEAD")]
+        rev: String,
+        /// Remote to refresh notes from.
+        #[usage(long, default = "origin")]
+        remote: String,
+    },
     /// Push recorded measurements to the remote.
-    Push(PushArgs),
+    Push {
+        /// Remote to push notes to.
+        #[usage(long, default = "origin")]
+        remote: String,
+    },
     /// Teach plain `git fetch` about the notes ref.
-    Init(InitArgs),
+    Init {
+        /// Remote whose fetch configuration should include the notes ref.
+        #[usage(long, default = "origin")]
+        remote: String,
+    },
     /// Benchmark published release binaries to bootstrap history.
-    Backfill(Box<BackfillArgs>),
+    ///
+    /// A new adopter's first chart is empty. Rather than rebuilding a project at
+    /// a hundred historical commits, download what it already published.
+    Backfill {
+        /// Repository to pull releases from, as "owner/name". Defaults to the
+        /// `origin` remote of the current repository.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Executable name to look for inside each release archive. Defaults to
+        /// the repository name.
+        #[arg(long)]
+        bin: Option<String>,
+        /// Arguments passed to the downloaded binary, after `--`.
+        /// Defaults to `--version`, which every CLI answers cheaply.
+        #[usage(arg, double_dash = "required")]
+        args: Vec<String>,
+        /// Name to record measurements under.
+        #[usage(long, default = "release")]
+        bench: String,
+        /// Most recent releases to measure.
+        #[usage(long, default = "20")]
+        limit: usize,
+        /// Timed runs per release.
+        #[usage(long, default = "10")]
+        runs: u32,
+        /// Measure but do not write to refs/notes/tak.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Compare this commit's measurements against another's.
-    Compare(CompareArgs),
+    ///
+    /// Fails when an instruction count has risen by more than `gate_pct`. Wall
+    /// clock is reported and never gated.
+    Compare {
+        /// Revision to compare against.
+        #[usage(arg, default = "origin/main")]
+        base: String,
+        /// Revision to compare. Defaults to HEAD.
+        #[usage(long, default = "HEAD")]
+        rev: String,
+        /// Remote to refresh notes from.
+        #[usage(long, default = "origin")]
+        remote: String,
+        /// Report without failing, whatever the numbers say.
+        #[arg(long)]
+        no_gate: bool,
+    },
     /// Diagnose the git-notes plumbing.
     Doctor,
     /// Show every setting, its resolved value, and where that value came from.
-    Settings(SettingsArgs),
+    Settings {
+        /// Include the full description of each setting.
+        #[arg(long)]
+        docs: bool,
+    },
     /// Generate the CLI specification used to build the documentation.
     #[usage(hide)]
     Usage,
-}
-
-#[derive(Args)]
-struct RunArgs {
-    /// Name to record this measurement under. With no command, selects a
-    /// single benchmark from tak.toml instead of running all of them.
-    #[usage(long)]
-    bench: Option<String>,
-    /// Timed runs. Overrides tak.toml when both are given.
-    #[usage(long)]
-    runs: Option<u32>,
-    /// Untimed warmup runs. Overrides tak.toml when both are given.
-    #[usage(long)]
-    warmup: Option<u32>,
-    /// Skip instruction counting even where valgrind is available.
-    #[usage(long)]
-    no_counters: bool,
-    /// Append the result to refs/notes/tak for the current commit.
-    #[usage(long)]
-    record: bool,
-    /// Command to benchmark, after `--`. Omit to run what tak.toml declares.
-    #[usage(arg, double_dash = "required")]
-    cmd: Vec<String>,
-}
-
-#[derive(Args)]
-struct HistoryArgs {
-    /// Revision to read. Defaults to HEAD.
-    #[usage(arg, default = "HEAD")]
-    rev: String,
-    /// Remote to refresh notes from.
-    #[usage(long, default = "origin")]
-    remote: String,
-}
-
-#[derive(Args)]
-struct PushArgs {
-    /// Remote to push notes to.
-    #[usage(long, default = "origin")]
-    remote: String,
-}
-
-#[derive(Args)]
-struct InitArgs {
-    /// Remote whose fetch configuration should include the notes ref.
-    #[usage(long, default = "origin")]
-    remote: String,
-}
-
-/// A new adopter's first chart is empty. Rather than rebuilding a project at
-/// a hundred historical commits, download what it already published.
-#[derive(Args)]
-struct BackfillArgs {
-    /// Repository to pull releases from, as "owner/name". Defaults to the
-    /// `origin` remote of the current repository.
-    #[usage(long)]
-    repo: Option<String>,
-    /// Executable name to look for inside each release archive. Defaults to
-    /// the repository name.
-    #[usage(long)]
-    bin: Option<String>,
-    /// Arguments passed to the downloaded binary, after `--`.
-    /// Defaults to `--version`, which every CLI answers cheaply.
-    #[usage(arg, double_dash = "required")]
-    args: Vec<String>,
-    /// Name to record measurements under.
-    #[usage(long, default = "release")]
-    bench: String,
-    /// Most recent releases to measure.
-    #[usage(long, default = "20")]
-    limit: usize,
-    /// Timed runs per release.
-    #[usage(long, default = "10")]
-    runs: u32,
-    /// Measure but do not write to refs/notes/tak.
-    #[usage(long)]
-    dry_run: bool,
-}
-
-/// Fails when an instruction count has risen by more than `gate_pct`. Wall
-/// clock is reported and never gated.
-#[derive(Args)]
-struct CompareArgs {
-    /// Revision to compare against.
-    #[usage(arg, default = "origin/main")]
-    base: String,
-    /// Revision to compare. Defaults to HEAD.
-    #[usage(long, default = "HEAD")]
-    rev: String,
-    /// Remote to refresh notes from.
-    #[usage(long, default = "origin")]
-    remote: String,
-    /// Report without failing, whatever the numbers say.
-    #[usage(long)]
-    no_gate: bool,
-}
-
-#[derive(Args)]
-struct SettingsArgs {
-    /// Include the full description of each setting.
-    #[usage(long)]
-    docs: bool,
 }
 
 /// Identify the machine class. Series must be partitioned on this — moving
@@ -764,47 +745,61 @@ fn main() -> Result<()> {
         runner_class: cli.runner.clone(),
     };
     match cli.cmd {
-        Cmd::Run(args) => cmd_run(
-            args.bench,
-            args.runs,
-            args.warmup,
-            args.no_counters,
-            args.record,
-            args.cmd,
+        Cmd::Run {
+            bench,
+            runs,
+            warmup,
+            no_counters,
+            record,
+            cmd,
+        } => cmd_run(
+            bench,
+            runs,
+            warmup,
+            no_counters,
+            record,
+            cmd,
             &resolve_settings(&overrides)?,
         ),
-        Cmd::History(args) => cmd_history(args.rev, args.remote),
-        Cmd::Push(args) => {
-            notes::push(&args.remote)?;
-            println!("pushed {} to {}", notes::NOTES_REF, args.remote);
+        Cmd::History { rev, remote } => cmd_history(rev, remote),
+        Cmd::Push { remote } => {
+            notes::push(&remote)?;
+            println!("pushed {} to {}", notes::NOTES_REF, remote);
             Ok(())
         }
-        Cmd::Init(args) => {
-            notes::install_refspec(&args.remote)?;
+        Cmd::Init { remote } => {
+            notes::install_refspec(&remote)?;
             println!(
                 "added {} to remote.{}.fetch — plain `git fetch` now picks up measurements",
                 notes::NOTES_REF,
-                args.remote
+                remote
             );
             Ok(())
         }
-        Cmd::Backfill(args) => cmd_backfill(
-            args.repo,
-            args.bin,
-            args.args,
-            args.bench,
-            args.limit,
-            args.runs,
-            args.dry_run,
+        Cmd::Backfill {
+            repo,
+            bin,
+            args,
+            bench,
+            limit,
+            runs,
+            dry_run,
+        } => cmd_backfill(
+            repo,
+            bin,
+            args,
+            bench,
+            limit,
+            runs,
+            dry_run,
             &resolve_settings(&overrides)?,
         ),
-        Cmd::Compare(args) => cmd_compare(
-            args.base,
-            args.rev,
-            args.remote,
-            args.no_gate,
-            &resolve_settings(&overrides)?,
-        ),
+        Cmd::Compare {
+            base,
+            rev,
+            remote,
+            no_gate,
+        } => cmd_compare(base, rev, remote, no_gate, &resolve_settings(&overrides)?),
         // Tolerant on purpose: doctor diagnoses a broken setup, so a tak.toml
         // it cannot read must not stop it from running. Falling all the way
         // back to the defaults threw away the flag and the environment too, so
@@ -819,7 +814,7 @@ fn main() -> Result<()> {
             });
             cmd_doctor(&resolved)
         }
-        Cmd::Settings(args) => cmd_settings(&resolve_settings(&overrides)?, args.docs),
+        Cmd::Settings { docs } => cmd_settings(&resolve_settings(&overrides)?, docs),
         Cmd::Usage => {
             // usage 5.1's documentation renderer does not know the 6.x
             // runtime-only unknown_flags key yet. Keep strict parsing in the
