@@ -1,6 +1,6 @@
 [tools]
-# communique rewrites release bodies; Node builds the docs; usage renders the
-# CLI reference. Rust-only CI jobs run mise-action with `install: false` and
+# communique rewrites release bodies and Node builds the docs. Rust-only CI jobs
+# run mise-action with `install: false` and
 # dedicated jobs install only what they need. Rust itself comes from
 # rust-toolchain in CI and rustup locally.
 #
@@ -9,7 +9,6 @@
 # untagged draft because of it. Bump with `mise lock`, deliberately.
 communique = "latest"
 node = "24"
-usage = "latest"
 
 [tasks.build]
 description = "Build the debug binary"
@@ -73,14 +72,18 @@ depends = ["render:check"]
 dir = "docs"
 run = "npm ci && exec npm run docs:build"
 
+[tasks."build:usage"]
+description = "Build the usage 6 CLI revision that matches usage-rs"
+run = "cargo install --git https://github.com/jdx/usage --rev 597f58718a42a9a6e81675af47cc0d50d0273a4a usage-cli --root target/usage-cli --locked"
+
 [tasks.render]
 description = "Regenerate the CLI reference from usage metadata"
-depends = ["build"]
+depends = ["build", "build:usage"]
 run = [
     "./target/debug/tak usage > tak.usage.kdl",
     "rm -rf docs/cli && mkdir -p docs/cli",
-    "usage generate markdown --multi -f tak.usage.kdl --out-dir docs/cli --url-prefix /cli",
-    "usage generate json -f tak.usage.kdl > docs/cli/commands.json",
+    "./target/usage-cli/bin/usage generate markdown --multi -f tak.usage.kdl --out-dir docs/cli --url-prefix /cli",
+    "./target/usage-cli/bin/usage generate json -f tak.usage.kdl > docs/cli/commands.json",
 ]
 
 [tasks."render:check"]

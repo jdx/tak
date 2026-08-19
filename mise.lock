@@ -68,37 +68,3 @@ url = "https://nodejs.org/dist/v24.19.0/node-v24.19.0-darwin-arm64.tar.gz"
 [tools.node."platforms.windows-x64"]
 checksum = "sha256:57f71ab3652e797d84acddc79c81cc9ff1c6ddb2a1974cdb83f00fee9bff4c73"
 url = "https://nodejs.org/dist/v24.19.0/node-v24.19.0-win-x64.zip"
-
-[[tools.usage]]
-version = "5.1.0"
-backend = "aqua:jdx/usage"
-
-[tools.usage."platforms.linux-arm64"]
-checksum = "sha256:e2056b06c8d13f109389d53e758b4e79208f01360dec996751bc48ce658eb200"
-url = "https://github.com/jdx/usage/releases/download/v5.1.0/usage-aarch64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/jdx/usage/releases/assets/507608014"
-
-[tools.usage."platforms.linux-arm64-musl"]
-checksum = "sha256:e2056b06c8d13f109389d53e758b4e79208f01360dec996751bc48ce658eb200"
-url = "https://github.com/jdx/usage/releases/download/v5.1.0/usage-aarch64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/jdx/usage/releases/assets/507608014"
-
-[tools.usage."platforms.linux-x64"]
-checksum = "sha256:a702c639f8e25d1e10f42ab37e09b8f73634c09b23c7abe2ebd6ab6f9665e99c"
-url = "https://github.com/jdx/usage/releases/download/v5.1.0/usage-x86_64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/jdx/usage/releases/assets/507608023"
-
-[tools.usage."platforms.linux-x64-musl"]
-checksum = "sha256:a702c639f8e25d1e10f42ab37e09b8f73634c09b23c7abe2ebd6ab6f9665e99c"
-url = "https://github.com/jdx/usage/releases/download/v5.1.0/usage-x86_64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/jdx/usage/releases/assets/507608023"
-
-[tools.usage."platforms.macos-arm64"]
-checksum = "sha256:ca35e60afd2895ec0b5be9162dbef155a76384ce43573b1ab8a04fbb46e70cd9"
-url = "https://github.com/jdx/usage/releases/download/v5.1.0/usage-universal-apple-darwin.tar.gz"
-url_api = "https://api.github.com/repos/jdx/usage/releases/assets/507609560"
-
-[tools.usage."platforms.windows-x64"]
-checksum = "sha256:c0ef8c1c04917b4f2727134a10a3ab1afed9f251f677ab621c25b9cc85cad66b"
-url = "https://github.com/jdx/usage/releases/download/v5.1.0/usage-x86_64-pc-windows-msvc.zip"
-url_api = "https://api.github.com/repos/jdx/usage/releases/assets/507610030"
