@@ -3,9 +3,9 @@
 //! Pre-v1: interfaces and behavior are not finalized and may change between releases.
 
 use anyhow::{Context, Result, bail};
-use clap::{CommandFactory, Parser, Subcommand};
 use std::collections::BTreeMap;
 use std::path::Path;
+use usage_derive::{Args, Cli, Subcommands};
 
 use tak_cli::backfill;
 use tak_cli::compare;
@@ -15,134 +15,153 @@ use tak_cli::notes;
 use tak_cli::record::{Record, SCHEMA_VERSION};
 use tak_cli::settings::{self, Overrides, Settings};
 
-#[derive(Parser)]
-#[command(name = "tak", version, about = "CLI performance, tracked", long_about = None)]
+#[derive(Cli)]
+#[usage(name = "tak", bin = "tak", version = "0.0.6", unknown_flags = "error")]
 struct Cli {
-    #[command(subcommand)]
+    #[usage(subcommand)]
     cmd: Cmd,
 
     // Global so a setting is spelled the same wherever it applies, rather than
     // being repeated per subcommand and drifting. See settings.toml.
     /// Remove a variable from the environment of measured commands. Repeatable.
     /// Replaces the default list rather than adding to it.
-    #[arg(long, global = true, value_name = "VAR")]
+    #[usage(long, global, value_name = "VAR")]
     env_deny: Vec<String>,
     /// Keep a variable that --env-deny would remove. Repeatable.
-    #[arg(long, global = true, value_name = "VAR")]
+    #[usage(long, global, value_name = "VAR")]
     env_allow: Vec<String>,
     /// Percentage an instruction count may rise before `compare` fails.
-    #[arg(long, global = true, value_name = "PCT")]
+    #[usage(long, global, value_name = "PCT")]
     gate_pct: Option<f64>,
     /// Leave the line naming tak off the end of generated reports.
-    #[arg(long, global = true)]
+    #[usage(long, global)]
     no_credit: bool,
     /// Machine class to record under. Overrides the derived name.
-    #[arg(long, global = true, value_name = "CLASS")]
+    #[usage(long, global, value_name = "CLASS")]
     runner: Option<String>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommands)]
 enum Cmd {
     /// Benchmark a command, or everything declared in tak.toml.
-    Run {
-        /// Name to record this measurement under. With no command, selects a
-        /// single benchmark from tak.toml instead of running all of them.
-        #[arg(long)]
-        bench: Option<String>,
-        /// Timed runs. Overrides tak.toml when both are given.
-        #[arg(long)]
-        runs: Option<u32>,
-        /// Untimed warmup runs. Overrides tak.toml when both are given.
-        #[arg(long)]
-        warmup: Option<u32>,
-        /// Skip instruction counting even where valgrind is available.
-        #[arg(long)]
-        no_counters: bool,
-        /// Append the result to refs/notes/tak for the current commit.
-        #[arg(long)]
-        record: bool,
-        /// Command to benchmark, after `--`. Omit to run what tak.toml declares.
-        #[arg(last = true)]
-        cmd: Vec<String>,
-    },
+    Run(Box<RunArgs>),
     /// Show recorded history for a commit.
-    History {
-        /// Revision to read. Defaults to HEAD.
-        #[arg(default_value = "HEAD")]
-        rev: String,
-        /// Remote to refresh notes from.
-        #[arg(long, default_value = "origin")]
-        remote: String,
-    },
+    History(HistoryArgs),
     /// Push recorded measurements to the remote.
-    Push {
-        #[arg(long, default_value = "origin")]
-        remote: String,
-    },
+    Push(PushArgs),
     /// Teach plain `git fetch` about the notes ref.
-    Init {
-        #[arg(long, default_value = "origin")]
-        remote: String,
-    },
+    Init(InitArgs),
     /// Benchmark published release binaries to bootstrap history.
-    ///
-    /// A new adopter's first chart is empty. Rather than rebuilding a project at
-    /// a hundred historical commits, download what it already published.
-    Backfill {
-        /// Repository to pull releases from, as "owner/name". Defaults to the
-        /// `origin` remote of the current repository.
-        #[arg(long)]
-        repo: Option<String>,
-        /// Executable name to look for inside each release archive. Defaults to
-        /// the repository name.
-        #[arg(long)]
-        bin: Option<String>,
-        /// Arguments passed to the downloaded binary, after `--`.
-        /// Defaults to `--version`, which every CLI answers cheaply.
-        #[arg(last = true)]
-        args: Vec<String>,
-        /// Name to record measurements under.
-        #[arg(long, default_value = "release")]
-        bench: String,
-        /// Most recent releases to measure.
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-        /// Timed runs per release.
-        #[arg(long, default_value_t = 10)]
-        runs: u32,
-        /// Measure but do not write to refs/notes/tak.
-        #[arg(long)]
-        dry_run: bool,
-    },
+    Backfill(Box<BackfillArgs>),
     /// Compare this commit's measurements against another's.
-    ///
-    /// Fails when an instruction count has risen by more than `gate_pct`. Wall
-    /// clock is reported and never gated.
-    Compare {
-        /// Revision to compare against.
-        #[arg(default_value = "origin/main")]
-        base: String,
-        /// Revision to compare. Defaults to HEAD.
-        #[arg(long, default_value = "HEAD")]
-        rev: String,
-        /// Remote to refresh notes from.
-        #[arg(long, default_value = "origin")]
-        remote: String,
-        /// Report without failing, whatever the numbers say.
-        #[arg(long)]
-        no_gate: bool,
-    },
+    Compare(CompareArgs),
     /// Diagnose the git-notes plumbing.
     Doctor,
     /// Show every setting, its resolved value, and where that value came from.
-    Settings {
-        /// Include the full description of each setting.
-        #[arg(long)]
-        docs: bool,
-    },
+    Settings(SettingsArgs),
     /// Generate the CLI specification used to build the documentation.
-    #[command(hide = true)]
+    #[usage(hide)]
     Usage,
+}
+
+#[derive(Args)]
+struct RunArgs {
+    /// Name to record this measurement under. With no command, selects a
+    /// single benchmark from tak.toml instead of running all of them.
+    #[usage(long)]
+    bench: Option<String>,
+    /// Timed runs. Overrides tak.toml when both are given.
+    #[usage(long)]
+    runs: Option<u32>,
+    /// Untimed warmup runs. Overrides tak.toml when both are given.
+    #[usage(long)]
+    warmup: Option<u32>,
+    /// Skip instruction counting even where valgrind is available.
+    #[usage(long)]
+    no_counters: bool,
+    /// Append the result to refs/notes/tak for the current commit.
+    #[usage(long)]
+    record: bool,
+    /// Command to benchmark, after `--`. Omit to run what tak.toml declares.
+    #[usage(arg, double_dash = "required")]
+    cmd: Vec<String>,
+}
+
+#[derive(Args)]
+struct HistoryArgs {
+    /// Revision to read. Defaults to HEAD.
+    #[usage(arg, default = "HEAD")]
+    rev: String,
+    /// Remote to refresh notes from.
+    #[usage(long, default = "origin")]
+    remote: String,
+}
+
+#[derive(Args)]
+struct PushArgs {
+    #[usage(long, default = "origin")]
+    remote: String,
+}
+
+#[derive(Args)]
+struct InitArgs {
+    #[usage(long, default = "origin")]
+    remote: String,
+}
+
+/// A new adopter's first chart is empty. Rather than rebuilding a project at
+/// a hundred historical commits, download what it already published.
+#[derive(Args)]
+struct BackfillArgs {
+    /// Repository to pull releases from, as "owner/name". Defaults to the
+    /// `origin` remote of the current repository.
+    #[usage(long)]
+    repo: Option<String>,
+    /// Executable name to look for inside each release archive. Defaults to
+    /// the repository name.
+    #[usage(long)]
+    bin: Option<String>,
+    /// Arguments passed to the downloaded binary, after `--`.
+    /// Defaults to `--version`, which every CLI answers cheaply.
+    #[usage(arg, double_dash = "required")]
+    args: Vec<String>,
+    /// Name to record measurements under.
+    #[usage(long, default = "release")]
+    bench: String,
+    /// Most recent releases to measure.
+    #[usage(long, default = "20")]
+    limit: usize,
+    /// Timed runs per release.
+    #[usage(long, default = "10")]
+    runs: u32,
+    /// Measure but do not write to refs/notes/tak.
+    #[usage(long)]
+    dry_run: bool,
+}
+
+/// Fails when an instruction count has risen by more than `gate_pct`. Wall
+/// clock is reported and never gated.
+#[derive(Args)]
+struct CompareArgs {
+    /// Revision to compare against.
+    #[usage(arg, default = "origin/main")]
+    base: String,
+    /// Revision to compare. Defaults to HEAD.
+    #[usage(long, default = "HEAD")]
+    rev: String,
+    /// Remote to refresh notes from.
+    #[usage(long, default = "origin")]
+    remote: String,
+    /// Report without failing, whatever the numbers say.
+    #[usage(long)]
+    no_gate: bool,
+}
+
+#[derive(Args)]
+struct SettingsArgs {
+    /// Include the full description of each setting.
+    #[usage(long)]
+    docs: bool,
 }
 
 /// Identify the machine class. Series must be partitioned on this — moving
@@ -743,60 +762,47 @@ fn main() -> Result<()> {
         runner_class: cli.runner.clone(),
     };
     match cli.cmd {
-        Cmd::Run {
-            bench,
-            runs,
-            warmup,
-            no_counters,
-            record,
-            cmd,
-        } => cmd_run(
-            bench,
-            runs,
-            warmup,
-            no_counters,
-            record,
-            cmd,
+        Cmd::Run(args) => cmd_run(
+            args.bench,
+            args.runs,
+            args.warmup,
+            args.no_counters,
+            args.record,
+            args.cmd,
             &resolve_settings(&overrides)?,
         ),
-        Cmd::History { rev, remote } => cmd_history(rev, remote),
-        Cmd::Push { remote } => {
-            notes::push(&remote)?;
-            println!("pushed {} to {remote}", notes::NOTES_REF);
+        Cmd::History(args) => cmd_history(args.rev, args.remote),
+        Cmd::Push(args) => {
+            notes::push(&args.remote)?;
+            println!("pushed {} to {}", notes::NOTES_REF, args.remote);
             Ok(())
         }
-        Cmd::Init { remote } => {
-            notes::install_refspec(&remote)?;
+        Cmd::Init(args) => {
+            notes::install_refspec(&args.remote)?;
             println!(
-                "added {} to remote.{remote}.fetch — plain `git fetch` now picks up measurements",
-                notes::NOTES_REF
+                "added {} to remote.{}.fetch — plain `git fetch` now picks up measurements",
+                notes::NOTES_REF,
+                args.remote
             );
             Ok(())
         }
-        Cmd::Backfill {
-            repo,
-            bin,
-            args,
-            bench,
-            limit,
-            runs,
-            dry_run,
-        } => cmd_backfill(
-            repo,
-            bin,
-            args,
-            bench,
-            limit,
-            runs,
-            dry_run,
+        Cmd::Backfill(args) => cmd_backfill(
+            args.repo,
+            args.bin,
+            args.args,
+            args.bench,
+            args.limit,
+            args.runs,
+            args.dry_run,
             &resolve_settings(&overrides)?,
         ),
-        Cmd::Compare {
-            base,
-            rev,
-            remote,
-            no_gate,
-        } => cmd_compare(base, rev, remote, no_gate, &resolve_settings(&overrides)?),
+        Cmd::Compare(args) => cmd_compare(
+            args.base,
+            args.rev,
+            args.remote,
+            args.no_gate,
+            &resolve_settings(&overrides)?,
+        ),
         // Tolerant on purpose: doctor diagnoses a broken setup, so a tak.toml
         // it cannot read must not stop it from running. Falling all the way
         // back to the defaults threw away the flag and the environment too, so
@@ -811,16 +817,9 @@ fn main() -> Result<()> {
             });
             cmd_doctor(&resolved)
         }
-        Cmd::Settings { docs } => cmd_settings(&resolve_settings(&overrides)?, docs),
+        Cmd::Settings(args) => cmd_settings(&resolve_settings(&overrides)?, args.docs),
         Cmd::Usage => {
-            let mut command = Cli::command();
-            let mut spec = clap_usage::spec(&mut command, "tak");
-            // VitePress reads the release version directly from Cargo.toml.
-            // Committing it here as well would make release-plz's version-only
-            // PR fail the generated-reference check until another bot rewrote
-            // the same value into the CLI pages.
-            spec.version = None;
-            println!("{}", spec.to_string().trim());
+            println!("{}", Cli::to_kdl().trim());
             Ok(())
         }
     }
