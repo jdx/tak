@@ -108,6 +108,7 @@
           }
         ],
         "mounts": [],
+        "unknown_flags": null,
         "hide": false,
         "help": "Benchmark a command, or everything declared in tak.toml.",
         "name": "run",
@@ -160,6 +161,7 @@
           }
         ],
         "mounts": [],
+        "unknown_flags": null,
         "hide": false,
         "help": "Show recorded history for a commit.",
         "name": "history",
@@ -199,6 +201,7 @@
           }
         ],
         "mounts": [],
+        "unknown_flags": null,
         "hide": false,
         "help": "Push recorded measurements to the remote.",
         "name": "push",
@@ -238,6 +241,7 @@
           }
         ],
         "mounts": [],
+        "unknown_flags": null,
         "hide": false,
         "help": "Teach plain `git fetch` about the notes ref.",
         "name": "init",
@@ -385,6 +389,7 @@
           }
         ],
         "mounts": [],
+        "unknown_flags": null,
         "hide": false,
         "help": "Benchmark published release binaries to bootstrap history.",
         "help_long": "Benchmark published release binaries to bootstrap history.\n\nA new adopter's first chart is empty. Rather than rebuilding a project at\na hundred historical commits, download what it already published.",
@@ -472,6 +477,7 @@
           }
         ],
         "mounts": [],
+        "unknown_flags": null,
         "hide": false,
         "help": "Compare this commit's measurements against another's.",
         "help_long": "Compare this commit's measurements against another's.\n\nFails when an instruction count has risen by more than `gate_pct`. Wall\nclock is reported and never gated.",
@@ -489,6 +495,7 @@
         "args": [],
         "flags": [],
         "mounts": [],
+        "unknown_flags": null,
         "hide": false,
         "help": "Diagnose the git-notes plumbing.",
         "name": "doctor",
@@ -518,6 +525,7 @@
           }
         ],
         "mounts": [],
+        "unknown_flags": null,
         "hide": false,
         "help": "Show every setting, its resolved value, and where that value came from.",
         "name": "settings",
@@ -534,6 +542,7 @@
         "args": [],
         "flags": [],
         "mounts": [],
+        "unknown_flags": null,
         "hide": true,
         "help": "Generate the CLI specification used to build the documentation.",
         "name": "usage",
@@ -637,6 +646,7 @@
       }
     ],
     "mounts": [],
+    "unknown_flags": null,
     "hide": false,
     "name": "tak",
     "aliases": [],
@@ -644,8 +654,12 @@
     "examples": []
   },
   "config": {
-    "props": {}
+    "props": {},
+    "sources": {},
+    "files": []
   },
+  "version": "0.0.6",
   "usage": "",
-  "complete": {}
+  "complete": {},
+  "unknown_flags": "error"
 }

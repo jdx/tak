@@ -3,6 +3,8 @@
 
 **Usage**: `tak [FLAGS] <SUBCOMMAND>`
 
+**Version**: 0.0.6
+
 - **Usage**: `tak [FLAGS] <SUBCOMMAND>`
 
 ## Global Flags

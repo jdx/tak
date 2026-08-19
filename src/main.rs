@@ -816,15 +816,7 @@ fn main() -> Result<()> {
         }
         Cmd::Settings { docs } => cmd_settings(&resolve_settings(&overrides)?, docs),
         Cmd::Usage => {
-            // usage 5.1's documentation renderer does not know the 6.x
-            // runtime-only unknown_flags key yet. Keep strict parsing in the
-            // typed CLI, but omit that setting from the portable spec.
-            let spec = Cli::to_kdl()
-                .lines()
-                .filter(|line| !line.starts_with("unknown_flags ") && !line.starts_with("version "))
-                .collect::<Vec<_>>()
-                .join("\n");
-            println!("{}", spec.trim());
+            print!("{}", Cli::to_kdl());
             Ok(())
         }
     }
