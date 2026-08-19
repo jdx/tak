@@ -5,7 +5,7 @@
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::path::Path;
-use usage_derive::{Cli, Subcommands};
+use usage_rs::{Cli, Subcommands};
 
 use tak_cli::backfill;
 use tak_cli::compare;

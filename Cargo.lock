@@ -177,8 +177,7 @@ dependencies = [
  "serde",
  "serde_json",
  "toml",
- "usage-argv",
- "usage-derive",
+ "usage-rs",
 ]
 
 [[package]]
@@ -239,6 +238,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "usage-rs"
+version = "5.1.0"
+source = "git+https://github.com/jdx/usage?rev=88786493a5df2b90ad49314f68267c39c7497188#88786493a5df2b90ad49314f68267c39c7497188"
+dependencies = [
+ "usage-argv",
+ "usage-derive",
 ]
 
 [[package]]
