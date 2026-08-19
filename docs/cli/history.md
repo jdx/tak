@@ -3,13 +3,13 @@
 
 - **Usage**: `tak history [--remote <REMOTE>] [REV]`
 
-Show recorded history for a commit
+Show recorded history for a commit.
 
 ## Arguments
 
 ### `[REV]`
 
-Revision to read. Defaults to HEAD
+Revision to read. Defaults to HEAD.
 
 **Default:** `HEAD`
 
@@ -17,6 +17,6 @@ Revision to read. Defaults to HEAD
 
 ### `--remote <REMOTE>`
 
-Remote to refresh notes from
+Remote to refresh notes from.
 
 **Default:** `origin`

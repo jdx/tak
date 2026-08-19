@@ -3,10 +3,12 @@
 
 - **Usage**: `tak init [--remote <REMOTE>]`
 
-Teach plain `git fetch` about the notes ref
+Teach plain `git fetch` about the notes ref.
 
 ## Flags
 
 ### `--remote <REMOTE>`
+
+Remote whose fetch configuration should include the notes ref.
 
 **Default:** `origin`

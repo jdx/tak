@@ -74,7 +74,7 @@ dir = "docs"
 run = "npm ci && exec npm run docs:build"
 
 [tasks.render]
-description = "Regenerate the CLI reference from clap metadata"
+description = "Regenerate the CLI reference from usage metadata"
 depends = ["build"]
 run = [
     "./target/debug/tak usage > tak.usage.kdl",

@@ -3,29 +3,32 @@
 
 **Usage**: `tak [FLAGS] <SUBCOMMAND>`
 
+**Version**: 0.0.6
+
 - **Usage**: `tak [FLAGS] <SUBCOMMAND>`
 
 ## Global Flags
 
 ### `--env-deny… <VAR>`
 
-Remove a variable from the environment of measured commands. Repeatable. Replaces the default list rather than adding to it
+Remove a variable from the environment of measured commands. Repeatable.
+Replaces the default list rather than adding to it.
 
 ### `--env-allow… <VAR>`
 
-Keep a variable that --env-deny would remove. Repeatable
+Keep a variable that --env-deny would remove. Repeatable.
 
 ### `--gate-pct <PCT>`
 
-Percentage an instruction count may rise before `compare` fails
+Percentage an instruction count may rise before `compare` fails.
 
 ### `--no-credit`
 
-Leave the line naming tak off the end of generated reports
+Leave the line naming tak off the end of generated reports.
 
 ### `--runner <CLASS>`
 
-Machine class to record under. Overrides the derived name
+Machine class to record under. Overrides the derived name.
 
 ## Subcommands
 

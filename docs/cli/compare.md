@@ -3,15 +3,14 @@
 
 - **Usage**: `tak compare [FLAGS] [BASE]`
 
-Compare this commit's measurements against another's.
-
-Fails when an instruction count has risen by more than `gate_pct`. Wall clock is reported and never gated.
+Fails when an instruction count has risen by more than `gate_pct`. Wall
+clock is reported and never gated.
 
 ## Arguments
 
 ### `[BASE]`
 
-Revision to compare against
+Revision to compare against.
 
 **Default:** `origin/main`
 
@@ -19,16 +18,16 @@ Revision to compare against
 
 ### `--rev <REV>`
 
-Revision to compare. Defaults to HEAD
+Revision to compare. Defaults to HEAD.
 
 **Default:** `HEAD`
 
 ### `--remote <REMOTE>`
 
-Remote to refresh notes from
+Remote to refresh notes from.
 
 **Default:** `origin`
 
 ### `--no-gate`
 
-Report without failing, whatever the numbers say
+Report without failing, whatever the numbers say.

@@ -3,10 +3,10 @@
 
 - **Usage**: `tak settings [--docs]`
 
-Show every setting, its resolved value, and where that value came from
+Show every setting, its resolved value, and where that value came from.
 
 ## Flags
 
 ### `--docs`
 
-Include the full description of each setting
+Include the full description of each setting.

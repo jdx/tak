@@ -16,7 +16,7 @@ use tak_cli::record::{Record, SCHEMA_VERSION};
 use tak_cli::settings::{self, Overrides, Settings};
 
 #[derive(Cli)]
-#[usage(name = "tak", bin = "tak", version = "0.0.6", unknown_flags = "error")]
+#[usage(name = "tak", bin = "tak", version, unknown_flags = "error")]
 struct Cli {
     #[usage(subcommand)]
     cmd: Cmd,
@@ -99,12 +99,14 @@ struct HistoryArgs {
 
 #[derive(Args)]
 struct PushArgs {
+    /// Remote to push notes to.
     #[usage(long, default = "origin")]
     remote: String,
 }
 
 #[derive(Args)]
 struct InitArgs {
+    /// Remote whose fetch configuration should include the notes ref.
     #[usage(long, default = "origin")]
     remote: String,
 }
@@ -819,7 +821,15 @@ fn main() -> Result<()> {
         }
         Cmd::Settings(args) => cmd_settings(&resolve_settings(&overrides)?, args.docs),
         Cmd::Usage => {
-            println!("{}", Cli::to_kdl().trim());
+            // usage 5.1's documentation renderer does not know the 6.x
+            // runtime-only unknown_flags key yet. Keep strict parsing in the
+            // typed CLI, but omit that setting from the portable spec.
+            let spec = Cli::to_kdl()
+                .lines()
+                .filter(|line| !line.starts_with("unknown_flags "))
+                .collect::<Vec<_>>()
+                .join("\n");
+            println!("{}", spec.trim());
             Ok(())
         }
     }

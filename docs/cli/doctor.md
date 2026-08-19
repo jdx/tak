@@ -3,4 +3,4 @@
 
 - **Usage**: `tak doctor`
 
-Diagnose the git-notes plumbing
+Diagnose the git-notes plumbing.
