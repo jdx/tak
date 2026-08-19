@@ -229,12 +229,12 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 [[package]]
 name = "usage-argv"
 version = "5.1.0"
-source = "git+https://github.com/jdx/usage?rev=7f8aeb47486bb4edfe3282fd640e3caea04d24ee#7f8aeb47486bb4edfe3282fd640e3caea04d24ee"
+source = "git+https://github.com/jdx/usage?rev=88786493a5df2b90ad49314f68267c39c7497188#88786493a5df2b90ad49314f68267c39c7497188"
 
 [[package]]
 name = "usage-derive"
 version = "5.1.0"
-source = "git+https://github.com/jdx/usage?rev=7f8aeb47486bb4edfe3282fd640e3caea04d24ee#7f8aeb47486bb4edfe3282fd640e3caea04d24ee"
+source = "git+https://github.com/jdx/usage?rev=88786493a5df2b90ad49314f68267c39c7497188#88786493a5df2b90ad49314f68267c39c7497188"
 dependencies = [
  "proc-macro2",
  "quote",
