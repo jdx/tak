@@ -234,12 +234,12 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 [[package]]
 name = "usage-argv"
 version = "5.1.0"
-source = "git+https://github.com/jdx/usage?rev=86d5ac2a32e0355383ce6d4ef268c4889ea2ec40#86d5ac2a32e0355383ce6d4ef268c4889ea2ec40"
+source = "git+https://github.com/jdx/usage?rev=862388e847815db9ffbc0e3775e5246a95438792#862388e847815db9ffbc0e3775e5246a95438792"
 
 [[package]]
 name = "usage-derive"
 version = "5.1.0"
-source = "git+https://github.com/jdx/usage?rev=86d5ac2a32e0355383ce6d4ef268c4889ea2ec40#86d5ac2a32e0355383ce6d4ef268c4889ea2ec40"
+source = "git+https://github.com/jdx/usage?rev=862388e847815db9ffbc0e3775e5246a95438792#862388e847815db9ffbc0e3775e5246a95438792"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -250,7 +250,7 @@ dependencies = [
 [[package]]
 name = "usage-rs"
 version = "5.1.0"
-source = "git+https://github.com/jdx/usage?rev=86d5ac2a32e0355383ce6d4ef268c4889ea2ec40#86d5ac2a32e0355383ce6d4ef268c4889ea2ec40"
+source = "git+https://github.com/jdx/usage?rev=862388e847815db9ffbc0e3775e5246a95438792#862388e847815db9ffbc0e3775e5246a95438792"
 dependencies = [
  "usage-argv",
  "usage-derive",

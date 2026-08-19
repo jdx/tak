@@ -37,12 +37,12 @@ cmd "history" help="Show recorded history for a commit." {
     arg "[REV]" help="Revision to read. Defaults to HEAD." default="HEAD"
 }
 cmd "push" help="Push recorded measurements to the remote." {
-    flag "--remote" help="Remote to push notes to." default="origin" {
+    flag "--remote" help="Remote to use for git-notes synchronization." default="origin" {
         arg "<REMOTE>"
     }
 }
 cmd "init" help="Teach plain `git fetch` about the notes ref." {
-    flag "--remote" help="Remote whose fetch configuration should include the notes ref." default="origin" {
+    flag "--remote" help="Remote to use for git-notes synchronization." default="origin" {
         arg "<REMOTE>"
     }
 }

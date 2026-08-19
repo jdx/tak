@@ -9,6 +9,6 @@ Push recorded measurements to the remote.
 
 ### `--remote <REMOTE>`
 
-Remote to push notes to.
+Remote to use for git-notes synchronization.
 
 **Default:** `origin`

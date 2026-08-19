@@ -180,8 +180,8 @@
           {
             "name": "remote",
             "usage": "--remote <REMOTE>",
-            "help": "Remote to push notes to.",
-            "help_first_line": "Remote to push notes to.",
+            "help": "Remote to use for git-notes synchronization.",
+            "help_first_line": "Remote to use for git-notes synchronization.",
             "short": [],
             "long": [
               "remote"
@@ -220,8 +220,8 @@
           {
             "name": "remote",
             "usage": "--remote <REMOTE>",
-            "help": "Remote whose fetch configuration should include the notes ref.",
-            "help_first_line": "Remote whose fetch configuration should include the notes ref.",
+            "help": "Remote to use for git-notes synchronization.",
+            "help_first_line": "Remote to use for git-notes synchronization.",
             "short": [],
             "long": [
               "remote"

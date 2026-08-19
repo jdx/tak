@@ -5,7 +5,7 @@
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::path::Path;
-use usage_rs::{Cli, Subcommands};
+use usage_rs::{Args, Cli, Subcommands};
 
 use tak_cli::backfill;
 use tak_cli::compare;
@@ -75,17 +75,9 @@ enum Cmd {
         remote: String,
     },
     /// Push recorded measurements to the remote.
-    Push {
-        /// Remote to push notes to.
-        #[usage(long, default = "origin")]
-        remote: String,
-    },
+    Push(RemoteArgs),
     /// Teach plain `git fetch` about the notes ref.
-    Init {
-        /// Remote whose fetch configuration should include the notes ref.
-        #[usage(long, default = "origin")]
-        remote: String,
-    },
+    Init(RemoteArgs),
     /// Benchmark published release binaries to bootstrap history.
     ///
     /// A new adopter's first chart is empty. Rather than rebuilding a project at
@@ -145,6 +137,13 @@ enum Cmd {
     /// Generate the CLI specification used to build the documentation.
     #[usage(hide)]
     Usage,
+}
+
+#[derive(Args)]
+struct RemoteArgs {
+    /// Remote to use for git-notes synchronization.
+    #[usage(long, default = "origin")]
+    remote: String,
 }
 
 /// Identify the machine class. Series must be partitioned on this — moving
@@ -762,12 +761,12 @@ fn main() -> Result<()> {
             &resolve_settings(&overrides)?,
         ),
         Cmd::History { rev, remote } => cmd_history(rev, remote),
-        Cmd::Push { remote } => {
+        Cmd::Push(RemoteArgs { remote }) => {
             notes::push(&remote)?;
             println!("pushed {} to {}", notes::NOTES_REF, remote);
             Ok(())
         }
-        Cmd::Init { remote } => {
+        Cmd::Init(RemoteArgs { remote }) => {
             notes::install_refspec(&remote)?;
             println!(
                 "added {} to remote.{}.fetch — plain `git fetch` now picks up measurements",

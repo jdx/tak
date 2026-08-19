@@ -9,6 +9,6 @@ Teach plain `git fetch` about the notes ref.
 
 ### `--remote <REMOTE>`
 
-Remote whose fetch configuration should include the notes ref.
+Remote to use for git-notes synchronization.
 
 **Default:** `origin`
