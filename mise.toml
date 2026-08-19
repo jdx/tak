@@ -74,7 +74,7 @@ run = "npm ci && exec npm run docs:build"
 
 [tasks."build:usage"]
 description = "Build the usage 6 CLI revision that matches usage-rs"
-run = "cargo install --git https://github.com/jdx/usage --rev 862388e847815db9ffbc0e3775e5246a95438792 usage-cli --root target/usage-cli --locked"
+run = "cargo install --git https://github.com/jdx/usage --rev a50857f5ff9e8186f59a0236824c816ca33893ca usage-cli --root target/usage-cli --locked"
 
 [tasks.render]
 description = "Regenerate the CLI reference from usage metadata"
