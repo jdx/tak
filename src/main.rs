@@ -821,7 +821,7 @@ fn main() -> Result<()> {
             // typed CLI, but omit that setting from the portable spec.
             let spec = Cli::to_kdl()
                 .lines()
-                .filter(|line| !line.starts_with("unknown_flags "))
+                .filter(|line| !line.starts_with("unknown_flags ") && !line.starts_with("version "))
                 .collect::<Vec<_>>()
                 .join("\n");
             println!("{}", spec.trim());
