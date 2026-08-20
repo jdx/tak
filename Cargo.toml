@@ -40,7 +40,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 asset-picker = { path = "crates/asset-picker", version = "0.0.2" }
-usage-rs = { git = "https://github.com/jdx/usage", rev = "02367b617a6be10aaa74f3fc491b3f817a23dfbd", features = ["diagnostics"] }
+usage-rs = { git = "https://github.com/jdx/usage", rev = "054db7f27add07d26ee9bbf81e2aeddf1d4d5147", features = ["diagnostics"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
