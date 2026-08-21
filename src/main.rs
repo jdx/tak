@@ -13,7 +13,7 @@ use tak_cli::config::{self, Config, DEFAULT_RUNS, DEFAULT_WARMUP};
 use tak_cli::measure::{self, Plan};
 use tak_cli::notes;
 use tak_cli::record::{Record, SCHEMA_VERSION};
-use tak_cli::settings::{self, Overrides, Settings};
+use tak_cli::settings::{CliLayer, EnvLayer, Settings, TakConfigLayer, config_source};
 
 #[derive(Cli)]
 #[usage(
@@ -21,29 +21,36 @@ use tak_cli::settings::{self, Overrides, Settings};
     bin = "tak",
     version,
     about = "CLI performance, tracked",
-    unknown_flags = "error"
+    unknown_flags = "error",
+    config = tak_cli::settings::Settings
 )]
 struct Cli {
     #[usage(subcommand)]
     cmd: Cmd,
 
     // Global so a setting is spelled the same wherever it applies, rather than
-    // being repeated per subcommand and drifting. See settings.toml.
+    // being repeated per subcommand and drifting. `setting = "..."` is the
+    // executable binding: what these flags are given lands in the settings
+    // layer the parser hands back, and a test holds the bindings against the
+    // registry so neither can drift from the other.
     /// Remove a variable from the environment of measured commands. Repeatable.
     /// Replaces the default list rather than adding to it.
-    #[usage(long, global, value_name = "VAR")]
+    #[usage(long, global, value_name = "VAR", setting = "env_deny")]
     env_deny: Vec<String>,
     /// Keep a variable that --env-deny would remove. Repeatable.
-    #[usage(long, global, value_name = "VAR")]
+    #[usage(long, global, value_name = "VAR", setting = "env_allow")]
     env_allow: Vec<String>,
     /// Percentage an instruction count may rise before `compare` fails.
-    #[usage(long, global, value_name = "PCT")]
+    #[usage(long, global, value_name = "PCT", setting = "gate_pct")]
     gate_pct: Option<f64>,
     /// Leave the line naming tak off the end of generated reports.
-    #[usage(long, global)]
-    no_credit: bool,
+    // `SetFalse`: the long spelling is the negation of the setting, so `--no-credit`
+    // contributes `false` to the settings layer and its absence contributes nothing.
+    #[arg(long = "no-credit", action = usage_rs::ArgAction::SetFalse, global = true)]
+    #[usage(default = "true", setting = "credit")]
+    credit: bool,
     /// Machine class to record under. Overrides the derived name.
-    #[usage(long, global, value_name = "CLASS")]
+    #[usage(long, global, value_name = "CLASS", setting = "runner_class")]
     runner: Option<String>,
 }
 
@@ -679,13 +686,13 @@ fn cmd_backfill(
     Ok(())
 }
 
-/// Resolve settings from the CLI, the environment, and `tak.toml`.
+/// Resolve settings from the CLI layer, the environment, and `tak.toml`.
 ///
 /// Called only by the commands that measure something or report settings.
 /// `push`, `init`, `history` and `doctor` do not consult `tak.toml` at all, so a
 /// broken one cannot stop you from pushing measurements you already took.
 ///
-/// Reads the `[env]` table only, via [`Config::find_env`], so an invalid
+/// Reads only the dotted keys the registry binds to `tak.toml`, so an invalid
 /// `[bench.x]` does not abort `tak run -- somecmd` — an explicit command has
 /// never depended on the declared benchmarks and still does not.
 ///
@@ -693,40 +700,73 @@ fn cmd_backfill(
 /// it may carry `[env]` settings that change what gets scrubbed from a
 /// subject's environment, and silently applying a weaker filter than the
 /// project asked for is not a good failure.
-fn resolve_settings(overrides: &Overrides) -> Result<Settings> {
-    let config = config::Config::find_settings(&std::env::current_dir()?)
-        .context("could not read settings")?;
-    Ok(Settings::from_process(overrides, &config))
+fn resolve_settings(cli: &CliLayer) -> Result<Settings> {
+    Settings::from_process(cli)
+}
+
+/// A declared default, written the way `tak.toml` would spell it.
+fn render_default(value: &usage_rs::config::Const) -> String {
+    use usage_rs::config::{Const, Value};
+    match value {
+        Const::Str(s) => format!("{s:?}"),
+        Const::Bool(b) => b.to_string(),
+        Const::Int(i) => i.to_string(),
+        Const::Float(f) => Value::Float(*f).display(),
+        Const::List(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(render_default)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        other => other.to_value().display(),
+    }
 }
 
 /// Print the settings registry with resolved values.
 fn cmd_settings(resolved: &Settings, docs: bool) -> Result<()> {
     let scrubbed: Vec<&str> = resolved.scrubbed_env().collect();
-    for meta in settings::SETTINGS {
-        // `Settings::get` rather than a match here: a test asserts it answers
+    for meta in Settings::SETTINGS_PROPS {
+        // `display_value` rather than a match here: a test asserts it answers
         // for every registry entry, so a new setting cannot reach this display
         // without a value behind it.
-        let Some(value) = resolved.display_value(meta.name) else {
-            println!("{}  (no accessor — wire it into Settings::get)", meta.name);
+        let Some(value) = resolved.display_value(meta.key) else {
+            println!(
+                "{}  (no accessor — wire it into Settings::display_value)",
+                meta.key
+            );
             continue;
         };
-        println!("{}  {}", meta.name, meta.type_);
+        println!("{}  {}", meta.key, meta.ty.name());
         println!("  value    {value}");
-        println!("  default  {}", meta.default);
-        if !meta.cli_flags.is_empty() {
-            println!("  cli      {}", meta.cli_flags.join(", "));
+        if let Some(default) = &meta.default {
+            println!("  default  {}", render_default(default));
         }
-        if !meta.env_vars.is_empty() {
-            println!("  env      {}", meta.env_vars.join(", "));
+        if !meta.cli.is_empty() {
+            println!("  cli      {}", meta.cli.join(", "));
         }
-        if !meta.config_keys.is_empty() {
-            println!("  tak.toml {}", meta.config_keys.join(", "));
+        if !meta.envs.is_empty() {
+            println!("  env      {}", meta.envs.join(", "));
         }
-        println!("  since    {}", meta.since);
+        let config_keys: Vec<&str> = meta
+            .bindings
+            .iter()
+            .filter(|(kind, _)| *kind == config_source().name())
+            .map(|(_, key)| *key)
+            .collect();
+        if !config_keys.is_empty() {
+            println!("  tak.toml {}", config_keys.join(", "));
+        }
+        if let Some(since) = meta.since {
+            println!("  since    {since}");
+        }
         if docs {
             println!();
-            for line in meta.docs.trim().lines() {
-                println!("  {line}");
+            if let Some(text) = meta.long_help.or(meta.help) {
+                for line in text.trim().lines() {
+                    println!("  {line}");
+                }
             }
             for example in meta.examples {
                 println!("  $ {example}");
@@ -739,16 +779,9 @@ fn cmd_settings(resolved: &Settings, docs: bool) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let overrides = Overrides {
-        env_deny: settings::from_cli(cli.env_deny),
-        env_allow: settings::from_cli(cli.env_allow),
-        gate_pct: cli.gate_pct,
-        // Only a flag that was passed says anything; its absence must defer to
-        // tak.toml rather than assert `credit = true`.
-        credit: cli.no_credit.then_some(false),
-        runner_class: cli.runner.clone(),
-    };
+    // The settings layer beside the parsed struct: what was given on the
+    // command line contributes, and what was left off does not.
+    let (cli, overrides) = Cli::parse_with_settings();
     match cli.cmd {
         Cmd::Run {
             bench,
@@ -813,15 +846,22 @@ fn main() -> Result<()> {
         Cmd::Doctor => {
             let resolved = resolve_settings(&overrides).unwrap_or_else(|_| {
                 eprintln!("warning: could not read tak.toml; showing settings without it");
-                Settings::resolve(&overrides, &config::SettingsSections::default(), &|key| {
-                    std::env::var(key).ok()
-                })
+                Settings::resolve(
+                    &overrides,
+                    &EnvLayer::from_process(),
+                    &TakConfigLayer::empty(),
+                )
+                .unwrap_or_default()
             });
             cmd_doctor(&resolved)
         }
         Cmd::Settings { docs } => cmd_settings(&resolve_settings(&overrides)?, docs),
         Cmd::Usage => {
+            // The command tree, then the config block: the settings are part
+            // of the spec, so docs and completions read the same declaration
+            // the resolver does.
             print!("{}", Cli::spec().view().omit_version().to_kdl());
+            print!("{}", Settings::spec_kdl());
             Ok(())
         }
     }
@@ -830,6 +870,19 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The drift guard. The registry lists the flags each setting declares and
+    /// the parser lists the flags it binds to settings; both are generated, and
+    /// this holds them against each other — a flag documented and read by
+    /// nothing, or read and documented by nothing, fails here.
+    ///
+    #[test]
+    fn the_flags_this_cli_reads_are_the_flags_its_settings_declare() {
+        assert_eq!(
+            Settings::SETTINGS_REGISTRY.drift(Cli::SETTINGS_BINDINGS),
+            Vec::<String>::new()
+        );
+    }
 
     #[test]
     fn timestamp_is_rfc3339_shaped() {

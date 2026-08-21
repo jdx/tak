@@ -45,16 +45,16 @@ fn settings_output(args: &[&str]) -> String {
 #[test]
 fn every_declared_cli_flag_reaches_the_resolver() {
     let baseline = settings_output(&[]);
-    for setting in tak_cli::settings::SETTINGS {
-        for flag in setting.cli_flags {
+    for setting in tak_cli::settings::Settings::SETTINGS_PROPS {
+        for flag in setting.cli {
             // A boolean flag takes no value, so there is no sentinel to look
             // for — the proof is that passing it changes the listing at all.
-            if setting.type_ == "bool" {
+            if setting.ty == usage_rs::config::Ty::Bool {
                 let output = settings_output(&[flag]);
                 assert_ne!(
                     output, baseline,
                     "`{}` declares {flag} but passing it changed nothing",
-                    setting.name
+                    setting.key
                 );
                 continue;
             }
@@ -62,22 +62,22 @@ fn every_declared_cli_flag_reaches_the_resolver() {
             assert!(
                 output.contains(SENTINEL),
                 "`{}` declares {flag} but passing it changed nothing.\n{output}",
-                setting.name
+                setting.key
             );
         }
     }
 }
 
-/// Every setting must appear in the listing. `SETTINGS` is generated, so this
-/// fails when a new entry has no accessor rather than printing a blank row.
+/// Every setting must appear in the listing. `SETTINGS_PROPS` is generated, so
+/// this fails when a new entry has no accessor rather than printing a blank row.
 #[test]
 fn every_setting_appears_in_the_listing() {
     let output = settings_output(&[]);
-    for setting in tak_cli::settings::SETTINGS {
+    for setting in tak_cli::settings::Settings::SETTINGS_PROPS {
         assert!(
-            output.contains(setting.name),
+            output.contains(setting.key),
             "`{}` is missing from `tak settings`.\n{output}",
-            setting.name
+            setting.key
         );
     }
     assert!(

@@ -24,6 +24,8 @@ Percentage an instruction count may rise before `compare` fails.
 
 Leave the line naming tak off the end of generated reports.
 
+**Default:** `true`
+
 ### `--runner <CLASS>`
 
 Machine class to record under. Overrides the derived name.
@@ -38,3 +40,7 @@ Machine class to record under. Overrides the derived name.
 - [`tak compare [FLAGS] [BASE]`](/cli/compare.md)
 - [`tak doctor`](/cli/doctor.md)
 - [`tak settings [--docs]`](/cli/settings.md)
+
+## Configuration
+
+- [Settings](/cli/configuration.md)

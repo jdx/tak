@@ -40,7 +40,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 asset-picker = { path = "crates/asset-picker", version = "0.0.2" }
-usage-rs = { version = "6", features = ["diagnostics"] }
+usage-rs = { version = "6", features = ["diagnostics", "config"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
@@ -49,6 +49,3 @@ toml = "1"
 lto = true
 codegen-units = 1
 strip = true
-
-[build-dependencies]
-toml = "1"
