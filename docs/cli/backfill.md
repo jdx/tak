@@ -5,27 +5,23 @@
 
 Benchmark published release binaries to bootstrap history.
 
-A new adopter's first chart is empty. Rather than rebuilding a project at
-a hundred historical commits, download what it already published.
+A new adopter's first chart is empty. Rather than rebuilding a project at a hundred historical commits, download what it already published.
 
 ## Arguments
 
 ### `[-- ARGS]…`
 
-Arguments passed to the downloaded binary, after `--`.
-Defaults to `--version`, which every CLI answers cheaply.
+Arguments passed to the downloaded binary, after `--`. Defaults to `--version`, which every CLI answers cheaply.
 
 ## Flags
 
 ### `--repo <REPO>`
 
-Repository to pull releases from, as "owner/name". Defaults to the
-`origin` remote of the current repository.
+Repository to pull releases from, as "owner/name". Defaults to the `origin` remote of the current repository.
 
 ### `--bin <BIN>`
 
-Executable name to look for inside each release archive. Defaults to
-the repository name.
+Executable name to look for inside each release archive. Defaults to the repository name.
 
 ### `--bench <BENCH>`
 

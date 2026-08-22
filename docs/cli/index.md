@@ -9,8 +9,7 @@
 
 ### `--env-deny… <VAR>`
 
-Remove a variable from the environment of measured commands. Repeatable.
-Replaces the default list rather than adding to it.
+Remove a variable from the environment of measured commands. Repeatable. Replaces the default list rather than adding to it.
 
 ### `--env-allow… <VAR>`
 

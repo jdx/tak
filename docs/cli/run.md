@@ -15,8 +15,7 @@ Command to benchmark, after `--`. Omit to run what tak.toml declares.
 
 ### `--bench <BENCH>`
 
-Name to record this measurement under. With no command, selects a
-single benchmark from tak.toml instead of running all of them.
+Name to record this measurement under. With no command, selects a single benchmark from tak.toml instead of running all of them.
 
 ### `--runs <RUNS>`
 
