@@ -46,7 +46,7 @@ struct Cli {
     /// Leave the line naming tak off the end of generated reports.
     // `SetFalse`: the long spelling is the negation of the setting, so `--no-credit`
     // contributes `false` to the settings layer and its absence contributes nothing.
-    #[arg(long = "no-credit", action = usage_rs::ArgAction::SetFalse, global = true)]
+    #[usage(long = "no-credit", action = usage_rs::ArgAction::SetFalse, global = true)]
     #[usage(default = "true", setting = "credit")]
     credit: bool,
     /// Machine class to record under. Overrides the derived name.
@@ -60,19 +60,19 @@ enum Cmd {
     Run {
         /// Name to record this measurement under. With no command, selects a
         /// single benchmark from tak.toml instead of running all of them.
-        #[arg(long)]
+        #[usage(long)]
         bench: Option<String>,
         /// Timed runs. Overrides tak.toml when both are given.
-        #[arg(long)]
+        #[usage(long)]
         runs: Option<u32>,
         /// Untimed warmup runs. Overrides tak.toml when both are given.
-        #[arg(long)]
+        #[usage(long)]
         warmup: Option<u32>,
         /// Skip instruction counting even where valgrind is available.
-        #[arg(long)]
+        #[usage(long)]
         no_counters: bool,
         /// Append the result to refs/notes/tak for the current commit.
-        #[arg(long)]
+        #[usage(long)]
         record: bool,
         /// Command to benchmark, after `--`. Omit to run what tak.toml declares.
         #[usage(arg, double_dash = "required")]
@@ -98,11 +98,11 @@ enum Cmd {
     Backfill {
         /// Repository to pull releases from, as "owner/name". Defaults to the
         /// `origin` remote of the current repository.
-        #[arg(long)]
+        #[usage(long)]
         repo: Option<String>,
         /// Executable name to look for inside each release archive. Defaults to
         /// the repository name.
-        #[arg(long)]
+        #[usage(long)]
         bin: Option<String>,
         /// Arguments passed to the downloaded binary, after `--`.
         /// Defaults to `--version`, which every CLI answers cheaply.
@@ -118,7 +118,7 @@ enum Cmd {
         #[usage(long, default = "10")]
         runs: u32,
         /// Measure but do not write to refs/notes/tak.
-        #[arg(long)]
+        #[usage(long)]
         dry_run: bool,
     },
     /// Compare this commit's measurements against another's.
@@ -136,7 +136,7 @@ enum Cmd {
         #[usage(long, default = "origin")]
         remote: String,
         /// Report without failing, whatever the numbers say.
-        #[arg(long)]
+        #[usage(long)]
         no_gate: bool,
     },
     /// Diagnose the git-notes plumbing.
@@ -144,7 +144,7 @@ enum Cmd {
     /// Show every setting, its resolved value, and where that value came from.
     Settings {
         /// Include the full description of each setting.
-        #[arg(long)]
+        #[usage(long)]
         docs: bool,
     },
     /// Generate the CLI specification used to build the documentation.
