@@ -227,13 +227,15 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "usage-argv"
-version = "5.1.0"
-source = "git+https://github.com/jdx/usage?rev=f265f771e914e3869848fad2fe2f226f63454355#f265f771e914e3869848fad2fe2f226f63454355"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "162179f728d278bd58665be652eee85d2ae555bf28128476d009e75e264f49d3"
 
 [[package]]
 name = "usage-derive"
-version = "5.1.0"
-source = "git+https://github.com/jdx/usage?rev=f265f771e914e3869848fad2fe2f226f63454355#f265f771e914e3869848fad2fe2f226f63454355"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "419bca1663d0d5c5fc5ed50b2150240f849310da92af5030daad6007959fa302"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -242,8 +244,9 @@ dependencies = [
 
 [[package]]
 name = "usage-rs"
-version = "5.1.0"
-source = "git+https://github.com/jdx/usage?rev=f265f771e914e3869848fad2fe2f226f63454355#f265f771e914e3869848fad2fe2f226f63454355"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f6fbc51c1c0ecb24dc799c6002c20b39736d0ddf47fa1167a21014485eb40a5"
 dependencies = [
  "usage-argv",
  "usage-derive",
