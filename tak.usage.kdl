@@ -1,5 +1,6 @@
 name tak
 bin tak
+about "CLI performance, tracked"
 unknown_flags error
 subcommand_required #true
 flag --env-deny help="Remove a variable from the environment of measured commands. Repeatable. Replaces the default list rather than adding to it." global=#true var=#true {

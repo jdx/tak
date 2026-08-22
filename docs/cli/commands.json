@@ -671,5 +671,6 @@
   },
   "usage": "",
   "complete": {},
+  "about": "CLI performance, tracked",
   "unknown_flags": "error"
 }

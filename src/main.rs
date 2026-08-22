@@ -16,7 +16,13 @@ use tak_cli::record::{Record, SCHEMA_VERSION};
 use tak_cli::settings::{self, Overrides, Settings};
 
 #[derive(Cli)]
-#[usage(name = "tak", bin = "tak", version, unknown_flags = "error")]
+#[usage(
+    name = "tak",
+    bin = "tak",
+    version,
+    about = "CLI performance, tracked",
+    unknown_flags = "error"
+)]
 struct Cli {
     #[usage(subcommand)]
     cmd: Cmd,
