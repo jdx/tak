@@ -161,11 +161,12 @@ fn a_broken_config_does_not_block_commands_that_ignore_it() {
     );
 }
 
-/// A malformed `tak.toml` must be reported, not silently replaced by defaults —
+/// A well-formed `tak.toml` with the wrong value type must be reported, not silently
+/// replaced by defaults —
 /// otherwise `tak settings` confidently prints values the project did not ask
 /// for and gives no hint that its configuration was skipped.
 #[test]
-fn a_malformed_config_is_an_error_not_a_default() {
+fn a_wrongly_typed_config_is_an_error_not_a_default() {
     let dir = std::env::temp_dir().join(format!("tak-bad-config-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("tak.toml"), "[env]\ndeny = \"not a list\"\n").unwrap();
@@ -181,6 +182,24 @@ fn a_malformed_config_is_an_error_not_a_default() {
     assert!(
         !out.status.success(),
         "a broken tak.toml should not succeed"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("tak.toml"),
+        "the error should name the file: {stderr}"
+    );
+}
+
+/// Syntax errors take the same strict path as type errors.
+#[test]
+fn malformed_toml_is_an_error_not_a_default() {
+    let dir = dir_with_config("malformed", "[env\nallow = [\"PATH\"]\n");
+    let out = run_in(&dir, &["settings"]);
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(
+        !out.status.success(),
+        "a syntactically broken tak.toml should not succeed"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
