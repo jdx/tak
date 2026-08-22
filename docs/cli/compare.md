@@ -5,8 +5,7 @@
 
 Compare this commit's measurements against another's.
 
-Fails when an instruction count has risen by more than `gate_pct`. Wall
-clock is reported and never gated.
+Fails when an instruction count has risen by more than `gate_pct`. Wall clock is reported and never gated.
 
 ## Arguments
 

@@ -10,12 +10,9 @@
 
 Whether generated reports end with a line naming tak.
 
-On by default. A report that appears in someone's pull request should say what
-put it there — a reader who has never heard of tak needs a way to find out, and
-a maintainer evaluating the comment needs to know what to turn off.
+On by default. A report that appears in someone's pull request should say what put it there — a reader who has never heard of tak needs a way to find out, and a maintainer evaluating the comment needs to know what to turn off.
 
-Turn it off with `--no-credit`, `TAK_CREDIT=0`, or `credit = false` under
-`[report]`. Nothing else about the report changes.
+Turn it off with `--no-credit`, `TAK_CREDIT=0`, or `credit = false` under `[report]`. Nothing else about the report changes.
 
 ```
 tak compare origin/main --no-credit
@@ -33,18 +30,11 @@ TAK_CREDIT=0 tak compare origin/main
 
 Environment variables kept even though `env_deny` lists them.
 
-Subtracted from `env_deny`, so a project can opt one variable back in without
-restating the whole default list. A CLI whose measured path genuinely requires
-a token — a client that cannot start unauthenticated, say — needs this.
+Subtracted from `env_deny`, so a project can opt one variable back in without restating the whole default list. A CLI whose measured path genuinely requires a token — a client that cannot start unauthenticated, say — needs this.
 
-Doing so makes the measurement depend on something outside the repository.
-That is a real cost, not a formality: the numbers become conditional on the
-environment the run happened to have, and a token expiring will read as a
-performance change.
+Doing so makes the measurement depend on something outside the repository. That is a real cost, not a formality: the numbers become conditional on the environment the run happened to have, and a token expiring will read as a performance change.
 
-Listing a variable here that `env_deny` does not mention has no effect. This
-setting removes entries from the deny list; it does not add anything to the
-environment.
+Listing a variable here that `env_deny` does not mention has no effect. This setting removes entries from the deny list; it does not add anything to the environment.
 
 ```
 tak run --env-deny GITHUB_TOKEN --env-allow GITHUB_TOKEN
@@ -62,26 +52,15 @@ Environment variables removed from every command tak measures.
 
 Two reasons this defaults to a non-empty list rather than to nothing.
 
-**Determinism.** A CLI that finds a forge token in its environment often does
-more with it than without — authenticating, fetching, checking rate limits. A
-measurement that moves depending on whether CI happened to export a token is
-not a measurement of the code under test. It lands in the series as an
-unexplained step change on the day someone edits an unrelated workflow.
+**Determinism.** A CLI that finds a forge token in its environment often does more with it than without — authenticating, fetching, checking rate limits. A measurement that moves depending on whether CI happened to export a token is not a measurement of the code under test. It lands in the series as an unexplained step change on the day someone edits an unrelated workflow.
 
-**Credentials.** `tak backfill` downloads release binaries and executes them,
-and any CI run that can push notes has a repository-write token in scope.
+**Credentials.** `tak backfill` downloads release binaries and executes them, and any CI run that can push notes has a repository-write token in scope.
 
-Setting this replaces the default list rather than adding to it. To keep the
-defaults and remove more, list them alongside. To keep the defaults and remove
-fewer, use `env_allow` — it is subtracted from this list, so the two compose
-without either having to restate the other.
+Setting this replaces the default list rather than adding to it. To keep the defaults and remove more, list them alongside. To keep the defaults and remove fewer, use `env_allow` — it is subtracted from this list, so the two compose without either having to restate the other.
 
-Names are matched exactly. There is no globbing: a benchmark whose behaviour
-depends on which variables happen to match a pattern is the problem this
-setting exists to avoid.
+Names are matched exactly. There is no globbing: a benchmark whose behaviour depends on which variables happen to match a pattern is the problem this setting exists to avoid.
 
-tak's own network calls are unaffected. `backfill` authenticates with `curl`
-directly rather than through the measurement path.
+tak's own network calls are unaffected. `backfill` authenticates with `curl` directly rather than through the measurement path.
 
 ```
 tak run --env-deny AWS_PROFILE --env-deny AWS_REGION
@@ -100,18 +79,11 @@ TAK_ENV_DENY=GITHUB_TOKEN,GH_TOKEN,NPM_TOKEN tak run
 
 How much an instruction count may rise before `tak compare` fails.
 
-A percentage of the base measurement. Only instruction counts are gated. Wall
-clock is reported and never gated: on the same hardware it moves 4-20% run to
-run, so a threshold tight enough to catch a real regression would fire
-constantly, and one loose enough to stay quiet would catch nothing.
+A percentage of the base measurement. Only instruction counts are gated. Wall clock is reported and never gated: on the same hardware it moves 4-20% run to run, so a threshold tight enough to catch a real regression would fire constantly, and one loose enough to stay quiet would catch nothing.
 
-The default of 1% is about fifty times the ~0.02% instruction counting
-reproduces to, leaving room for the small differences a compiler or dependency
-bump can produce without turning the gate into noise.
+The default of 1% is about fifty times the ~0.02% instruction counting reproduces to, leaving room for the small differences a compiler or dependency bump can produce without turning the gate into noise.
 
-Raise it to report without effectively failing. Setting it to zero fails on any
-increase at all, which sounds appealing and is not: one extra instruction on a
-startup path is not worth blocking a pull request over.
+Raise it to report without effectively failing. Setting it to zero fails on any increase at all, which sounds appealing and is not: one extra instruction on a startup path is not worth blocking a pull request over.
 
 ```
 tak compare origin/main --gate-pct 0.5
@@ -130,24 +102,13 @@ TAK_GATE_PCT=5 tak compare origin/main
 
 The machine class a measurement is recorded under, and compared within.
 
-Empty means derive it: `gha-<os>-<arch>` under GitHub Actions, `local-<os>-<arch>`
-otherwise. That is right until something about the machine changes without the
-name changing.
+Empty means derive it: `gha-<os>-<arch>` under GitHub Actions, `local-<os>-<arch>` otherwise. That is right until something about the machine changes without the name changing.
 
-Series are partitioned on this, and must be. Absolute instruction counts shift
-between machine types by more than a real regression does, so tak will not
-compare across classes — it reports the old series as removed and the new one as
-added rather than inventing a step change.
+Series are partitioned on this, and must be. Absolute instruction counts shift between machine types by more than a real regression does, so tak will not compare across classes — it reports the old series as removed and the new one as added rather than inventing a step change.
 
-Set it when the *environment* changes in a way the derived name cannot see. The
-common case is a toolchain bump: a hosted runner image or a compiler upgrade
-between the base measurement and this one is attributed to the code otherwise,
-and on a one-percent gate that is a false failure. Encoding the compiler version
-into the class starts a fresh series at the bump, which is honest — the numbers
-either side genuinely are not comparable.
+Set it when the *environment* changes in a way the derived name cannot see. The common case is a toolchain bump: a hosted runner image or a compiler upgrade between the base measurement and this one is attributed to the code otherwise, and on a one-percent gate that is a false failure. Encoding the compiler version into the class starts a fresh series at the bump, which is honest — the numbers either side genuinely are not comparable.
 
-tak cannot detect this for you. It measures programs, not build systems, and has
-no way to know what produced the binary it is timing.
+tak cannot detect this for you. It measures programs, not build systems, and has no way to know what produced the binary it is timing.
 
 ```
 TAK_RUNNER=gha-linux-x64-rust1.85 tak run --record
