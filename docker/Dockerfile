@@ -19,6 +19,9 @@
 
 FROM rust:1-slim-trixie@sha256:5c6f46a6e4472ab1ca7ba7d494e6677f2f219ebc02f32025d3986f057635ec9c AS build
 WORKDIR /src
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 # settings.toml and build.rs travel together: the build script generates the
 # settings code from the registry, so omitting either fails the compile rather
 # than producing a binary with no settings.
