@@ -45,16 +45,16 @@ fn settings_output(args: &[&str]) -> String {
 #[test]
 fn every_declared_cli_flag_reaches_the_resolver() {
     let baseline = settings_output(&[]);
-    for setting in tak_cli::settings::SETTINGS {
-        for flag in setting.cli_flags {
+    for setting in tak_cli::settings::Settings::SETTINGS_PROPS {
+        for flag in setting.cli {
             // A boolean flag takes no value, so there is no sentinel to look
             // for — the proof is that passing it changes the listing at all.
-            if setting.type_ == "bool" {
+            if setting.ty == usage_rs::config::Ty::Bool {
                 let output = settings_output(&[flag]);
                 assert_ne!(
                     output, baseline,
                     "`{}` declares {flag} but passing it changed nothing",
-                    setting.name
+                    setting.key
                 );
                 continue;
             }
@@ -62,22 +62,22 @@ fn every_declared_cli_flag_reaches_the_resolver() {
             assert!(
                 output.contains(SENTINEL),
                 "`{}` declares {flag} but passing it changed nothing.\n{output}",
-                setting.name
+                setting.key
             );
         }
     }
 }
 
-/// Every setting must appear in the listing. `SETTINGS` is generated, so this
-/// fails when a new entry has no accessor rather than printing a blank row.
+/// Every setting must appear in the listing. `SETTINGS_PROPS` is generated, so
+/// this fails when a new entry has no accessor rather than printing a blank row.
 #[test]
 fn every_setting_appears_in_the_listing() {
     let output = settings_output(&[]);
-    for setting in tak_cli::settings::SETTINGS {
+    for setting in tak_cli::settings::Settings::SETTINGS_PROPS {
         assert!(
-            output.contains(setting.name),
+            output.contains(setting.key),
             "`{}` is missing from `tak settings`.\n{output}",
-            setting.name
+            setting.key
         );
     }
     assert!(
@@ -161,11 +161,12 @@ fn a_broken_config_does_not_block_commands_that_ignore_it() {
     );
 }
 
-/// A malformed `tak.toml` must be reported, not silently replaced by defaults —
+/// A well-formed `tak.toml` with the wrong value type must be reported, not silently
+/// replaced by defaults —
 /// otherwise `tak settings` confidently prints values the project did not ask
 /// for and gives no hint that its configuration was skipped.
 #[test]
-fn a_malformed_config_is_an_error_not_a_default() {
+fn a_wrongly_typed_config_is_an_error_not_a_default() {
     let dir = std::env::temp_dir().join(format!("tak-bad-config-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("tak.toml"), "[env]\ndeny = \"not a list\"\n").unwrap();
@@ -181,6 +182,24 @@ fn a_malformed_config_is_an_error_not_a_default() {
     assert!(
         !out.status.success(),
         "a broken tak.toml should not succeed"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("tak.toml"),
+        "the error should name the file: {stderr}"
+    );
+}
+
+/// Syntax errors take the same strict path as type errors.
+#[test]
+fn malformed_toml_is_an_error_not_a_default() {
+    let dir = dir_with_config("malformed", "[env\nallow = [\"PATH\"]\n");
+    let out = run_in(&dir, &["settings"]);
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(
+        !out.status.success(),
+        "a syntactically broken tak.toml should not succeed"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(

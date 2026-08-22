@@ -41,7 +41,7 @@ pub struct Plan {
 /// applied to valgrind itself, which the subject inherits from.
 ///
 /// What gets removed is [`Settings::scrubbed_env`] — `env_deny` less
-/// `env_allow`, both declared in `settings.toml`. The default is the forge
+/// `env_allow`, both declared on the `Settings` registry. The default is the forge
 /// tokens, for two reasons. **Determinism**: a CLI that finds a token often
 /// does more with it than without, so a measurement would move depending on
 /// whether CI happened to export one. **Credentials**: `backfill` downloads
