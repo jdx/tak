@@ -11,36 +11,36 @@ A new adopter's first chart is empty. Rather than rebuilding a project at a hund
 
 ### `[-- ARGS]…`
 
-Arguments passed to the downloaded binary, after `--`. Defaults to `--version`, which every CLI answers cheaply
+Arguments passed to the downloaded binary, after `--`. Defaults to `--version`, which every CLI answers cheaply.
 
 ## Flags
 
 ### `--repo <REPO>`
 
-Repository to pull releases from, as "owner/name". Defaults to the `origin` remote of the current repository
+Repository to pull releases from, as "owner/name". Defaults to the `origin` remote of the current repository.
 
 ### `--bin <BIN>`
 
-Executable name to look for inside each release archive. Defaults to the repository name
+Executable name to look for inside each release archive. Defaults to the repository name.
 
 ### `--bench <BENCH>`
 
-Name to record measurements under
+Name to record measurements under.
 
 **Default:** `release`
 
 ### `--limit <LIMIT>`
 
-Most recent releases to measure
+Most recent releases to measure.
 
 **Default:** `20`
 
 ### `--runs <RUNS>`
 
-Timed runs per release
+Timed runs per release.
 
 **Default:** `10`
 
 ### `--dry-run`
 
-Measure but do not write to refs/notes/tak
+Measure but do not write to refs/notes/tak.

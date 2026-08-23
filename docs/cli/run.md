@@ -3,32 +3,32 @@
 
 - **Usage**: `tak run [FLAGS] [-- CMD]…`
 
-Benchmark a command, or everything declared in tak.toml
+Benchmark a command, or everything declared in tak.toml.
 
 ## Arguments
 
 ### `[-- CMD]…`
 
-Command to benchmark, after `--`. Omit to run what tak.toml declares
+Command to benchmark, after `--`. Omit to run what tak.toml declares.
 
 ## Flags
 
 ### `--bench <BENCH>`
 
-Name to record this measurement under. With no command, selects a single benchmark from tak.toml instead of running all of them
+Name to record this measurement under. With no command, selects a single benchmark from tak.toml instead of running all of them.
 
 ### `--runs <RUNS>`
 
-Timed runs. Overrides tak.toml when both are given
+Timed runs. Overrides tak.toml when both are given.
 
 ### `--warmup <WARMUP>`
 
-Untimed warmup runs. Overrides tak.toml when both are given
+Untimed warmup runs. Overrides tak.toml when both are given.
 
 ### `--no-counters`
 
-Skip instruction counting even where valgrind is available
+Skip instruction counting even where valgrind is available.
 
 ### `--record`
 
-Append the result to refs/notes/tak for the current commit
+Append the result to refs/notes/tak for the current commit.

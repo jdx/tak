@@ -3,9 +3,9 @@
 //! Pre-v1: interfaces and behavior are not finalized and may change between releases.
 
 use anyhow::{Context, Result, bail};
-use clap::{CommandFactory, Parser, Subcommand};
 use std::collections::BTreeMap;
 use std::path::Path;
+use usage_rs::{Args, Cli, Subcommands};
 
 use tak_cli::backfill;
 use tak_cli::compare;
@@ -15,75 +15,75 @@ use tak_cli::notes;
 use tak_cli::record::{Record, SCHEMA_VERSION};
 use tak_cli::settings::{self, Overrides, Settings};
 
-#[derive(Parser)]
-#[command(name = "tak", version, about = "CLI performance, tracked", long_about = None)]
+#[derive(Cli)]
+#[usage(
+    name = "tak",
+    bin = "tak",
+    version,
+    about = "CLI performance, tracked",
+    unknown_flags = "error"
+)]
 struct Cli {
-    #[command(subcommand)]
+    #[usage(subcommand)]
     cmd: Cmd,
 
     // Global so a setting is spelled the same wherever it applies, rather than
     // being repeated per subcommand and drifting. See settings.toml.
     /// Remove a variable from the environment of measured commands. Repeatable.
     /// Replaces the default list rather than adding to it.
-    #[arg(long, global = true, value_name = "VAR")]
+    #[usage(long, global, value_name = "VAR")]
     env_deny: Vec<String>,
     /// Keep a variable that --env-deny would remove. Repeatable.
-    #[arg(long, global = true, value_name = "VAR")]
+    #[usage(long, global, value_name = "VAR")]
     env_allow: Vec<String>,
     /// Percentage an instruction count may rise before `compare` fails.
-    #[arg(long, global = true, value_name = "PCT")]
+    #[usage(long, global, value_name = "PCT")]
     gate_pct: Option<f64>,
     /// Leave the line naming tak off the end of generated reports.
-    #[arg(long, global = true)]
+    #[usage(long, global)]
     no_credit: bool,
     /// Machine class to record under. Overrides the derived name.
-    #[arg(long, global = true, value_name = "CLASS")]
+    #[usage(long, global, value_name = "CLASS")]
     runner: Option<String>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommands)]
 enum Cmd {
     /// Benchmark a command, or everything declared in tak.toml.
     Run {
         /// Name to record this measurement under. With no command, selects a
         /// single benchmark from tak.toml instead of running all of them.
-        #[arg(long)]
+        #[usage(long)]
         bench: Option<String>,
         /// Timed runs. Overrides tak.toml when both are given.
-        #[arg(long)]
+        #[usage(long)]
         runs: Option<u32>,
         /// Untimed warmup runs. Overrides tak.toml when both are given.
-        #[arg(long)]
+        #[usage(long)]
         warmup: Option<u32>,
         /// Skip instruction counting even where valgrind is available.
-        #[arg(long)]
+        #[usage(long)]
         no_counters: bool,
         /// Append the result to refs/notes/tak for the current commit.
-        #[arg(long)]
+        #[usage(long)]
         record: bool,
         /// Command to benchmark, after `--`. Omit to run what tak.toml declares.
-        #[arg(last = true)]
+        #[usage(arg, double_dash = "required")]
         cmd: Vec<String>,
     },
     /// Show recorded history for a commit.
     History {
         /// Revision to read. Defaults to HEAD.
-        #[arg(default_value = "HEAD")]
+        #[usage(arg, default = "HEAD")]
         rev: String,
         /// Remote to refresh notes from.
-        #[arg(long, default_value = "origin")]
+        #[usage(long, default = "origin")]
         remote: String,
     },
     /// Push recorded measurements to the remote.
-    Push {
-        #[arg(long, default_value = "origin")]
-        remote: String,
-    },
+    Push(RemoteArgs),
     /// Teach plain `git fetch` about the notes ref.
-    Init {
-        #[arg(long, default_value = "origin")]
-        remote: String,
-    },
+    Init(RemoteArgs),
     /// Benchmark published release binaries to bootstrap history.
     ///
     /// A new adopter's first chart is empty. Rather than rebuilding a project at
@@ -91,27 +91,27 @@ enum Cmd {
     Backfill {
         /// Repository to pull releases from, as "owner/name". Defaults to the
         /// `origin` remote of the current repository.
-        #[arg(long)]
+        #[usage(long)]
         repo: Option<String>,
         /// Executable name to look for inside each release archive. Defaults to
         /// the repository name.
-        #[arg(long)]
+        #[usage(long)]
         bin: Option<String>,
         /// Arguments passed to the downloaded binary, after `--`.
         /// Defaults to `--version`, which every CLI answers cheaply.
-        #[arg(last = true)]
+        #[usage(arg, double_dash = "required")]
         args: Vec<String>,
         /// Name to record measurements under.
-        #[arg(long, default_value = "release")]
+        #[usage(long, default = "release")]
         bench: String,
         /// Most recent releases to measure.
-        #[arg(long, default_value_t = 20)]
+        #[usage(long, default = "20")]
         limit: usize,
         /// Timed runs per release.
-        #[arg(long, default_value_t = 10)]
+        #[usage(long, default = "10")]
         runs: u32,
         /// Measure but do not write to refs/notes/tak.
-        #[arg(long)]
+        #[usage(long)]
         dry_run: bool,
     },
     /// Compare this commit's measurements against another's.
@@ -120,16 +120,16 @@ enum Cmd {
     /// clock is reported and never gated.
     Compare {
         /// Revision to compare against.
-        #[arg(default_value = "origin/main")]
+        #[usage(arg, default = "origin/main")]
         base: String,
         /// Revision to compare. Defaults to HEAD.
-        #[arg(long, default_value = "HEAD")]
+        #[usage(long, default = "HEAD")]
         rev: String,
         /// Remote to refresh notes from.
-        #[arg(long, default_value = "origin")]
+        #[usage(long, default = "origin")]
         remote: String,
         /// Report without failing, whatever the numbers say.
-        #[arg(long)]
+        #[usage(long)]
         no_gate: bool,
     },
     /// Diagnose the git-notes plumbing.
@@ -137,12 +137,19 @@ enum Cmd {
     /// Show every setting, its resolved value, and where that value came from.
     Settings {
         /// Include the full description of each setting.
-        #[arg(long)]
+        #[usage(long)]
         docs: bool,
     },
     /// Generate the CLI specification used to build the documentation.
-    #[command(hide = true)]
+    #[usage(hide)]
     Usage,
+}
+
+#[derive(Args)]
+struct RemoteArgs {
+    /// Remote to use for git-notes synchronization.
+    #[usage(long, default = "origin")]
+    remote: String,
 }
 
 /// Identify the machine class. Series must be partitioned on this — moving
@@ -760,16 +767,17 @@ fn main() -> Result<()> {
             &resolve_settings(&overrides)?,
         ),
         Cmd::History { rev, remote } => cmd_history(rev, remote),
-        Cmd::Push { remote } => {
+        Cmd::Push(RemoteArgs { remote }) => {
             notes::push(&remote)?;
-            println!("pushed {} to {remote}", notes::NOTES_REF);
+            println!("pushed {} to {}", notes::NOTES_REF, remote);
             Ok(())
         }
-        Cmd::Init { remote } => {
+        Cmd::Init(RemoteArgs { remote }) => {
             notes::install_refspec(&remote)?;
             println!(
-                "added {} to remote.{remote}.fetch — plain `git fetch` now picks up measurements",
-                notes::NOTES_REF
+                "added {} to remote.{}.fetch — plain `git fetch` now picks up measurements",
+                notes::NOTES_REF,
+                remote
             );
             Ok(())
         }
@@ -813,14 +821,7 @@ fn main() -> Result<()> {
         }
         Cmd::Settings { docs } => cmd_settings(&resolve_settings(&overrides)?, docs),
         Cmd::Usage => {
-            let mut command = Cli::command();
-            let mut spec = clap_usage::spec(&mut command, "tak");
-            // VitePress reads the release version directly from Cargo.toml.
-            // Committing it here as well would make release-plz's version-only
-            // PR fail the generated-reference check until another bot rewrote
-            // the same value into the CLI pages.
-            spec.version = None;
-            println!("{}", spec.to_string().trim());
+            print!("{}", Cli::spec().view().omit_version().to_kdl());
             Ok(())
         }
     }

@@ -15,8 +15,8 @@
           {
             "name": "CMD",
             "usage": "[-- CMD]…",
-            "help": "Command to benchmark, after `--`. Omit to run what tak.toml declares",
-            "help_first_line": "Command to benchmark, after `--`. Omit to run what tak.toml declares",
+            "help": "Command to benchmark, after `--`. Omit to run what tak.toml declares.",
+            "help_first_line": "Command to benchmark, after `--`. Omit to run what tak.toml declares.",
             "required": false,
             "double_dash": "Required",
             "var": true,
@@ -27,8 +27,8 @@
           {
             "name": "bench",
             "usage": "--bench <BENCH>",
-            "help": "Name to record this measurement under. With no command, selects a single benchmark from tak.toml instead of running all of them",
-            "help_first_line": "Name to record this measurement under. With no command, selects a single benchmark from tak.toml instead of running all of them",
+            "help": "Name to record this measurement under. With no command, selects a single benchmark from tak.toml instead of running all of them.",
+            "help_first_line": "Name to record this measurement under. With no command, selects a single benchmark from tak.toml instead of running all of them.",
             "short": [],
             "long": [
               "bench"
@@ -46,8 +46,8 @@
           {
             "name": "runs",
             "usage": "--runs <RUNS>",
-            "help": "Timed runs. Overrides tak.toml when both are given",
-            "help_first_line": "Timed runs. Overrides tak.toml when both are given",
+            "help": "Timed runs. Overrides tak.toml when both are given.",
+            "help_first_line": "Timed runs. Overrides tak.toml when both are given.",
             "short": [],
             "long": [
               "runs"
@@ -65,8 +65,8 @@
           {
             "name": "warmup",
             "usage": "--warmup <WARMUP>",
-            "help": "Untimed warmup runs. Overrides tak.toml when both are given",
-            "help_first_line": "Untimed warmup runs. Overrides tak.toml when both are given",
+            "help": "Untimed warmup runs. Overrides tak.toml when both are given.",
+            "help_first_line": "Untimed warmup runs. Overrides tak.toml when both are given.",
             "short": [],
             "long": [
               "warmup"
@@ -84,8 +84,8 @@
           {
             "name": "no-counters",
             "usage": "--no-counters",
-            "help": "Skip instruction counting even where valgrind is available",
-            "help_first_line": "Skip instruction counting even where valgrind is available",
+            "help": "Skip instruction counting even where valgrind is available.",
+            "help_first_line": "Skip instruction counting even where valgrind is available.",
             "short": [],
             "long": [
               "no-counters"
@@ -96,8 +96,8 @@
           {
             "name": "record",
             "usage": "--record",
-            "help": "Append the result to refs/notes/tak for the current commit",
-            "help_first_line": "Append the result to refs/notes/tak for the current commit",
+            "help": "Append the result to refs/notes/tak for the current commit.",
+            "help_first_line": "Append the result to refs/notes/tak for the current commit.",
             "short": [],
             "long": [
               "record"
@@ -107,8 +107,10 @@
           }
         ],
         "mounts": [],
+        "unknown_flags": null,
         "hide": false,
-        "help": "Benchmark a command, or everything declared in tak.toml",
+        "args_override_self": true,
+        "help": "Benchmark a command, or everything declared in tak.toml.",
         "name": "run",
         "aliases": [],
         "hidden_aliases": [],
@@ -124,8 +126,8 @@
           {
             "name": "REV",
             "usage": "[REV]",
-            "help": "Revision to read. Defaults to HEAD",
-            "help_first_line": "Revision to read. Defaults to HEAD",
+            "help": "Revision to read. Defaults to HEAD.",
+            "help_first_line": "Revision to read. Defaults to HEAD.",
             "required": false,
             "double_dash": "Optional",
             "hide": false,
@@ -138,8 +140,8 @@
           {
             "name": "remote",
             "usage": "--remote <REMOTE>",
-            "help": "Remote to refresh notes from",
-            "help_first_line": "Remote to refresh notes from",
+            "help": "Remote to refresh notes from.",
+            "help_first_line": "Remote to refresh notes from.",
             "short": [],
             "long": [
               "remote"
@@ -159,8 +161,10 @@
           }
         ],
         "mounts": [],
+        "unknown_flags": null,
         "hide": false,
-        "help": "Show recorded history for a commit",
+        "args_override_self": true,
+        "help": "Show recorded history for a commit.",
         "name": "history",
         "aliases": [],
         "hidden_aliases": [],
@@ -177,6 +181,8 @@
           {
             "name": "remote",
             "usage": "--remote <REMOTE>",
+            "help": "Remote to use for git-notes synchronization.",
+            "help_first_line": "Remote to use for git-notes synchronization.",
             "short": [],
             "long": [
               "remote"
@@ -196,8 +202,10 @@
           }
         ],
         "mounts": [],
+        "unknown_flags": null,
         "hide": false,
-        "help": "Push recorded measurements to the remote",
+        "args_override_self": true,
+        "help": "Push recorded measurements to the remote.",
         "name": "push",
         "aliases": [],
         "hidden_aliases": [],
@@ -214,6 +222,8 @@
           {
             "name": "remote",
             "usage": "--remote <REMOTE>",
+            "help": "Remote to use for git-notes synchronization.",
+            "help_first_line": "Remote to use for git-notes synchronization.",
             "short": [],
             "long": [
               "remote"
@@ -233,8 +243,10 @@
           }
         ],
         "mounts": [],
+        "unknown_flags": null,
         "hide": false,
-        "help": "Teach plain `git fetch` about the notes ref",
+        "args_override_self": true,
+        "help": "Teach plain `git fetch` about the notes ref.",
         "name": "init",
         "aliases": [],
         "hidden_aliases": [],
@@ -250,8 +262,8 @@
           {
             "name": "ARGS",
             "usage": "[-- ARGS]…",
-            "help": "Arguments passed to the downloaded binary, after `--`. Defaults to `--version`, which every CLI answers cheaply",
-            "help_first_line": "Arguments passed to the downloaded binary, after `--`. Defaults to `--version`, which every CLI answers cheaply",
+            "help": "Arguments passed to the downloaded binary, after `--`. Defaults to `--version`, which every CLI answers cheaply.",
+            "help_first_line": "Arguments passed to the downloaded binary, after `--`. Defaults to `--version`, which every CLI answers cheaply.",
             "required": false,
             "double_dash": "Required",
             "var": true,
@@ -262,8 +274,8 @@
           {
             "name": "repo",
             "usage": "--repo <REPO>",
-            "help": "Repository to pull releases from, as \"owner/name\". Defaults to the `origin` remote of the current repository",
-            "help_first_line": "Repository to pull releases from, as \"owner/name\". Defaults to the `origin` remote of the current repository",
+            "help": "Repository to pull releases from, as \"owner/name\". Defaults to the `origin` remote of the current repository.",
+            "help_first_line": "Repository to pull releases from, as \"owner/name\". Defaults to the `origin` remote of the current repository.",
             "short": [],
             "long": [
               "repo"
@@ -281,8 +293,8 @@
           {
             "name": "bin",
             "usage": "--bin <BIN>",
-            "help": "Executable name to look for inside each release archive. Defaults to the repository name",
-            "help_first_line": "Executable name to look for inside each release archive. Defaults to the repository name",
+            "help": "Executable name to look for inside each release archive. Defaults to the repository name.",
+            "help_first_line": "Executable name to look for inside each release archive. Defaults to the repository name.",
             "short": [],
             "long": [
               "bin"
@@ -300,8 +312,8 @@
           {
             "name": "bench",
             "usage": "--bench <BENCH>",
-            "help": "Name to record measurements under",
-            "help_first_line": "Name to record measurements under",
+            "help": "Name to record measurements under.",
+            "help_first_line": "Name to record measurements under.",
             "short": [],
             "long": [
               "bench"
@@ -322,8 +334,8 @@
           {
             "name": "limit",
             "usage": "--limit <LIMIT>",
-            "help": "Most recent releases to measure",
-            "help_first_line": "Most recent releases to measure",
+            "help": "Most recent releases to measure.",
+            "help_first_line": "Most recent releases to measure.",
             "short": [],
             "long": [
               "limit"
@@ -344,8 +356,8 @@
           {
             "name": "runs",
             "usage": "--runs <RUNS>",
-            "help": "Timed runs per release",
-            "help_first_line": "Timed runs per release",
+            "help": "Timed runs per release.",
+            "help_first_line": "Timed runs per release.",
             "short": [],
             "long": [
               "runs"
@@ -366,8 +378,8 @@
           {
             "name": "dry-run",
             "usage": "--dry-run",
-            "help": "Measure but do not write to refs/notes/tak",
-            "help_first_line": "Measure but do not write to refs/notes/tak",
+            "help": "Measure but do not write to refs/notes/tak.",
+            "help_first_line": "Measure but do not write to refs/notes/tak.",
             "short": [],
             "long": [
               "dry-run"
@@ -377,8 +389,10 @@
           }
         ],
         "mounts": [],
+        "unknown_flags": null,
         "hide": false,
-        "help": "Benchmark published release binaries to bootstrap history",
+        "args_override_self": true,
+        "help": "Benchmark published release binaries to bootstrap history.",
         "help_long": "Benchmark published release binaries to bootstrap history.\n\nA new adopter's first chart is empty. Rather than rebuilding a project at a hundred historical commits, download what it already published.",
         "name": "backfill",
         "aliases": [],
@@ -395,8 +409,8 @@
           {
             "name": "BASE",
             "usage": "[BASE]",
-            "help": "Revision to compare against",
-            "help_first_line": "Revision to compare against",
+            "help": "Revision to compare against.",
+            "help_first_line": "Revision to compare against.",
             "required": false,
             "double_dash": "Optional",
             "hide": false,
@@ -409,8 +423,8 @@
           {
             "name": "rev",
             "usage": "--rev <REV>",
-            "help": "Revision to compare. Defaults to HEAD",
-            "help_first_line": "Revision to compare. Defaults to HEAD",
+            "help": "Revision to compare. Defaults to HEAD.",
+            "help_first_line": "Revision to compare. Defaults to HEAD.",
             "short": [],
             "long": [
               "rev"
@@ -431,8 +445,8 @@
           {
             "name": "remote",
             "usage": "--remote <REMOTE>",
-            "help": "Remote to refresh notes from",
-            "help_first_line": "Remote to refresh notes from",
+            "help": "Remote to refresh notes from.",
+            "help_first_line": "Remote to refresh notes from.",
             "short": [],
             "long": [
               "remote"
@@ -453,8 +467,8 @@
           {
             "name": "no-gate",
             "usage": "--no-gate",
-            "help": "Report without failing, whatever the numbers say",
-            "help_first_line": "Report without failing, whatever the numbers say",
+            "help": "Report without failing, whatever the numbers say.",
+            "help_first_line": "Report without failing, whatever the numbers say.",
             "short": [],
             "long": [
               "no-gate"
@@ -464,8 +478,10 @@
           }
         ],
         "mounts": [],
+        "unknown_flags": null,
         "hide": false,
-        "help": "Compare this commit's measurements against another's",
+        "args_override_self": true,
+        "help": "Compare this commit's measurements against another's.",
         "help_long": "Compare this commit's measurements against another's.\n\nFails when an instruction count has risen by more than `gate_pct`. Wall clock is reported and never gated.",
         "name": "compare",
         "aliases": [],
@@ -481,8 +497,10 @@
         "args": [],
         "flags": [],
         "mounts": [],
+        "unknown_flags": null,
         "hide": false,
-        "help": "Diagnose the git-notes plumbing",
+        "args_override_self": true,
+        "help": "Diagnose the git-notes plumbing.",
         "name": "doctor",
         "aliases": [],
         "hidden_aliases": [],
@@ -499,8 +517,8 @@
           {
             "name": "docs",
             "usage": "--docs",
-            "help": "Include the full description of each setting",
-            "help_first_line": "Include the full description of each setting",
+            "help": "Include the full description of each setting.",
+            "help_first_line": "Include the full description of each setting.",
             "short": [],
             "long": [
               "docs"
@@ -510,8 +528,10 @@
           }
         ],
         "mounts": [],
+        "unknown_flags": null,
         "hide": false,
-        "help": "Show every setting, its resolved value, and where that value came from",
+        "args_override_self": true,
+        "help": "Show every setting, its resolved value, and where that value came from.",
         "name": "settings",
         "aliases": [],
         "hidden_aliases": [],
@@ -526,8 +546,10 @@
         "args": [],
         "flags": [],
         "mounts": [],
+        "unknown_flags": null,
         "hide": true,
-        "help": "Generate the CLI specification used to build the documentation",
+        "args_override_self": true,
+        "help": "Generate the CLI specification used to build the documentation.",
         "name": "usage",
         "aliases": [],
         "hidden_aliases": [],
@@ -539,8 +561,8 @@
       {
         "name": "env-deny",
         "usage": "--env-deny… <VAR>",
-        "help": "Remove a variable from the environment of measured commands. Repeatable. Replaces the default list rather than adding to it",
-        "help_first_line": "Remove a variable from the environment of measured commands. Repeatable. Replaces the default list rather than adding to it",
+        "help": "Remove a variable from the environment of measured commands. Repeatable. Replaces the default list rather than adding to it.",
+        "help_first_line": "Remove a variable from the environment of measured commands. Repeatable. Replaces the default list rather than adding to it.",
         "short": [],
         "long": [
           "env-deny"
@@ -559,8 +581,8 @@
       {
         "name": "env-allow",
         "usage": "--env-allow… <VAR>",
-        "help": "Keep a variable that --env-deny would remove. Repeatable",
-        "help_first_line": "Keep a variable that --env-deny would remove. Repeatable",
+        "help": "Keep a variable that --env-deny would remove. Repeatable.",
+        "help_first_line": "Keep a variable that --env-deny would remove. Repeatable.",
         "short": [],
         "long": [
           "env-allow"
@@ -579,8 +601,8 @@
       {
         "name": "gate-pct",
         "usage": "--gate-pct <PCT>",
-        "help": "Percentage an instruction count may rise before `compare` fails",
-        "help_first_line": "Percentage an instruction count may rise before `compare` fails",
+        "help": "Percentage an instruction count may rise before `compare` fails.",
+        "help_first_line": "Percentage an instruction count may rise before `compare` fails.",
         "short": [],
         "long": [
           "gate-pct"
@@ -598,8 +620,8 @@
       {
         "name": "no-credit",
         "usage": "--no-credit",
-        "help": "Leave the line naming tak off the end of generated reports",
-        "help_first_line": "Leave the line naming tak off the end of generated reports",
+        "help": "Leave the line naming tak off the end of generated reports.",
+        "help_first_line": "Leave the line naming tak off the end of generated reports.",
         "short": [],
         "long": [
           "no-credit"
@@ -610,8 +632,8 @@
       {
         "name": "runner",
         "usage": "--runner <CLASS>",
-        "help": "Machine class to record under. Overrides the derived name",
-        "help_first_line": "Machine class to record under. Overrides the derived name",
+        "help": "Machine class to record under. Overrides the derived name.",
+        "help_first_line": "Machine class to record under. Overrides the derived name.",
         "short": [],
         "long": [
           "runner"
@@ -628,16 +650,22 @@
       }
     ],
     "mounts": [],
+    "unknown_flags": null,
     "hide": false,
+    "subcommand_required": true,
+    "args_override_self": true,
     "name": "tak",
     "aliases": [],
     "hidden_aliases": [],
     "examples": []
   },
   "config": {
-    "props": {}
+    "props": {},
+    "sources": {},
+    "files": []
   },
-  "usage": "Usage: tak [OPTIONS] <COMMAND>",
+  "usage": "",
   "complete": {},
-  "about": "CLI performance, tracked"
+  "about": "CLI performance, tracked",
+  "unknown_flags": "error"
 }

@@ -3,10 +3,12 @@
 
 - **Usage**: `tak push [--remote <REMOTE>]`
 
-Push recorded measurements to the remote
+Push recorded measurements to the remote.
 
 ## Flags
 
 ### `--remote <REMOTE>`
+
+Remote to use for git-notes synchronization.
 
 **Default:** `origin`
