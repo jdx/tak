@@ -25,64 +25,13 @@ pub const DEFAULT_WARMUP: u32 = 3;
 pub struct Config {
     /// Benchmarks by name. A BTreeMap so runs are ordered and reproducible
     /// rather than following the file's incidental key order.
+    ///
+    /// Settings tables — `[env]`, `[gate]`, `[report]`, `[runner]` — live in
+    /// the same file but are not deserialized here: the settings registry
+    /// declares their dotted keys, and `settings::TakConfigLayer` reads exactly
+    /// those, so this type never has to be kept in step with it.
     #[serde(default)]
     pub bench: BTreeMap<String, Bench>,
-    /// Project-level environment settings. See `settings.toml` for what these
-    /// mean; this type only says where they can be written.
-    #[serde(default)]
-    pub env: Option<EnvSection>,
-    /// Regression-gate settings.
-    #[serde(default)]
-    pub gate: Option<GateSection>,
-    /// Report-rendering settings.
-    #[serde(default)]
-    pub report: Option<ReportSection>,
-    #[serde(default)]
-    pub runner: Option<RunnerSection>,
-}
-
-/// The `[gate]` table in `tak.toml`.
-#[derive(Debug, Deserialize, Default, Clone, PartialEq)]
-pub struct GateSection {
-    pub pct: Option<f64>,
-}
-
-/// The `[report]` table in `tak.toml`.
-#[derive(Debug, Deserialize, Default, Clone, PartialEq)]
-pub struct ReportSection {
-    pub credit: Option<bool>,
-}
-
-/// The `[runner]` table in `tak.toml`.
-#[derive(Debug, Deserialize, Default, Clone, PartialEq)]
-pub struct RunnerSection {
-    pub class: Option<String>,
-}
-
-/// Every `tak.toml` table that feeds a setting.
-#[derive(Debug, Deserialize, Default)]
-pub struct SettingsSections {
-    #[serde(default)]
-    pub env: Option<EnvSection>,
-    #[serde(default)]
-    pub gate: Option<GateSection>,
-    #[serde(default)]
-    pub report: Option<ReportSection>,
-    /// Runner identity.
-    #[serde(default)]
-    pub runner: Option<RunnerSection>,
-}
-
-/// The `[env]` table in `tak.toml`.
-///
-/// Both fields are `Option` so an absent key defers to the environment and the
-/// declared default, while `deny = []` is an explicit empty list. Making them
-/// plain `Vec` would erase that distinction and turn "I did not mention this"
-/// into "I want nothing scrubbed".
-#[derive(Debug, Deserialize, Default, Clone, PartialEq, Eq)]
-pub struct EnvSection {
-    pub allow: Option<Vec<String>>,
-    pub deny: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,32 +87,6 @@ impl Config {
                 .with_context(|| format!("benchmark `{name}` has no command"))?;
         }
         Ok(cfg)
-    }
-
-    /// Read the setting tables, without validating benchmarks.
-    ///
-    /// Settings and benchmarks live in the same file but are needed at
-    /// different times. Resolving settings through [`Config::parse`] would make
-    /// a broken `[bench.x]` abort `tak run -- somecmd`, which does not read
-    /// benchmarks at all, and `tak settings`, which reads none of them either.
-    ///
-    /// Unknown keys are ignored, so `[bench]` is not even looked at here. A TOML
-    /// *syntax* error still fails: the file may carry `[env]` settings that
-    /// change what gets scrubbed from a subject's environment, and quietly
-    /// falling back to defaults would apply a weaker filter than the project
-    /// asked for without saying so.
-    pub fn find_settings(start: &Path) -> Result<SettingsSections> {
-        for dir in start.ancestors() {
-            let path = dir.join(FILE_NAME);
-            if path.is_file() {
-                let text = std::fs::read_to_string(&path)
-                    .with_context(|| format!("could not read {}", path.display()))?;
-                let parsed: SettingsSections = toml::from_str(&text)
-                    .with_context(|| format!("could not parse {}", path.display()))?;
-                return Ok(parsed);
-            }
-        }
-        Ok(SettingsSections::default())
     }
 
     /// Find and load `tak.toml`, searching upward from `start`.
