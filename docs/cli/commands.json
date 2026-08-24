@@ -715,7 +715,7 @@
     "flags": [
       {
         "name": "env-deny",
-        "usage": "--env-deny… <VAR>",
+        "usage": "--env-deny <VAR>",
         "help": "Remove a variable from the environment of measured commands. Repeatable. Replaces the default list rather than adding to it.",
         "help_first_line": "Remove a variable from the environment of measured commands. Repeatable. Replaces the default list rather than adding to it.",
         "short": [],
@@ -735,7 +735,7 @@
       },
       {
         "name": "env-allow",
-        "usage": "--env-allow… <VAR>",
+        "usage": "--env-allow <VAR>",
         "help": "Keep a variable that --env-deny would remove. Repeatable.",
         "help_first_line": "Keep a variable that --env-deny would remove. Repeatable.",
         "short": [],
