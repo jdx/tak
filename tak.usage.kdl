@@ -16,6 +16,8 @@ flag no-credit: help="Leave the line naming tak off the end of generated reports
 flag --runner help="Machine class to record under. Overrides the derived name." global=#true {
     arg <CLASS>
 }
+flag "-h --help" help="Print help" action=help builtin=#true
+flag "-V --version" help="Print version" action=version builtin=#true
 cmd run help="Benchmark a command, or everything declared in tak.toml." {
     flag --bench help="Name to record this measurement under. With no command, selects a single benchmark from tak.toml instead of running all of them." {
         arg <BENCH>
@@ -28,23 +30,27 @@ cmd run help="Benchmark a command, or everything declared in tak.toml." {
     }
     flag --no-counters help="Skip instruction counting even where valgrind is available."
     flag --record help="Append the result to refs/notes/tak for the current commit."
+    flag "-h --help" help="Print help" action=help builtin=#true
     arg "[CMD]..." help="Command to benchmark, after `--`. Omit to run what tak.toml declares." double_dash=required
 }
 cmd history help="Show recorded history for a commit." {
     flag --remote help="Remote to refresh notes from." default=origin {
         arg <REMOTE>
     }
+    flag "-h --help" help="Print help" action=help builtin=#true
     arg "[REV]" help="Revision to read. Defaults to HEAD." default=HEAD
 }
 cmd push help="Push recorded measurements to the remote." {
     flag --remote help="Remote to use for git-notes synchronization." default=origin {
         arg <REMOTE>
     }
+    flag "-h --help" help="Print help" action=help builtin=#true
 }
 cmd init help="Teach plain `git fetch` about the notes ref." {
     flag --remote help="Remote to use for git-notes synchronization." default=origin {
         arg <REMOTE>
     }
+    flag "-h --help" help="Print help" action=help builtin=#true
 }
 cmd backfill help="Benchmark published release binaries to bootstrap history." {
     long_help #"""
@@ -68,6 +74,7 @@ A new adopter's first chart is empty. Rather than rebuilding a project at a hund
         arg <RUNS>
     }
     flag --dry-run help="Measure but do not write to refs/notes/tak."
+    flag "-h --help" help="Print help" action=help builtin=#true
     arg "[ARGS]..." help="Arguments passed to the downloaded binary, after `--`. Defaults to `--version`, which every CLI answers cheaply." double_dash=required
 }
 cmd compare help="Compare this commit's measurements against another's." {
@@ -83,14 +90,18 @@ Fails when an instruction count has risen by more than `gate_pct`. Wall clock is
         arg <REMOTE>
     }
     flag --no-gate help="Report without failing, whatever the numbers say."
+    flag "-h --help" help="Print help" action=help builtin=#true
     arg "[BASE]" help="Revision to compare against." default="origin/main"
 }
 cmd doctor help="Diagnose the git-notes plumbing." {
+    flag "-h --help" help="Print help" action=help builtin=#true
 }
 cmd settings help="Show every setting, its resolved value, and where that value came from." {
     flag --docs help="Include the full description of each setting."
+    flag "-h --help" help="Print help" action=help builtin=#true
 }
 cmd usage help="Generate the CLI specification used to build the documentation." hide=#true {
+    flag "-h --help" help="Print help" action=help builtin=#true
 }
 config {
     prop "env_deny" type="list<string>" parse="list_by_comma" since="0.0.3" help="Environment variables removed from every command tak measures." long_help="Environment variables removed from every command tak measures.\n\nTwo reasons this defaults to a non-empty list rather than to nothing.\n\n**Determinism.** A CLI that finds a forge token in its environment often does more with it than without — authenticating, fetching, checking rate limits. A measurement that moves depending on whether CI happened to export a token is not a measurement of the code under test. It lands in the series as an unexplained step change on the day someone edits an unrelated workflow.\n\n**Credentials.** `tak backfill` downloads release binaries and executes them, and any CI run that can push notes has a repository-write token in scope.\n\nSetting this replaces the default list rather than adding to it. To keep the defaults and remove more, list them alongside. To keep the defaults and remove fewer, use `env_allow` — it is subtracted from this list, so the two compose without either having to restate the other.\n\nNames are matched exactly. There is no globbing: a benchmark whose behaviour depends on which variables happen to match a pattern is the problem this setting exists to avoid.\n\ntak's own network calls are unaffected. `backfill` authenticates with `curl` directly rather than through the measurement path." {

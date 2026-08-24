@@ -104,6 +104,22 @@
             ],
             "hide": false,
             "global": false
+          },
+          {
+            "name": "help",
+            "usage": "-h --help",
+            "help": "Print help",
+            "help_first_line": "Print help",
+            "short": [
+              "h"
+            ],
+            "long": [
+              "help"
+            ],
+            "hide": false,
+            "global": false,
+            "action": "help",
+            "builtin": true
           }
         ],
         "mounts": [],
@@ -114,7 +130,8 @@
         "name": "run",
         "aliases": [],
         "hidden_aliases": [],
-        "examples": []
+        "examples": [],
+        "headings": []
       },
       "history": {
         "full_cmd": [
@@ -158,6 +175,22 @@
             "default": [
               "origin"
             ]
+          },
+          {
+            "name": "help",
+            "usage": "-h --help",
+            "help": "Print help",
+            "help_first_line": "Print help",
+            "short": [
+              "h"
+            ],
+            "long": [
+              "help"
+            ],
+            "hide": false,
+            "global": false,
+            "action": "help",
+            "builtin": true
           }
         ],
         "mounts": [],
@@ -168,7 +201,8 @@
         "name": "history",
         "aliases": [],
         "hidden_aliases": [],
-        "examples": []
+        "examples": [],
+        "headings": []
       },
       "push": {
         "full_cmd": [
@@ -199,6 +233,22 @@
             "default": [
               "origin"
             ]
+          },
+          {
+            "name": "help",
+            "usage": "-h --help",
+            "help": "Print help",
+            "help_first_line": "Print help",
+            "short": [
+              "h"
+            ],
+            "long": [
+              "help"
+            ],
+            "hide": false,
+            "global": false,
+            "action": "help",
+            "builtin": true
           }
         ],
         "mounts": [],
@@ -209,7 +259,8 @@
         "name": "push",
         "aliases": [],
         "hidden_aliases": [],
-        "examples": []
+        "examples": [],
+        "headings": []
       },
       "init": {
         "full_cmd": [
@@ -240,6 +291,22 @@
             "default": [
               "origin"
             ]
+          },
+          {
+            "name": "help",
+            "usage": "-h --help",
+            "help": "Print help",
+            "help_first_line": "Print help",
+            "short": [
+              "h"
+            ],
+            "long": [
+              "help"
+            ],
+            "hide": false,
+            "global": false,
+            "action": "help",
+            "builtin": true
           }
         ],
         "mounts": [],
@@ -250,7 +317,8 @@
         "name": "init",
         "aliases": [],
         "hidden_aliases": [],
-        "examples": []
+        "examples": [],
+        "headings": []
       },
       "backfill": {
         "full_cmd": [
@@ -386,6 +454,22 @@
             ],
             "hide": false,
             "global": false
+          },
+          {
+            "name": "help",
+            "usage": "-h --help",
+            "help": "Print help",
+            "help_first_line": "Print help",
+            "short": [
+              "h"
+            ],
+            "long": [
+              "help"
+            ],
+            "hide": false,
+            "global": false,
+            "action": "help",
+            "builtin": true
           }
         ],
         "mounts": [],
@@ -397,7 +481,8 @@
         "name": "backfill",
         "aliases": [],
         "hidden_aliases": [],
-        "examples": []
+        "examples": [],
+        "headings": []
       },
       "compare": {
         "full_cmd": [
@@ -475,6 +560,22 @@
             ],
             "hide": false,
             "global": false
+          },
+          {
+            "name": "help",
+            "usage": "-h --help",
+            "help": "Print help",
+            "help_first_line": "Print help",
+            "short": [
+              "h"
+            ],
+            "long": [
+              "help"
+            ],
+            "hide": false,
+            "global": false,
+            "action": "help",
+            "builtin": true
           }
         ],
         "mounts": [],
@@ -486,7 +587,8 @@
         "name": "compare",
         "aliases": [],
         "hidden_aliases": [],
-        "examples": []
+        "examples": [],
+        "headings": []
       },
       "doctor": {
         "full_cmd": [
@@ -495,7 +597,24 @@
         "usage": "doctor",
         "subcommands": {},
         "args": [],
-        "flags": [],
+        "flags": [
+          {
+            "name": "help",
+            "usage": "-h --help",
+            "help": "Print help",
+            "help_first_line": "Print help",
+            "short": [
+              "h"
+            ],
+            "long": [
+              "help"
+            ],
+            "hide": false,
+            "global": false,
+            "action": "help",
+            "builtin": true
+          }
+        ],
         "mounts": [],
         "unknown_flags": null,
         "hide": false,
@@ -504,7 +623,8 @@
         "name": "doctor",
         "aliases": [],
         "hidden_aliases": [],
-        "examples": []
+        "examples": [],
+        "headings": []
       },
       "settings": {
         "full_cmd": [
@@ -525,6 +645,22 @@
             ],
             "hide": false,
             "global": false
+          },
+          {
+            "name": "help",
+            "usage": "-h --help",
+            "help": "Print help",
+            "help_first_line": "Print help",
+            "short": [
+              "h"
+            ],
+            "long": [
+              "help"
+            ],
+            "hide": false,
+            "global": false,
+            "action": "help",
+            "builtin": true
           }
         ],
         "mounts": [],
@@ -535,7 +671,8 @@
         "name": "settings",
         "aliases": [],
         "hidden_aliases": [],
-        "examples": []
+        "examples": [],
+        "headings": []
       },
       "usage": {
         "full_cmd": [
@@ -544,7 +681,24 @@
         "usage": "usage",
         "subcommands": {},
         "args": [],
-        "flags": [],
+        "flags": [
+          {
+            "name": "help",
+            "usage": "-h --help",
+            "help": "Print help",
+            "help_first_line": "Print help",
+            "short": [
+              "h"
+            ],
+            "long": [
+              "help"
+            ],
+            "hide": false,
+            "global": false,
+            "action": "help",
+            "builtin": true
+          }
+        ],
         "mounts": [],
         "unknown_flags": null,
         "hide": true,
@@ -553,7 +707,8 @@
         "name": "usage",
         "aliases": [],
         "hidden_aliases": [],
-        "examples": []
+        "examples": [],
+        "headings": []
       }
     },
     "args": [],
@@ -649,6 +804,38 @@
           "double_dash": "Optional",
           "hide": false
         }
+      },
+      {
+        "name": "help",
+        "usage": "-h --help",
+        "help": "Print help",
+        "help_first_line": "Print help",
+        "short": [
+          "h"
+        ],
+        "long": [
+          "help"
+        ],
+        "hide": false,
+        "global": false,
+        "action": "help",
+        "builtin": true
+      },
+      {
+        "name": "version",
+        "usage": "-V --version",
+        "help": "Print version",
+        "help_first_line": "Print version",
+        "short": [
+          "V"
+        ],
+        "long": [
+          "version"
+        ],
+        "hide": false,
+        "global": false,
+        "action": "version",
+        "builtin": true
       }
     ],
     "mounts": [],
@@ -659,7 +846,8 @@
     "name": "tak",
     "aliases": [],
     "hidden_aliases": [],
-    "examples": []
+    "examples": [],
+    "headings": []
   },
   "config": {
     "props": {

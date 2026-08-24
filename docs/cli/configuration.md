@@ -3,10 +3,10 @@
 
 ## `credit`
 
-- **type**: `bool`
-- **default**: `true`
-- **since**: 0.0.4
-- **set with**: `--no-credit`, `TAK_CREDIT`, config `report.credit`
+- **Type:** `bool`
+- **Default:** `true`
+- **Since:** 0.0.4
+- **Set with:** `--no-credit`, `TAK_CREDIT`, config `report.credit`
 
 Whether generated reports end with a line naming tak.
 
@@ -24,9 +24,9 @@ TAK_CREDIT=0 tak compare origin/main
 
 ## `env_allow`
 
-- **type**: `list<string>`
-- **since**: 0.0.3
-- **set with**: `--env-allow`, `TAK_ENV_ALLOW`, config `env.allow`
+- **Type:** `list<string>`
+- **Since:** 0.0.3
+- **Set with:** `--env-allow`, `TAK_ENV_ALLOW`, config `env.allow`
 
 Environment variables kept even though `env_deny` lists them.
 
@@ -43,10 +43,10 @@ tak run --env-deny GITHUB_TOKEN --env-allow GITHUB_TOKEN
 
 ## `env_deny`
 
-- **type**: `list<string>`
-- **default**: `GITHUB_TOKEN, GH_TOKEN`
-- **since**: 0.0.3
-- **set with**: `--env-deny`, `TAK_ENV_DENY`, config `env.deny`
+- **Type:** `list<string>`
+- **Default:** `GITHUB_TOKEN, GH_TOKEN`
+- **Since:** 0.0.3
+- **Set with:** `--env-deny`, `TAK_ENV_DENY`, config `env.deny`
 
 Environment variables removed from every command tak measures.
 
@@ -72,10 +72,10 @@ TAK_ENV_DENY=GITHUB_TOKEN,GH_TOKEN,NPM_TOKEN tak run
 
 ## `gate_pct`
 
-- **type**: `float`
-- **default**: `1.0`
-- **since**: 0.0.4
-- **set with**: `--gate-pct`, `TAK_GATE_PCT`, config `gate.pct`
+- **Type:** `float`
+- **Default:** `1.0`
+- **Since:** 0.0.4
+- **Set with:** `--gate-pct`, `TAK_GATE_PCT`, config `gate.pct`
 
 How much an instruction count may rise before `tak compare` fails.
 
@@ -95,10 +95,10 @@ TAK_GATE_PCT=5 tak compare origin/main
 
 ## `runner_class`
 
-- **type**: `string`
-- **default**: derived from the machine
-- **since**: 0.0.6
-- **set with**: `--runner`, `TAK_RUNNER`, config `runner.class`
+- **Type:** `string`
+- **Default:** derived from the machine
+- **Since:** 0.0.6
+- **Set with:** `--runner`, `TAK_RUNNER`, config `runner.class`
 
 The machine class a measurement is recorded under, and compared within.
 
