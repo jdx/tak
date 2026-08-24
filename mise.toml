@@ -1,5 +1,5 @@
 [tools]
-usage = "6.2.0"
+usage = "6.4.0"
 # communique rewrites release bodies and Node builds the docs. Rust-only CI jobs
 # run mise-action with `install: false` and
 # dedicated jobs install only what they need. Rust itself comes from
