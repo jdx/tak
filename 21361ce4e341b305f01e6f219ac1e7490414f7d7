@@ -1,0 +1,1 @@
+{"v":1,"bench":"tak-help","tool":"self","runner":"local-linux-x86_64","ts":"2026-07-24T19:31:32Z","metrics":{"wall_max_ms":1.171909,"wall_mean_ms":0.8453213499999999,"wall_min_ms":0.78384,"wall_n":20.0,"wall_p50_ms":0.809109}}
