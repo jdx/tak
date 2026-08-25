@@ -1,4 +1,5 @@
 [tools]
+"github:jdx/mr-boxington" = "latest"
 usage = "6.4.0"
 # communique rewrites release bodies and Node builds the docs. Rust-only CI jobs
 # run mise-action with `install: false` and
@@ -13,7 +14,7 @@ node = "24"
 
 [tasks.build]
 description = "Build the debug binary"
-run = "cargo build"
+run = "mbx build build"
 
 # Instruction-counted benchmarks (see tak.toml). The just-built release binary
 # is the measuring instrument, so this exercises the same source revision as
@@ -32,7 +33,7 @@ run = ["cargo build --release", "./target/release/tak run --record"]
 description = "Run the test suite, including the cachegrind integration tests"
 # --all-targets so tests/counters.rs is included. Without valgrind installed it
 # skips rather than fails, which is the normal state on macOS and Windows.
-run = "cargo test --all-targets"
+run = "mbx build test --all-targets"
 
 [tasks.lint]
 description = "Check formatting and run clippy"
@@ -44,7 +45,7 @@ run = "cargo fmt --check"
 
 [tasks."lint:clippy"]
 description = "Run clippy, warnings as errors"
-run = "cargo clippy --all-targets -- -D warnings"
+run = "mbx build clippy --all-targets -- -D warnings"
 
 [tasks.lint-fix]
 description = "Auto-fix formatting and the clippy lints that can be fixed"
