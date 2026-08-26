@@ -54,7 +54,7 @@ Two reasons this defaults to a non-empty list rather than to nothing.
 
 **Determinism.** A CLI that finds a forge token in its environment often does more with it than without — authenticating, fetching, checking rate limits. A measurement that moves depending on whether CI happened to export a token is not a measurement of the code under test. It lands in the series as an unexplained step change on the day someone edits an unrelated workflow.
 
-**Credentials.** `tak backfill` downloads release binaries and executes them, and any CI run that can push notes has a repository-write token in scope.
+**This is not a credential sandbox.** The listed variables are absent from the child's direct environment, but a hostile binary can still inspect accessible same-user processes and files. In particular, `tak backfill` downloads and executes release binaries; run it on an isolated credential-free machine when those assets are not fully trusted.
 
 Setting this replaces the default list rather than adding to it. To keep the defaults and remove more, list them alongside. To keep the defaults and remove fewer, use `env_allow` — it is subtracted from this list, so the two compose without either having to restate the other.
 

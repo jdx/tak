@@ -111,6 +111,23 @@ fn availability_and_failure_are_distinct() {
     }
 }
 
+/// A subject that starts and then exits unsuccessfully still emits an instruction
+/// summary. Checking only for that summary records a crash as an improvement.
+#[test]
+fn a_nonzero_subject_is_not_counted() {
+    if !valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let cmd = vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        "exit 42".to_string(),
+    ];
+    let err = measure::instructions(&cmd, None, &Settings::default()).unwrap_err();
+    assert!(format!("{err:#}").contains("exited with"), "{err:#}");
+}
+
 /// Absence of valgrind must degrade to timing-only, never fail the run.
 #[test]
 fn missing_valgrind_is_not_an_error() {

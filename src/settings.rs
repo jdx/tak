@@ -34,8 +34,11 @@ pub struct Settings {
     /// not a measurement of the code under test. It lands in the series as an
     /// unexplained step change on the day someone edits an unrelated workflow.
     ///
-    /// **Credentials.** `tak backfill` downloads release binaries and executes them,
-    /// and any CI run that can push notes has a repository-write token in scope.
+    /// **This is not a credential sandbox.** The listed variables are absent from the
+    /// child's direct environment, but a hostile binary can still inspect accessible
+    /// same-user processes and files. In particular, `tak backfill` downloads and
+    /// executes release binaries; run it on an isolated credential-free machine when
+    /// those assets are not fully trusted.
     ///
     /// Setting this replaces the default list rather than adding to it. To keep the
     /// defaults and remove more, list them alongside. To keep the defaults and remove
@@ -448,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn the_default_protects_forge_tokens() {
+    fn the_default_scrubs_forge_tokens() {
         let s = Settings::default();
         let scrubbed: Vec<_> = s.scrubbed_env().collect();
         assert!(scrubbed.contains(&"GITHUB_TOKEN"));

@@ -511,15 +511,6 @@ fn cmd_doctor(settings: &Settings) -> Result<()> {
     Ok(())
 }
 
-/// Removes the backfill work directory on every exit path, including `?`.
-struct TempDirGuard(std::path::PathBuf);
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
-
 /// Infer "owner/name" from the `origin` remote.
 fn repo_from_origin() -> Option<String> {
     let out = std::process::Command::new("git")
@@ -581,10 +572,14 @@ fn cmd_backfill(
     }
     println!("{} release(s) from {repo}\n", releases.len());
 
-    let workdir = std::env::temp_dir().join(format!("tak-backfill-{}", std::process::id()));
-    // Downloads can be hundreds of megabytes; a `?` partway through the loop
-    // must not leave them behind.
-    let _cleanup = TempDirGuard(workdir.clone());
+    // The parent has to be atomically created and private. A predictable
+    // `/tmp/tak-backfill-<pid>` let another local user pre-create that path and
+    // replace a downloaded executable before tak spawned it. TempDir also
+    // removes downloads on every exit path, including `?`.
+    let workdir = tempfile::Builder::new()
+        .prefix("tak-backfill-")
+        .tempdir()
+        .context("could not create a private backfill directory")?;
     let mut recorded = 0usize;
     let mut skipped = 0usize;
 
@@ -595,7 +590,7 @@ fn cmd_backfill(
             continue;
         };
 
-        let dir = workdir.join(backfill::release_dir_name(i, &rel.tag));
+        let dir = workdir.path().join(backfill::release_dir_name(i, &rel.tag));
         let path = match backfill::fetch_binary(asset, &bin, &dir) {
             Ok(p) => p,
             Err(e) => {
