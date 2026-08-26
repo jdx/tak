@@ -535,6 +535,19 @@ fn repo_from_origin() -> Option<String> {
     (slug.matches('/').count() == 1 && !slug.is_empty()).then(|| slug.to_string())
 }
 
+fn backfill_workdir() -> Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("tak-backfill-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    builder
+        .tempdir()
+        .context("could not create a backfill directory")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_backfill(
     repo: Option<String>,
@@ -572,14 +585,11 @@ fn cmd_backfill(
     }
     println!("{} release(s) from {repo}\n", releases.len());
 
-    // The parent has to be atomically created and private. A predictable
-    // `/tmp/tak-backfill-<pid>` let another local user pre-create that path and
-    // replace a downloaded executable before tak spawned it. TempDir also
-    // removes downloads on every exit path, including `?`.
-    let workdir = tempfile::Builder::new()
-        .prefix("tak-backfill-")
-        .tempdir()
-        .context("could not create a private backfill directory")?;
+    // The parent has to be atomically created and, on Unix, owner-only. A
+    // predictable `/tmp/tak-backfill-<pid>` let another local user pre-create
+    // that path and replace a downloaded executable before tak spawned it.
+    // TempDir also removes downloads on every exit path, including `?`.
+    let workdir = backfill_workdir()?;
     let mut recorded = 0usize;
     let mut skipped = 0usize;
 
@@ -886,6 +896,16 @@ mod tests {
         assert!(ts.ends_with('Z'));
         assert_eq!(&ts[4..5], "-");
         assert_eq!(&ts[10..11], "T");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_backfill_workdir_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workdir = backfill_workdir().unwrap();
+        let mode = workdir.path().metadata().unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "workdir mode was {:o}", mode & 0o777);
     }
 
     /// An explicit class wins over the derived one. This is how a project
