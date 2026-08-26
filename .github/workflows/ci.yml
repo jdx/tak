@@ -23,7 +23,7 @@ jobs:
 
   final:
     name: final
-    if: ${{ always() && !cancelled() }}
+    if: ${{ always() && !cancelled() && needs.trusted.result != 'cancelled' && needs.untrusted.result != 'cancelled' }}
     permissions: {}
     needs: [trusted, untrusted]
     runs-on: ubuntu-latest
