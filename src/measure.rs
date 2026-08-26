@@ -41,12 +41,14 @@ pub struct Plan {
 /// applied to valgrind itself, which the subject inherits from.
 ///
 /// What gets removed is [`Settings::scrubbed_env`] — `env_deny` less
-/// `env_allow`, both declared on the `Settings` registry. The default is the forge
-/// tokens, for two reasons. **Determinism**: a CLI that finds a token often
-/// does more with it than without, so a measurement would move depending on
-/// whether CI happened to export one. **Credentials**: `backfill` downloads
-/// release binaries and executes them, and any run that can push notes holds a
-/// repository-write token.
+/// `env_allow`, both declared on the `Settings` registry. The default is the
+/// forge tokens because a CLI that finds one often does more with it than
+/// without, so a measurement would move depending on whether CI happened to
+/// export one.
+///
+/// This controls direct inheritance, not hostile-code isolation. A subject can
+/// still inspect accessible same-user processes and files, so `backfill` must
+/// run without credentials when its release binaries are not trusted.
 ///
 /// tak's own network calls are unaffected — `backfill` authenticates with
 /// `curl` directly rather than through this path.
@@ -75,7 +77,9 @@ fn time_once(cmd: &[String], dir: Option<&std::path::Path>, settings: &Settings)
         .status()
         .with_context(|| format!("failed to spawn `{bin}`"))?;
     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-    let _ = status;
+    if !status.success() {
+        bail!("benchmark subject `{bin}` exited with {status}");
+    }
     Ok(elapsed)
 }
 
@@ -203,6 +207,13 @@ pub fn instructions(
 
         // cachegrind writes its summary to stderr as e.g. "I refs:  48,349,132".
         let stderr = String::from_utf8_lossy(&out.stderr);
+        if !out.status.success() {
+            let bin = cmd.first().map(String::as_str).unwrap_or("(empty command)");
+            bail!(
+                "benchmark subject `{bin}` exited with {} under valgrind",
+                out.status
+            );
+        }
         match parse_irefs(&stderr) {
             Some(n) => samples.push(n),
             // Valgrind is installed but produced no summary — a real failure,
@@ -304,6 +315,25 @@ mod tests {
             settings: Settings::default(),
         };
         assert!(wall(&plan).is_err());
+    }
+
+    #[test]
+    fn a_failed_subject_is_not_recorded_as_a_fast_run() {
+        #[cfg(unix)]
+        let cmd = vec!["/bin/sh".into(), "-c".into(), "exit 42".into()];
+        #[cfg(windows)]
+        let cmd = vec!["cmd".into(), "/C".into(), "exit /B 42".into()];
+
+        let err = wall(&Plan {
+            cmd,
+            warmup: 0,
+            runs: 1,
+            dir: None,
+            settings: Settings::default(),
+        })
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("exited with"), "{err:#}");
     }
 
     #[test]

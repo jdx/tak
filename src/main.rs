@@ -511,15 +511,6 @@ fn cmd_doctor(settings: &Settings) -> Result<()> {
     Ok(())
 }
 
-/// Removes the backfill work directory on every exit path, including `?`.
-struct TempDirGuard(std::path::PathBuf);
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
-
 /// Infer "owner/name" from the `origin` remote.
 fn repo_from_origin() -> Option<String> {
     let out = std::process::Command::new("git")
@@ -542,6 +533,19 @@ fn repo_from_origin() -> Option<String> {
     .find_map(|p| url.strip_prefix(p))?;
     let slug = rest.trim_end_matches('/').trim_end_matches(".git");
     (slug.matches('/').count() == 1 && !slug.is_empty()).then(|| slug.to_string())
+}
+
+fn backfill_workdir() -> Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("tak-backfill-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    builder
+        .tempdir()
+        .context("could not create a backfill directory")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -581,10 +585,11 @@ fn cmd_backfill(
     }
     println!("{} release(s) from {repo}\n", releases.len());
 
-    let workdir = std::env::temp_dir().join(format!("tak-backfill-{}", std::process::id()));
-    // Downloads can be hundreds of megabytes; a `?` partway through the loop
-    // must not leave them behind.
-    let _cleanup = TempDirGuard(workdir.clone());
+    // The parent has to be atomically created and, on Unix, owner-only. A
+    // predictable `/tmp/tak-backfill-<pid>` let another local user pre-create
+    // that path and replace a downloaded executable before tak spawned it.
+    // TempDir also removes downloads on every exit path, including `?`.
+    let workdir = backfill_workdir()?;
     let mut recorded = 0usize;
     let mut skipped = 0usize;
 
@@ -595,7 +600,7 @@ fn cmd_backfill(
             continue;
         };
 
-        let dir = workdir.join(backfill::release_dir_name(i, &rel.tag));
+        let dir = workdir.path().join(backfill::release_dir_name(i, &rel.tag));
         let path = match backfill::fetch_binary(asset, &bin, &dir) {
             Ok(p) => p,
             Err(e) => {
@@ -891,6 +896,16 @@ mod tests {
         assert!(ts.ends_with('Z'));
         assert_eq!(&ts[4..5], "-");
         assert_eq!(&ts[10..11], "T");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_backfill_workdir_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workdir = backfill_workdir().unwrap();
+        let mode = workdir.path().metadata().unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "workdir mode was {:o}", mode & 0o777);
     }
 
     /// An explicit class wins over the derived one. This is how a project

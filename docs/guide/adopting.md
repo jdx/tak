@@ -268,6 +268,8 @@ only the generated notes artifact to a separate publishing job. If that isolatio
 available, limit backfill to binaries produced by a release pipeline you trust. Aube's
 [backfill workflow](https://github.com/jdx/aube/blob/main/.github/workflows/perf-backfill.yml)
 shows the separate measurement and publishing jobs; it does not provide an execution sandbox.
+`env_deny` only changes the binary's direct environment; it cannot stop hostile code from
+inspecting other same-user processes or files and is not a substitute for that isolation.
 
 ## Check the rollout
 
