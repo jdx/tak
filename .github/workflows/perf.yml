@@ -40,6 +40,7 @@ jobs:
     permissions:
       contents: read
     outputs:
+      image_version: ${{ steps.toolchain.outputs.image_version }}
       rust_version: ${{ steps.toolchain.outputs.rust_version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -48,8 +49,11 @@ jobs:
       - id: toolchain
         name: Record the built-in toolchain
         run: |
+          image_version=${ImageVersion:?GitHub-hosted ImageVersion is unavailable}
           rust_version=$(rustc --version | awk '{print $2}')
+          [[ "$image_version" =~ ^[0-9]{8}\.[0-9]+\.[0-9]+$ ]]
           [[ "$rust_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "image_version=$image_version" >> "$GITHUB_OUTPUT"
           echo "rust_version=$rust_version" >> "$GITHUB_OUTPUT"
       - name: Build without a shared cache
         run: cargo build --release
@@ -83,7 +87,7 @@ jobs:
     permissions:
       contents: read
     env:
-      TAK_RUNNER: jdx-perf-v1-ubuntu24.04-x64-tak-gha-rust${{ needs.build.outputs.rust_version }}
+      TAK_RUNNER: jdx-perf-v1-ubuntu24.04-x64-tak-gha${{ needs.build.outputs.image_version }}-rust${{ needs.build.outputs.rust_version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
