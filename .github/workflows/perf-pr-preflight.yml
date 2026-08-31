@@ -1,0 +1,16 @@
+name: perf-pr-preflight
+
+# This workflow runs only on GitHub-hosted infrastructure. Its completion wakes
+# the trusted default-branch perf-pr controller; it never executes project code.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  complete:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "The default-branch controller will independently validate this pull request."
