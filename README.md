@@ -46,6 +46,8 @@ and reasoning.
 - `tak run` measures wall time and, where Valgrind is available, instruction counts
 - `tak.toml` declares repeatable benchmarks for local and CI runs
 - `tak run --record`, `tak push`, and `tak history` store results in git notes
+- `tak artifact export` and `tak artifact publish` hand measurements from a
+  read-only CI job to a separately trusted publisher
 - `tak compare` reports changes and gates only on instruction counts
 - `tak backfill` measures published release binaries to bootstrap history
 

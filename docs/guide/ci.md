@@ -40,6 +40,27 @@ Do not use that direct-fetch configuration in a checkout where you run `tak run 
 plain git fetch has no way to merge unpushed local notes. Let `tak history`, `tak compare`, and
 `tak push` use the scratch ref instead.
 
+## Separate measurement from publication
+
+A persistent or self-hosted runner should not receive a repository-write token while it builds
+or runs project code. Export the local measurement into an artifact instead:
+
+```sh
+tak artifact export --output tak-measurement.json
+```
+
+Upload that file, then download it in a separate trusted job. The publisher must supply the
+revision independently from its workflow context; the artifact is rejected if it names a
+different commit:
+
+```sh
+tak artifact publish tak-measurement.json --expect "$GITHUB_SHA"
+```
+
+Publication uses the same non-forced push and `cat_sort_uniq` retry path as `tak push`, so an
+old measurement and concurrent writers are preserved. The artifact format is pre-v1 and may
+change between Tak releases.
+
 ## Compare revisions
 
 Compare the current revision with the recorded baseline:

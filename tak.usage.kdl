@@ -46,6 +46,28 @@ cmd push help="Push recorded measurements to the remote." {
     }
     flag "-h --help" help="Print help" action=help builtin=#true
 }
+cmd artifact help="Move measurements between a read-only job and a trusted publisher." subcommand_required=#true {
+    flag "-h --help" help="Print help" action=help builtin=#true
+    cmd export help="Export locally recorded measurements as one portable file." {
+        flag --output help="Artifact file to write." required=#true {
+            arg <PATH>
+        }
+        flag --rev help="Revision whose local measurements should be exported." default=HEAD {
+            arg <REV>
+        }
+        flag "-h --help" help="Print help" action=help builtin=#true
+    }
+    cmd publish help="Validate, import, and publish a measurement artifact." {
+        flag --expect help="Trusted revision the artifact must target." required=#true {
+            arg <REV>
+        }
+        flag --remote help="Remote to synchronize with." default=origin {
+            arg <REMOTE>
+        }
+        flag "-h --help" help="Print help" action=help builtin=#true
+        arg <PATH> help="Artifact file produced by `tak artifact export`."
+    }
+}
 cmd init help="Teach plain `git fetch` about the notes ref." {
     flag --remote help="Remote to use for git-notes synchronization." default=origin {
         arg <REMOTE>

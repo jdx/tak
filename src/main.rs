@@ -89,6 +89,8 @@ enum Cmd {
     },
     /// Push recorded measurements to the remote.
     Push(RemoteArgs),
+    /// Move measurements between a read-only job and a trusted publisher.
+    Artifact(Box<ArtifactArgs>),
     /// Teach plain `git fetch` about the notes ref.
     Init(RemoteArgs),
     /// Benchmark published release binaries to bootstrap history.
@@ -150,6 +152,37 @@ enum Cmd {
     /// Generate the CLI specification used to build the documentation.
     #[usage(hide)]
     Usage,
+}
+
+#[derive(Args)]
+struct ArtifactArgs {
+    #[usage(subcommand)]
+    cmd: ArtifactCmd,
+}
+
+#[derive(Subcommands)]
+enum ArtifactCmd {
+    /// Export locally recorded measurements as one portable file.
+    Export {
+        /// Artifact file to write.
+        #[usage(long, value_name = "PATH")]
+        output: std::path::PathBuf,
+        /// Revision whose local measurements should be exported.
+        #[usage(long, default = "HEAD")]
+        rev: String,
+    },
+    /// Validate, import, and publish a measurement artifact.
+    Publish {
+        /// Artifact file produced by `tak artifact export`.
+        #[usage(arg)]
+        path: std::path::PathBuf,
+        /// Trusted revision the artifact must target.
+        #[usage(long, value_name = "REV")]
+        expect: String,
+        /// Remote to synchronize with.
+        #[usage(long, default = "origin")]
+        remote: String,
+    },
 }
 
 #[derive(Args)]
@@ -810,6 +843,29 @@ fn main() -> Result<()> {
             println!("pushed {} to {}", notes::NOTES_REF, remote);
             Ok(())
         }
+        Cmd::Artifact(args) => match args.cmd {
+            ArtifactCmd::Export { output, rev } => {
+                let (sha, records) = tak_cli::artifact::export(&output, &rev)?;
+                println!(
+                    "exported {records} measurement(s) for {} to {}",
+                    &sha[..12],
+                    output.display()
+                );
+                Ok(())
+            }
+            ArtifactCmd::Publish {
+                path,
+                expect,
+                remote,
+            } => {
+                let (sha, records) = tak_cli::artifact::publish(&path, &expect, &remote)?;
+                println!(
+                    "published {records} measurement(s) for {} to {remote}",
+                    &sha[..12]
+                );
+                Ok(())
+            }
+        },
         Cmd::Init(RemoteArgs { remote }) => {
             notes::install_refspec(&remote)?;
             println!(

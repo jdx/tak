@@ -6,6 +6,7 @@
 //! by integration tests. `measure::instructions` in particular went a long time
 //! written-but-never-executed, which is exactly the failure this guards against.
 
+pub mod artifact;
 pub mod backfill;
 pub mod compare;
 pub mod config;
