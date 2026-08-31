@@ -1,0 +1,37 @@
+name: Report Tak pull request comparison
+description: Post a sticky comparison and attach a check run to the measured head SHA
+
+inputs:
+  artifact-directory:
+    description: Directory containing report.md, status, and shas
+    required: true
+  check-name:
+    description: Stable pull request check name
+    required: false
+    default: perf / instruction-count
+  head-sha:
+    description: Independently validated pull request head SHA
+    required: true
+  marker:
+    description: Unique HTML comment marker for the sticky comment
+    required: true
+  pr-number:
+    description: Independently validated pull request number
+    required: true
+  token:
+    description: Token with checks write and pull-requests write permissions
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Publish comment and check
+      shell: bash
+      env:
+        ARTIFACT_DIRECTORY: ${{ inputs.artifact-directory }}
+        CHECK_NAME: ${{ inputs.check-name }}
+        GH_TOKEN: ${{ inputs.token }}
+        HEAD_SHA: ${{ inputs.head-sha }}
+        MARKER: ${{ inputs.marker }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+      run: "$GITHUB_ACTION_PATH/report.sh"

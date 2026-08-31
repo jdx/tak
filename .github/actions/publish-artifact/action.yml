@@ -1,0 +1,44 @@
+name: Publish Tak measurement artifact
+description: Verify a pinned Tak release and publish a trusted measurement artifact
+
+inputs:
+  artifact:
+    description: Path to the file produced by tak artifact export
+    required: true
+  expect:
+    description: Trusted revision the artifact must target
+    required: true
+  remote:
+    description: Git remote to synchronize with
+    required: false
+    default: origin
+  token:
+    description: Token with contents write permission
+    required: true
+  version:
+    description: Exact Tak release tag, such as v0.0.9
+    required: true
+  sha256:
+    description: SHA-256 of the x86_64-unknown-linux-musl release archive
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - id: install
+      name: Install checksum-pinned Tak
+      shell: bash
+      env:
+        TAK_VERSION: ${{ inputs.version }}
+        TAK_SHA256: ${{ inputs.sha256 }}
+      run: "$GITHUB_ACTION_PATH/install.sh"
+
+    - name: Validate and publish the artifact
+      shell: bash
+      env:
+        ARTIFACT: ${{ inputs.artifact }}
+        EXPECT_REV: ${{ inputs.expect }}
+        GH_TOKEN: ${{ inputs.token }}
+        REMOTE: ${{ inputs.remote }}
+        TAK_BIN: ${{ steps.install.outputs.bin }}
+      run: "$GITHUB_ACTION_PATH/publish.sh"

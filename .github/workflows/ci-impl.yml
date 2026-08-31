@@ -117,6 +117,19 @@ jobs:
           grep -qE '^[[:space:]]*instructions[[:space:]]+[0-9]+' <<<"$out" \
             || { echo "::error::image produced no instruction count"; exit 1; }
 
+  actions:
+    permissions: {}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint action scripts
+        run: shellcheck .github/actions/{publish-artifact,report-pr,tests}/*.sh
+      - name: Test action scripts
+        run: .github/actions/tests/test.sh
+
   # Single fan-in gate, so branch protection requires one check instead of an
   # enumerated list that goes stale every time a job is added or renamed. It
   # also catches *skipped* jobs, which a required check would otherwise treat
@@ -128,6 +141,7 @@ jobs:
       - test-macos
       - docker
       - docs
+      - actions
     runs-on: ubuntu-latest
     timeout-minutes: 1
     # Run on success or upstream failure but skip when the workflow is cancelled
@@ -139,6 +153,7 @@ jobs:
           needs.test.result != 'success' ||
           needs.test-macos.result != 'success' ||
           needs.docker.result != 'success' ||
-          needs.docs.result != 'success'
+          needs.docs.result != 'success' ||
+          needs.actions.result != 'success'
         run: exit 1
       - run: echo "All CI jobs completed successfully"
