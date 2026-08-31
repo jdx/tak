@@ -16,6 +16,10 @@ on:
 
 permissions: {}
 
+defaults:
+  run:
+    shell: bash
+
 # Never two at once. Concurrent runs race the notes push; tak retries with a
 # cat_sort_uniq merge so nothing is lost, but serialising avoids the churn.
 # cancel-in-progress is off deliberately: every commit gets a measurement, and
@@ -27,33 +31,73 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
-  TAK_RUNNER: jdx-perf-v1-ubuntu24.04-x64-tak-rust1.97.1
 
 jobs:
+  build:
+    name: Build with GitHub-hosted Rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      rust_version: ${{ steps.toolchain.outputs.rust_version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: toolchain
+        name: Record the built-in toolchain
+        run: |
+          rust_version=$(rustc --version | awk '{print $2}')
+          [[ "$rust_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "rust_version=$rust_version" >> "$GITHUB_OUTPUT"
+      - name: Build without a shared cache
+        run: cargo build --release
+      - name: Package the binary and toolchain identity
+        run: |
+          mkdir -p /tmp/tak-build
+          install -m 0755 target/release/tak /tmp/tak-build/tak
+          {
+            rustc --version
+            cargo --version
+            echo "runner-image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+          } > /tmp/tak-build/build-info
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tak-perf-binary
+          path: /tmp/tak-build
+          retention-days: 1
+          if-no-files-found: error
+
   measure:
     name: Measure
+    needs: build
     # Pinned to one runner class on purpose. Absolute instruction counts shift
     # between machine types by more than a real regression does, so a series
     # that wanders between runners is unreadable.
     runs-on: [self-hosted, jdx-perf-v1]
     container:
       image: ghcr.io/jdx/perf-runner@sha256:1b44fc9f1c93fc1b7a2db56a1ef743bbf8a8df60035121d455c9834fe8001922
-      options: --cpuset-cpus 0-7
+      options: --cpuset-cpus 0-7 --user 1001:1001
     timeout-minutes: 30
     permissions:
       contents: read
+    env:
+      TAK_RUNNER: jdx-perf-v1-ubuntu24.04-x64-tak-gha-rust${{ needs.build.outputs.rust_version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      # Compile inside the pinned job container. Restoring target/ could relabel
-      # a binary built on another runner class as a jdx-perf-v1 measurement.
-      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4.2.5
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          cache: false
-        env:
-          MISE_LOCKED: "1"
+          name: tak-perf-binary
+          path: /tmp/tak-build
+
+      - name: Install the measured binary
+        run: |
+          mkdir -p target/release
+          install -m 0755 /tmp/tak-build/tak target/release/tak
 
       # cachegrind is the whole point: it counts instructions, which reproduce
       # to ~0.02% run-to-run where wall clock on this same hardware moves by
@@ -68,9 +112,7 @@ jobs:
             echo 'image: ghcr.io/jdx/perf-runner@sha256:1b44fc9f1c93fc1b7a2db56a1ef743bbf8a8df60035121d455c9834fe8001922'
             uname -a
             lscpu
-            mise --version
-            rustc --version
-            cargo --version
+            cat /tmp/tak-build/build-info
             valgrind --version
             for zone in /sys/class/thermal/thermal_zone*/temp; do
               [ -r "$zone" ] && printf '%s: %s\n' "$zone" "$(cat "$zone")"
@@ -82,9 +124,7 @@ jobs:
         run: valgrind --version
 
       - name: Measure and record
-        run: |
-          cargo build --release
-          taskset -c 0-3 mise run perf:record
+        run: taskset -c 0-3 ./target/release/tak run --record
       - name: Package measurement note
         if: github.ref == 'refs/heads/main'
         run: |
