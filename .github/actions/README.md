@@ -26,7 +26,7 @@ steps:
       artifact: /tmp/tak-out/measurement.json
       expect: ${{ github.sha }}
       token: ${{ github.token }}
-      version: v0.0.9
+      version: RELEASE_CONTAINING_ARTIFACT_COMMANDS
       sha256: SHA256_FROM_THE_RELEASE
 ```
 

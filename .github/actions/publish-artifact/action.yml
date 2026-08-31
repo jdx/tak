@@ -16,7 +16,7 @@ inputs:
     description: Token with contents write permission
     required: true
   version:
-    description: Exact Tak release tag, such as v0.0.9
+    description: Exact Tak release tag containing the artifact commands
     required: true
   sha256:
     description: SHA-256 of the x86_64-unknown-linux-musl release archive
