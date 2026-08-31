@@ -1,5 +1,5 @@
 [tools]
-"github:jdx/mr-boxington" = "latest"
+mr-boxington = { version = "1.1.0", postinstall = "mbx setup --global" }
 usage = "6.4.0"
 # communique rewrites release bodies and Node builds the docs. Rust-only CI jobs
 # run mise-action with `install: false` and
@@ -14,26 +14,32 @@ node = "24"
 
 [tasks.build]
 description = "Build the debug binary"
-run = "mbx build"
+run = "cargo build"
 
 # Instruction-counted benchmarks (see tak.toml). The just-built release binary
 # is the measuring instrument, so this exercises the same source revision as
 # the benchmark subject without relying on a separately installed tak.
+[tasks."perf:build"]
+env = { MBX_DISABLE = "1" }
+run = "cargo build --release"
+
 [tasks.perf]
 description = "Build release mode and run the performance benchmarks"
-run = ["cargo build --release", "./target/release/tak run"]
+depends = ["perf:build"]
+run = "./target/release/tak run"
 
 # Same measurement, appended to refs/notes/tak for this commit. Nothing leaves
 # the machine until `tak push`; the perf workflows are the publisher.
 [tasks."perf:record"]
 description = "Record the performance benchmarks in git notes"
-run = ["cargo build --release", "./target/release/tak run --record"]
+depends = ["perf:build"]
+run = "./target/release/tak run --record"
 
 [tasks.test]
 description = "Run the test suite, including the cachegrind integration tests"
 # --all-targets so tests/counters.rs is included. Without valgrind installed it
 # skips rather than fails, which is the normal state on macOS and Windows.
-run = "mbx test --all-targets"
+run = "cargo test --all-targets"
 
 [tasks.lint]
 description = "Check formatting and run clippy"
@@ -45,7 +51,7 @@ run = "cargo fmt --check"
 
 [tasks."lint:clippy"]
 description = "Run clippy, warnings as errors"
-run = "mbx clippy --all-targets -- -D warnings"
+run = "cargo clippy --all-targets -- -D warnings"
 
 [tasks.lint-fix]
 description = "Auto-fix formatting and the clippy lints that can be fixed"
