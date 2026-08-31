@@ -262,6 +262,212 @@
         "examples": [],
         "headings": []
       },
+      "artifact": {
+        "full_cmd": [
+          "artifact"
+        ],
+        "usage": "artifact <SUBCOMMAND>",
+        "subcommands": {
+          "export": {
+            "full_cmd": [
+              "artifact",
+              "export"
+            ],
+            "usage": "artifact export <--output <PATH>> [--rev <REV>]",
+            "subcommands": {},
+            "args": [],
+            "flags": [
+              {
+                "name": "output",
+                "usage": "--output <PATH>",
+                "help": "Artifact file to write.",
+                "help_first_line": "Artifact file to write.",
+                "short": [],
+                "long": [
+                  "output"
+                ],
+                "required": true,
+                "hide": false,
+                "global": false,
+                "arg": {
+                  "name": "PATH",
+                  "usage": "<PATH>",
+                  "required": true,
+                  "double_dash": "Optional",
+                  "hide": false
+                }
+              },
+              {
+                "name": "rev",
+                "usage": "--rev <REV>",
+                "help": "Revision whose local measurements should be exported.",
+                "help_first_line": "Revision whose local measurements should be exported.",
+                "short": [],
+                "long": [
+                  "rev"
+                ],
+                "hide": false,
+                "global": false,
+                "arg": {
+                  "name": "REV",
+                  "usage": "<REV>",
+                  "required": true,
+                  "double_dash": "Optional",
+                  "hide": false
+                },
+                "default": [
+                  "HEAD"
+                ]
+              },
+              {
+                "name": "help",
+                "usage": "-h --help",
+                "help": "Print help",
+                "help_first_line": "Print help",
+                "short": [
+                  "h"
+                ],
+                "long": [
+                  "help"
+                ],
+                "hide": false,
+                "global": false,
+                "action": "help",
+                "builtin": true
+              }
+            ],
+            "mounts": [],
+            "unknown_flags": null,
+            "hide": false,
+            "args_override_self": true,
+            "help": "Export locally recorded measurements as one portable file.",
+            "name": "export",
+            "aliases": [],
+            "hidden_aliases": [],
+            "examples": [],
+            "headings": []
+          },
+          "publish": {
+            "full_cmd": [
+              "artifact",
+              "publish"
+            ],
+            "usage": "artifact publish <--expect <REV>> [--remote <REMOTE>] <PATH>",
+            "subcommands": {},
+            "args": [
+              {
+                "name": "PATH",
+                "usage": "<PATH>",
+                "help": "Artifact file produced by `tak artifact export`.",
+                "help_first_line": "Artifact file produced by `tak artifact export`.",
+                "required": true,
+                "double_dash": "Optional",
+                "hide": false
+              }
+            ],
+            "flags": [
+              {
+                "name": "expect",
+                "usage": "--expect <REV>",
+                "help": "Trusted revision the artifact must target.",
+                "help_first_line": "Trusted revision the artifact must target.",
+                "short": [],
+                "long": [
+                  "expect"
+                ],
+                "required": true,
+                "hide": false,
+                "global": false,
+                "arg": {
+                  "name": "REV",
+                  "usage": "<REV>",
+                  "required": true,
+                  "double_dash": "Optional",
+                  "hide": false
+                }
+              },
+              {
+                "name": "remote",
+                "usage": "--remote <REMOTE>",
+                "help": "Remote to synchronize with.",
+                "help_first_line": "Remote to synchronize with.",
+                "short": [],
+                "long": [
+                  "remote"
+                ],
+                "hide": false,
+                "global": false,
+                "arg": {
+                  "name": "REMOTE",
+                  "usage": "<REMOTE>",
+                  "required": true,
+                  "double_dash": "Optional",
+                  "hide": false
+                },
+                "default": [
+                  "origin"
+                ]
+              },
+              {
+                "name": "help",
+                "usage": "-h --help",
+                "help": "Print help",
+                "help_first_line": "Print help",
+                "short": [
+                  "h"
+                ],
+                "long": [
+                  "help"
+                ],
+                "hide": false,
+                "global": false,
+                "action": "help",
+                "builtin": true
+              }
+            ],
+            "mounts": [],
+            "unknown_flags": null,
+            "hide": false,
+            "args_override_self": true,
+            "help": "Validate, import, and publish a measurement artifact.",
+            "name": "publish",
+            "aliases": [],
+            "hidden_aliases": [],
+            "examples": [],
+            "headings": []
+          }
+        },
+        "args": [],
+        "flags": [
+          {
+            "name": "help",
+            "usage": "-h --help",
+            "help": "Print help",
+            "help_first_line": "Print help",
+            "short": [
+              "h"
+            ],
+            "long": [
+              "help"
+            ],
+            "hide": false,
+            "global": false,
+            "action": "help",
+            "builtin": true
+          }
+        ],
+        "mounts": [],
+        "unknown_flags": null,
+        "hide": false,
+        "subcommand_required": true,
+        "args_override_self": true,
+        "help": "Move measurements between a read-only job and a trusted publisher.",
+        "name": "artifact",
+        "aliases": [],
+        "hidden_aliases": [],
+        "examples": [],
+        "headings": []
+      },
       "init": {
         "full_cmd": [
           "init"
