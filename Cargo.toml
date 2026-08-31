@@ -3,7 +3,7 @@ members = ["crates/asset-picker"]
 
 [package]
 name = "tak-cli"
-version = "0.0.8"
+version = "0.0.9"
 edition = "2024"
 description = "Pre-v1 command-line benchmarking and performance tracking"
 keywords = ["benchmark", "performance", "cli", "git-notes"]
