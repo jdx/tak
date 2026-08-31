@@ -123,7 +123,7 @@ jobs:
     runs-on: [self-hosted, jdx-perf-v1]
     container:
       image: ghcr.io/jdx/perf-runner@sha256:1b44fc9f1c93fc1b7a2db56a1ef743bbf8a8df60035121d455c9834fe8001922
-      options: --cpuset-cpus 0-7 --user 1001:1001
+      options: --cpuset-cpus 0-7
     timeout-minutes: 40
     permissions:
       # Read only. This job builds and runs code from the pull request, so it
@@ -234,6 +234,12 @@ jobs:
           path: /tmp/tak-out
           retention-days: 1
           if-no-files-found: error
+
+      # Job containers run as root, while bootstrap-host.sh creates gha-runner
+      # as UID 1001. Hand the checkout back before the host cleanup hook runs.
+      - name: Restore runner ownership
+        if: always()
+        run: chown -R 1001:1001 "$GITHUB_WORKSPACE"
 
   # A separate job so the write token is never in scope while code from the
   # pull request is executing. This one checks out nothing and runs no project
