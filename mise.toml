@@ -21,13 +21,13 @@ run = "cargo build"
 # the benchmark subject without relying on a separately installed tak.
 [tasks.perf]
 description = "Build release mode and run the performance benchmarks"
-run = ["cargo build --release", "./target/release/tak run"]
+run = ["MBX_DISABLE=1 cargo build --release", "./target/release/tak run"]
 
 # Same measurement, appended to refs/notes/tak for this commit. Nothing leaves
 # the machine until `tak push`; the perf workflows are the publisher.
 [tasks."perf:record"]
 description = "Record the performance benchmarks in git notes"
-run = ["cargo build --release", "./target/release/tak run --record"]
+run = ["MBX_DISABLE=1 cargo build --release", "./target/release/tak run --record"]
 
 [tasks.test]
 description = "Run the test suite, including the cachegrind integration tests"
