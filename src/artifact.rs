@@ -35,6 +35,16 @@ fn artifact_parent(path: &Path) -> PathBuf {
         .to_path_buf()
 }
 
+/// Account for the trailing newline written after the JSON payload so every
+/// successfully exported file also passes the publisher's size check.
+fn ensure_export_size(payload_bytes: usize) -> Result<()> {
+    let file_bytes = payload_bytes as u64 + 1;
+    if file_bytes > MAX_ARTIFACT_BYTES {
+        bail!("artifact is {file_bytes} bytes; the limit is {MAX_ARTIFACT_BYTES}");
+    }
+    Ok(())
+}
+
 /// Export every local Tak record attached to `rev` as one bounded, versioned
 /// file suitable for an artifact upload.
 pub fn export(path: &Path, rev: &str) -> Result<(String, usize)> {
@@ -56,12 +66,7 @@ pub fn export(path: &Path, rev: &str) -> Result<(String, usize)> {
         records,
     };
     let bytes = serde_json::to_vec(&artifact)?;
-    if bytes.len() as u64 > MAX_ARTIFACT_BYTES {
-        bail!(
-            "artifact is {} bytes; the limit is {MAX_ARTIFACT_BYTES}",
-            bytes.len()
-        );
-    }
+    ensure_export_size(bytes.len())?;
 
     let parent = artifact_parent(path);
     fs::create_dir_all(&parent)
@@ -118,6 +123,13 @@ fn read(path: &Path) -> Result<MeasurementArtifact> {
         record
             .to_line()
             .context("artifact contains an invalid record")?;
+        if record
+            .metrics
+            .get("instructions")
+            .is_some_and(|instructions| *instructions <= 0.0)
+        {
+            bail!("artifact contains a non-positive instruction count");
+        }
     }
     Ok(artifact)
 }
@@ -178,5 +190,27 @@ mod tests {
             back.records[0].to_line().unwrap(),
             record().to_line().unwrap()
         );
+    }
+
+    #[test]
+    fn export_limit_includes_the_trailing_newline() {
+        assert!(ensure_export_size(MAX_ARTIFACT_BYTES as usize - 1).is_ok());
+        assert!(ensure_export_size(MAX_ARTIFACT_BYTES as usize).is_err());
+    }
+
+    #[test]
+    fn non_positive_instruction_counts_are_rejected() {
+        for instructions in [-1.0, 0.0] {
+            let mut invalid = record();
+            invalid.metrics.insert("instructions".into(), instructions);
+            let artifact = MeasurementArtifact {
+                v: ARTIFACT_VERSION,
+                commit: "0".repeat(40),
+                records: vec![invalid],
+            };
+            let file = tempfile::NamedTempFile::new().unwrap();
+            serde_json::to_writer(file.as_file(), &artifact).unwrap();
+            assert!(read(file.path()).is_err());
+        }
     }
 }
