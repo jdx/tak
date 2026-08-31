@@ -22,6 +22,10 @@ permissions:
   contents: read
   pull-requests: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
   cancel-in-progress: true
@@ -29,9 +33,51 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
-  TAK_RUNNER: jdx-perf-v1-ubuntu24.04-x64-tak-rust1.97.1
 
 jobs:
+  build:
+    name: Build with GitHub-hosted Rust
+    needs: authorize
+    if: needs.authorize.outputs.authorized == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      image_version: ${{ steps.toolchain.outputs.image_version }}
+      rust_version: ${{ steps.toolchain.outputs.rust_version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.authorize.outputs.head_sha }}
+          persist-credentials: false
+      - id: toolchain
+        name: Record the built-in toolchain
+        run: |
+          image_version=${ImageVersion:?GitHub-hosted ImageVersion is unavailable}
+          rust_version=$(rustc --version | awk '{print $2}')
+          [[ "$image_version" =~ ^[0-9]{8}\.[0-9]+\.[0-9]+$ ]]
+          [[ "$rust_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "image_version=$image_version" >> "$GITHUB_OUTPUT"
+          echo "rust_version=$rust_version" >> "$GITHUB_OUTPUT"
+      - name: Build without a shared cache
+        run: cargo build --release
+      - name: Package the binary and toolchain identity
+        run: |
+          mkdir -p /tmp/tak-build
+          install -m 0755 target/release/tak /tmp/tak-build/tak
+          {
+            rustc --version
+            cargo --version
+            echo "runner-image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+          } > /tmp/tak-build/build-info
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tak-perf-binary
+          path: /tmp/tak-build
+          retention-days: 1
+          if-no-files-found: error
+
   authorize:
     runs-on: ubuntu-latest
     outputs:
@@ -72,7 +118,7 @@ jobs:
 
   measure:
     name: Compare instruction counts
-    needs: authorize
+    needs: [authorize, build]
     if: needs.authorize.outputs.authorized == 'true'
     # Same runner class as perf.yml and perf-backfill.yml. Absolute counts shift
     # between machine types by more than a real regression does, so a comparison
@@ -87,6 +133,8 @@ jobs:
       # Read only. This job builds and runs code from the pull request, so it
       # must not hold a token that can write anything — see the `report` job.
       contents: read
+    env:
+      TAK_RUNNER: jdx-perf-v1-ubuntu24.04-x64-tak-gha${{ needs.build.outputs.image_version }}-rust${{ needs.build.outputs.rust_version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -101,13 +149,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # Compile inside the pinned job container. Restoring target/ could relabel
-      # a binary built on another runner class as a jdx-perf-v1 measurement.
-      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4.2.5
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          cache: false
-        env:
-          MISE_LOCKED: "1"
+          name: tak-perf-binary
+          path: /tmp/tak-build
+
+      - name: Install the measured binary
+        run: |
+          mkdir -p target/release
+          install -m 0755 /tmp/tak-build/tak target/release/tak
 
       - name: Runner metadata
         run: |
@@ -118,9 +168,7 @@ jobs:
             echo 'image: ghcr.io/jdx/perf-runner@sha256:1b44fc9f1c93fc1b7a2db56a1ef743bbf8a8df60035121d455c9834fe8001922'
             uname -a
             lscpu
-            mise --version
-            rustc --version
-            cargo --version
+            cat /tmp/tak-build/build-info
             valgrind --version
             for zone in /sys/class/thermal/thermal_zone*/temp; do
               [ -r "$zone" ] && printf '%s: %s\n' "$zone" "$(cat "$zone")"
@@ -134,9 +182,7 @@ jobs:
       # `--record` writes a git note locally and nothing more. There is no
       # `tak push` in this workflow and there should never be one.
       - name: Measure this pull request
-        run: |
-          cargo build --release
-          taskset -c 0-3 mise run perf:record
+        run: taskset -c 0-3 ./target/release/tak run --record
 
       - name: Find the base commit
         id: base
@@ -192,6 +238,12 @@ jobs:
           path: /tmp/tak-out
           retention-days: 1
           if-no-files-found: error
+
+      # Job containers run as root, while bootstrap-host.sh creates gha-runner
+      # as UID 1001. Hand the checkout back before the host cleanup hook runs.
+      - name: Restore runner ownership
+        if: always()
+        run: chown -R 1001:1001 "$GITHUB_WORKSPACE"
 
   # A separate job so the write token is never in scope while code from the
   # pull request is executing. This one checks out nothing and runs no project
