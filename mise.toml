@@ -5,8 +5,8 @@ mr-boxington = "1.3.0"
 usage = "6.6.0"
 # communique rewrites release bodies and Node builds the docs. Rust-only CI jobs
 # run mise-action with `install: false` and
-# dedicated jobs install only what they need. Rust itself comes from
-# rust-toolchain in CI and rustup locally.
+# dedicated jobs install only what they need. Rust comes from the runner in CI
+# and rustup locally.
 #
 # Resolved by mise.lock, not floating: 1.2.3 cleared a draft release's tag_name
 # while rewriting the body, and v0.0.3, v0.0.4 and v0.0.5 each shipped as an
