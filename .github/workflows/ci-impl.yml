@@ -31,18 +31,18 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: ./.github/actions/mbx
-        with:
-          backend: ${{ inputs.trusted && 'server' || 'github' }}
-          mirror-github-cache: "true"
-
       # The tasks live in mise.toml so that a laptop and this runner invoke the
       # same commands — the same reason tak.toml exists for benchmarks.
       # This job only runs Rust tasks. The docs and release jobs install the
       # Node/usage and communique tools they need separately.
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
-          install: false
+          cache: false
+          install_args: mr-boxington
+      - uses: ./.github/actions/mbx
+        with:
+          backend: ${{ inputs.trusted && 'server' || 'github' }}
+          mirror-github-cache: "true"
 
       # The whole premise of this project is that instruction counts are stable
       # enough to gate on. That path is a subprocess call, so it can only be
@@ -63,11 +63,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
       - uses: ./.github/actions/mbx
         with:
           backend: ${{ inputs.trusted && 'server' || 'github' }}
           mirror-github-cache: "true"
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
       - run: mise run docs:check
 
   # macOS has no usable cachegrind, so counters are expected to be absent here.
@@ -79,12 +79,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          cache: false
+          install_args: mr-boxington
       - uses: ./.github/actions/mbx
         with:
           backend: ${{ inputs.trusted && 'server' || 'github' }}
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
-        with:
-          install: false
       - run: mise run test
 
   # docker/Dockerfile is the documented way to get instruction counts on macOS
