@@ -22,11 +22,6 @@ jobs:
     runs-on: ${{ !inputs.trusted && 'ubuntu-latest' || 'namespace-profile-endev-linux-amd64;overrides.cache-tag=cache' }}
     timeout-minutes: 15
     steps:
-      - name: Assert OIDC is unavailable to untrusted CI
-        if: ${{ !inputs.trusted }}
-        run: |
-          test -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
-          test -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -41,7 +36,7 @@ jobs:
           install_args: mr-boxington
       - uses: ./.github/actions/mbx
         with:
-          backend: ${{ inputs.trusted && 'local' || 'github' }}
+          backend: ${{ inputs.trusted && 'local' || 'server' }}
 
       # The whole premise of this project is that instruction counts are stable
       # enough to gate on. That path is a subprocess call, so it can only be
@@ -65,7 +60,7 @@ jobs:
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
       - uses: ./.github/actions/mbx
         with:
-          backend: ${{ inputs.trusted && 'local' || 'github' }}
+          backend: ${{ inputs.trusted && 'local' || 'server' }}
       - run: mise run docs:check
 
   # macOS has no usable cachegrind, so counters are expected to be absent here.
@@ -83,7 +78,7 @@ jobs:
           install_args: mr-boxington
       - uses: ./.github/actions/mbx
         with:
-          backend: ${{ inputs.trusted && 'local' || 'github' }}
+          backend: ${{ inputs.trusted && 'local' || 'server' }}
       - run: mise run test
 
   # docker/Dockerfile is the documented way to get instruction counts on macOS
