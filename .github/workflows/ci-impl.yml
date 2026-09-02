@@ -41,7 +41,7 @@ jobs:
           install_args: mr-boxington
       - uses: ./.github/actions/mbx
         with:
-          backend: ${{ inputs.trusted && 'server' || 'github' }}
+          backend: ${{ inputs.trusted && 'local' || 'github' }}
           mirror-github-cache: "true"
 
       # The whole premise of this project is that instruction counts are stable
@@ -66,7 +66,7 @@ jobs:
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
       - uses: ./.github/actions/mbx
         with:
-          backend: ${{ inputs.trusted && 'server' || 'github' }}
+          backend: ${{ inputs.trusted && 'local' || 'github' }}
           mirror-github-cache: "true"
       - run: mise run docs:check
 
@@ -85,7 +85,7 @@ jobs:
           install_args: mr-boxington
       - uses: ./.github/actions/mbx
         with:
-          backend: ${{ inputs.trusted && 'server' || 'github' }}
+          backend: ${{ inputs.trusted && 'local' || 'github' }}
       - run: mise run test
 
   # docker/Dockerfile is the documented way to get instruction counts on macOS
