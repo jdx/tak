@@ -42,7 +42,6 @@ jobs:
       - uses: ./.github/actions/mbx
         with:
           backend: ${{ inputs.trusted && 'local' || 'github' }}
-          mirror-github-cache: "true"
 
       # The whole premise of this project is that instruction counts are stable
       # enough to gate on. That path is a subprocess call, so it can only be
@@ -67,7 +66,6 @@ jobs:
       - uses: ./.github/actions/mbx
         with:
           backend: ${{ inputs.trusted && 'local' || 'github' }}
-          mirror-github-cache: "true"
       - run: mise run docs:check
 
   # macOS has no usable cachegrind, so counters are expected to be absent here.
