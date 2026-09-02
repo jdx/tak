@@ -81,13 +81,13 @@ jobs:
     # that wanders between runners is unreadable.
     runs-on: [self-hosted, jdx-perf-v1]
     container:
-      image: ghcr.io/jdx/perf-runner@sha256:1b44fc9f1c93fc1b7a2db56a1ef743bbf8a8df60035121d455c9834fe8001922
+      image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68
       options: --cpuset-cpus 0-7
     timeout-minutes: 30
     permissions:
       contents: read
     env:
-      TAK_RUNNER: jdx-perf-v1-ubuntu24.04-x64-tak-gha${{ needs.build.outputs.image_version }}-rust${{ needs.build.outputs.rust_version }}
+      TAK_RUNNER: jdx-perf-v1-ubuntu24.04-x64-tak-gha${{ needs.build.outputs.image_version }}-rust${{ needs.build.outputs.rust_version }}-img5263c143
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -112,8 +112,8 @@ jobs:
           {
             echo '### Runner metadata'
             echo '```text'
-            echo 'environment-revision: perf-runner@78e4231'
-            echo 'image: ghcr.io/jdx/perf-runner@sha256:1b44fc9f1c93fc1b7a2db56a1ef743bbf8a8df60035121d455c9834fe8001922'
+            echo 'environment-revision: perf-runner@fd66d9b'
+            echo 'image: ghcr.io/jdx/perf-runner@sha256:5263c143b12ce2234e7b0b21d3d6501c2ed05837b42937d0eaeaa191cd5c8e68'
             uname -a
             lscpu
             cat /tmp/tak-build/build-info
