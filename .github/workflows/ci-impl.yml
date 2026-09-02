@@ -19,7 +19,7 @@ env:
 # review.
 jobs:
   test:
-    runs-on: ${{ !inputs.trusted && 'ubuntu-latest' || 'namespace-profile-endev-linux-amd64' }}
+    runs-on: ${{ !inputs.trusted && 'ubuntu-latest' || 'namespace-profile-endev-linux-amd64;overrides.cache-tag=cache' }}
     timeout-minutes: 15
     steps:
       - name: Assert OIDC is unavailable to untrusted CI
@@ -57,7 +57,7 @@ jobs:
       - run: mise run test
 
   docs:
-    runs-on: ${{ !inputs.trusted && 'ubuntu-latest' || 'namespace-profile-endev-linux-amd64' }}
+    runs-on: ${{ !inputs.trusted && 'ubuntu-latest' || 'namespace-profile-endev-linux-amd64;overrides.cache-tag=cache' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -73,7 +73,7 @@ jobs:
   # macOS has no usable cachegrind, so counters are expected to be absent here.
   # This job asserts the degradation path rather than the measurement path.
   test-macos:
-    runs-on: ${{ !inputs.trusted && 'macos-latest' || 'namespace-profile-endev-macos-arm64' }}
+    runs-on: ${{ !inputs.trusted && 'macos-latest' || 'namespace-profile-endev-macos-arm64;overrides.cache-tag=cache' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
