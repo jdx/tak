@@ -49,14 +49,11 @@ export default defineConfig({
         content: "Deterministic CLI benchmarking with instruction counts",
       },
     ],
-    [
-      "meta",
-      {
-        property: "og:image",
-        content: "https://tak.jdx.dev/android-chrome-512x512.png",
-      },
-    ],
-    ["meta", { name: "twitter:card", content: "summary" }],
+    ["meta", { property: "og:image", content: "https://tak.jdx.dev/og.png" }],
+    ["meta", { property: "og:image:width", content: "1200" }],
+    ["meta", { property: "og:image:height", content: "630" }],
+    ["meta", { name: "twitter:card", content: "summary_large_image" }],
+    ["meta", { name: "twitter:image", content: "https://tak.jdx.dev/og.png" }],
   ],
 
   themeConfig: {
