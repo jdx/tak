@@ -12,6 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  MBX_DISABLE: "1"
   CARGO_TERM_COLOR: always
 
 # Actions are pinned to full commit SHAs. A mutable tag like @v2 or @stable can

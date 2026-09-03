@@ -1,6 +1,7 @@
 min_version = "2026.8.16"
 
 [tools]
+mr-boxington = "1.5.0"
 usage = "6.6.1"
 # communique rewrites release bodies and Node builds the docs. Rust-only CI jobs
 # run mise-action with `install: false` and
@@ -13,6 +14,10 @@ usage = "6.6.1"
 communique = "latest"
 node = "24"
 
+[wrappers.cargo]
+command = "mbx"
+env = { MBX_CARGO_SHIM_MODE = "1" }
+
 [tasks.build]
 description = "Build the debug binary"
 run = "cargo build"
@@ -21,6 +26,7 @@ run = "cargo build"
 # is the measuring instrument, so this exercises the same source revision as
 # the benchmark subject without relying on a separately installed tak.
 [tasks."perf:build"]
+env = { MBX_DISABLE = "1" }
 run = "cargo build --release"
 
 [tasks.perf]

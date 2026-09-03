@@ -31,6 +31,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  MBX_DISABLE: "1"
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
 
