@@ -12,6 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  MBX_DISABLE: "1"
   CARGO_TERM_COLOR: always
 
 # Actions are pinned to full commit SHAs. A mutable tag like @v2 or @stable can
@@ -32,11 +33,11 @@ jobs:
       # Node/usage and communique tools they need separately.
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
+          install: false
           cache: false
-          install_args: mr-boxington
-      - uses: ./.github/actions/mbx
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
-          backend: ${{ inputs.trusted && 'local' || 'server' }}
+          save-if: ${{ inputs.trusted && github.ref == 'refs/heads/main' }}
 
       # The whole premise of this project is that instruction counts are stable
       # enough to gate on. That path is a subprocess call, so it can only be
@@ -58,9 +59,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
-      - uses: ./.github/actions/mbx
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
-          backend: ${{ inputs.trusted && 'local' || 'server' }}
+          save-if: ${{ inputs.trusted && github.ref == 'refs/heads/main' }}
       - run: mise run docs:check
 
   # macOS has no usable cachegrind, so counters are expected to be absent here.
@@ -74,11 +75,11 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
+          install: false
           cache: false
-          install_args: mr-boxington
-      - uses: ./.github/actions/mbx
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
-          backend: ${{ inputs.trusted && 'local' || 'server' }}
+          save-if: ${{ inputs.trusted && github.ref == 'refs/heads/main' }}
       - run: mise run test
 
   # docker/Dockerfile is the documented way to get instruction counts on macOS
