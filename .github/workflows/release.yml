@@ -127,15 +127,18 @@ jobs:
       # keylessly with this job's identity. `tak backfill` picking an asset
       # can check it against jdx/tak's identity with no key to distribute.
       # See https://packslip.dev.
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
-        with:
-          install: false
-          cache: false
       - name: Install completion syntax checkers
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y zsh fish
-          mise install github:PowerShell/PowerShell@7.5.4
+          if [[ -f /etc/apt/apt-mirrors.txt ]]; then
+            sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/apt-mirrors.txt
+          fi
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y zsh fish
+          # Hosted runners include PowerShell; Namespace images have its signed apt repository.
+          if ! command -v pwsh >/dev/null 2>&1; then
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y powershell
+          fi
       - name: Publish the CLI specification and completions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -162,7 +165,7 @@ jobs:
             if ($parseErrors.Count) { $parseErrors | Write-Error; exit 1 }
           }
           POWERSHELL
-          mise exec github:PowerShell/PowerShell@7.5.4 -- pwsh -NoProfile -File completion-syntax-check.ps1
+          pwsh -NoProfile -NonInteractive -File completion-syntax-check.ps1
           gh release upload "$TAG" tak.usage.kdl tak.bash tak.zsh tak.fish tak.powershell --repo "$REPO" --clobber
       - uses: jdx/packslip@a0d434ad57571c62dbd0ab5095b4eff607a71fd3 # v1.1.1
         with:
