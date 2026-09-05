@@ -18,6 +18,12 @@ flag --runner help="Machine class to record under. Overrides the derived name." 
 }
 flag "-h --help" help="Print help" action=help builtin=#true
 flag "-V --version" help="Print version" action=version builtin=#true
+cmd completion help="Generate a self-contained shell completion script" {
+    flag "-h --help" help="Print help" action=help builtin=#true
+    arg <SHELL> help="Shell to generate completions for" {
+        choices bash elvish zsh fish nu nushell powershell pwsh
+    }
+}
 cmd run help="Benchmark a command, or everything declared in tak.toml." {
     flag --bench help="Name to record this measurement under. With no command, selects a single benchmark from tak.toml instead of running all of them." {
         arg <BENCH>
