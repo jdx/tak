@@ -127,7 +127,7 @@ jobs:
       # keylessly with this job's identity. `tak backfill` picking an asset
       # can check it against jdx/tak's identity with no key to distribute.
       # See https://packslip.dev.
-      - uses: jdx/packslip@433c0c0f033e64c22f12433471768c255ef2bd93 # v0.3.0
+      - uses: jdx/packslip@a6eddff2d884891faa2efbec374b48e7053df2c4 # v1.0.1
         with:
           tag: ${{ inputs.tag }}
           artifacts: release-assets/tak-*.tar.gz release-assets/tak-*.zip
