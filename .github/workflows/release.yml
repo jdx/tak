@@ -127,11 +127,7 @@ jobs:
       # keylessly with this job's identity. `tak backfill` picking an asset
       # can check it against jdx/tak's identity with no key to distribute.
       # See https://packslip.dev.
-      - uses: jdx/packslip@a6eddff2d884891faa2efbec374b48e7053df2c4 # v1.0.1
-        # `gh release upload` inside the action has no checkout to infer the
-        # repository from; drop once jdx/packslip#71 ships in a release.
-        env:
-          GH_REPO: ${{ github.repository }}
+      - uses: jdx/packslip@5c1cced7cfa661140dbc972a0de55b2b6bd81522 # v1.0.2
         with:
           tag: ${{ inputs.tag }}
           artifacts: release-assets/tak-*.tar.gz release-assets/tak-*.zip
