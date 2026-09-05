@@ -16,6 +16,7 @@ use tak_cli::record::{Record, SCHEMA_VERSION};
 use tak_cli::settings::{CliLayer, EnvLayer, Settings, TakConfigLayer, config_source};
 
 #[derive(Cli)]
+#[usage(completion = true)]
 #[usage(
     name = "tak",
     bin = "tak",
@@ -56,6 +57,12 @@ struct Cli {
 
 #[derive(Subcommands)]
 enum Cmd {
+    /// Generate a self-contained shell completion script
+    Completion {
+        /// Shell: bash, zsh, fish, or powershell
+        #[usage(arg)]
+        shell: String,
+    },
     /// Benchmark a command, or everything declared in tak.toml.
     Run {
         /// Name to record this measurement under. With no command, selects a
@@ -821,6 +828,12 @@ fn main() -> Result<()> {
     // command line contributes, and what was left off does not.
     let (cli, overrides) = Cli::parse_with_settings();
     match cli.cmd {
+        Cmd::Completion { shell } => {
+            let shell = usage_rs::complete::Shell::from_name(&shell)
+                .ok_or_else(|| anyhow::anyhow!("unsupported shell: {shell}"))?;
+            print!("{}", Cli::completion_script(shell));
+            Ok(())
+        }
         Cmd::Run {
             bench,
             runs,
