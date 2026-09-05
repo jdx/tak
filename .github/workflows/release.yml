@@ -128,6 +128,10 @@ jobs:
       # can check it against jdx/tak's identity with no key to distribute.
       # See https://packslip.dev.
       - uses: jdx/packslip@a6eddff2d884891faa2efbec374b48e7053df2c4 # v1.0.1
+        # `gh release upload` inside the action has no checkout to infer the
+        # repository from; drop once jdx/packslip#71 ships in a release.
+        env:
+          GH_REPO: ${{ github.repository }}
         with:
           tag: ${{ inputs.tag }}
           artifacts: release-assets/tak-*.tar.gz release-assets/tak-*.zip
