@@ -59,8 +59,11 @@ struct Cli {
 enum Cmd {
     /// Generate a self-contained shell completion script
     Completion {
-        /// Shell: bash, zsh, fish, or powershell
-        #[usage(arg)]
+        /// Shell to generate completions for
+        #[usage(
+            arg,
+            choices("bash", "elvish", "zsh", "fish", "nu", "nushell", "powershell", "pwsh")
+        )]
         shell: String,
     },
     /// Benchmark a command, or everything declared in tak.toml.

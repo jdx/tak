@@ -154,7 +154,7 @@ jobs:
           bash -n tak.bash
           zsh -n tak.zsh
           fish --no-execute tak.fish
-          mise exec github:PowerShell/PowerShell@7.5.4 -- pwsh -NoProfile -Command - <<'POWERSHELL'
+          cat > completion-syntax-check.ps1 <<'POWERSHELL'
           $ErrorActionPreference = 'Stop'
           foreach ($script in Get-ChildItem -LiteralPath "." -Filter '*.powershell') {
             $parseErrors = $null
@@ -162,6 +162,7 @@ jobs:
             if ($parseErrors.Count) { $parseErrors | Write-Error; exit 1 }
           }
           POWERSHELL
+          mise exec github:PowerShell/PowerShell@7.5.4 -- pwsh -NoProfile -File completion-syntax-check.ps1
           gh release upload "$TAG" tak.usage.kdl tak.bash tak.zsh tak.fish tak.powershell --repo "$REPO" --clobber
       - uses: jdx/packslip@a0d434ad57571c62dbd0ab5095b4eff607a71fd3 # v1.1.1
         with:

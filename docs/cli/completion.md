@@ -6,7 +6,9 @@
 Generate a self-contained shell completion script
 
 ## Arguments
-- **`<SHELL>`** — Shell: bash, zsh, fish, or powershell
+- **`<SHELL>`** — Shell to generate completions for
+
+  **Choices:** `bash`, `elvish`, `zsh`, `fish`, `nu`, `nushell`, `powershell`, `pwsh`
 
 ## Flags
 - **`-h --help`** — Print help

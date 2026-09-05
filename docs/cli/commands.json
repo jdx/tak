@@ -15,11 +15,23 @@
           {
             "name": "SHELL",
             "usage": "<SHELL>",
-            "help": "Shell: bash, zsh, fish, or powershell",
-            "help_first_line": "Shell: bash, zsh, fish, or powershell",
+            "help": "Shell to generate completions for",
+            "help_first_line": "Shell to generate completions for",
             "required": true,
             "double_dash": "Optional",
-            "hide": false
+            "hide": false,
+            "choices": {
+              "choices": [
+                "bash",
+                "elvish",
+                "zsh",
+                "fish",
+                "nu",
+                "nushell",
+                "powershell",
+                "pwsh"
+              ]
+            }
           }
         ],
         "flags": [
