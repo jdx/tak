@@ -17,7 +17,7 @@
 # Measuring a *host-built* binary works too, as long as the container's glibc is
 # at least as new as the one it was linked against.
 
-FROM rust:1-slim-trixie@sha256:5c6f46a6e4472ab1ca7ba7d494e6677f2f219ebc02f32025d3986f057635ec9c AS build
+FROM rust:1-slim-trixie@sha256:17d1ba895198f9934c6314ec5346a0d5115372f3243390c3d731e242f35c2f27 AS build
 WORKDIR /src
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates \
