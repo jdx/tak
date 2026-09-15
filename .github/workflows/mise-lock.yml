@@ -1,0 +1,35 @@
+name: mise-lock
+
+# Renovate's mise manager updates mise.toml but leaves mise.lock stale, so every
+# job that lets mise-action install tools fails on `mise install --locked` with
+# "<tool>@<version> is not in the lockfile" — which is what broke #112. The
+# hosted Mend app this org uses does not run postUpgradeTasks, so the
+# regeneration has to happen here rather than in Renovate's own config. See
+# jdx/renovate-config for the workflow implementation.
+
+on:
+  push:
+    branches: ["renovate/**"]
+
+permissions: {}
+
+jobs:
+  mise-lock:
+    permissions:
+      # Pushes the regenerated lockfile back onto the Renovate branch. The
+      # shared workflow gates itself on the sender being renovate[bot], so our
+      # own fix-up push cannot re-enter it.
+      contents: write # commit mise.lock and the regenerated CLI reference
+    uses: jdx/renovate-config/.github/workflows/mise-lock.yml@653969079190b3aa7969d3896b8da3bd08cf807f # main
+    with:
+      # docs:check depends on render:check, which fails when the generated CLI
+      # reference is stale. `usage generate` output tracks the usage version, so
+      # a bump to it has to regenerate these in the same commit — otherwise the
+      # lockfile fix just trades one red check for another.
+      post_update_task: render
+      post_update_paths: |
+        tak.usage.kdl
+        docs/cli
+    secrets:
+      MISE_LOCK_APP_ID: ${{ secrets.MISE_LOCK_APP_ID }}
+      MISE_LOCK_APP_PRIVATE_KEY: ${{ secrets.MISE_LOCK_APP_PRIVATE_KEY }}
