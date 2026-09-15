@@ -1,7 +1,7 @@
 min_version = "2026.8.16"
 
 [tools]
-mr-boxington = "1.8.3"
+mr-boxington = "v1.10.0"
 usage = "6.8.0"
 # communique rewrites release bodies and Node builds the docs. Rust-only CI jobs
 # run mise-action with `install: false` and
