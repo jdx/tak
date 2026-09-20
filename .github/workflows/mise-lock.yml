@@ -20,7 +20,7 @@ jobs:
       # shared workflow gates itself on the sender being renovate[bot], so our
       # own fix-up push cannot re-enter it.
       contents: write # commit mise.lock and the regenerated CLI reference
-    uses: jdx/renovate-config/.github/workflows/mise-lock.yml@653969079190b3aa7969d3896b8da3bd08cf807f # main
+    uses: jdx/renovate-config/.github/workflows/mise-lock.yml@e922356370564d50ee32019effdf4739973cf202 # main
     with:
       # docs:check depends on render:check, which fails when the generated CLI
       # reference is stale. `usage generate` output tracks the usage version, so
