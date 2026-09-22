@@ -2,7 +2,7 @@ min_version = "2026.9.2"
 
 [tools]
 mr-boxington = "1.14.0"
-usage = "6.9.1"
+usage = "6.11.0"
 # communique rewrites release bodies and Node builds the docs. Rust-only CI jobs
 # run mise-action with `install: false` and
 # dedicated jobs install only what they need. Rust comes from the runner in CI
