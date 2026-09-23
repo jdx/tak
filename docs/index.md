@@ -1,10 +1,12 @@
 ---
 layout: home
+title: Track command-line performance across releases
+description: Define CLI benchmarks in tak.toml and store results in Git. Measure elapsed time and, where Valgrind is available, instruction counts. Experimental pre-v1 software.
 
 hero:
   name: tak
-  text: A tachometer for code
-  tagline: Pre-v1 CLI performance tracking with retired instruction counts.
+  text: Track command-line performance across releases
+  tagline: Define benchmarks in tak.toml and keep their results in Git. tak records elapsed time and, where Valgrind is available, instruction counts. It is experimental and may change incompatibly between releases.
   image:
     light: /logo-light.svg
     dark: /logo-dark.svg
@@ -18,13 +20,13 @@ hero:
       link: /cli/
 
 features:
-  - title: Deterministic first
-    details: Instruction counts vary by roughly 0.02% between runs, making small regressions visible where wall time cannot.
+  - title: Instruction counts
+    details: With Valgrind, tak counts the instructions a command executes. The methodology documents the measured variation, workloads, and limits of using these counts to detect regressions.
     link: /guide/methodology
-  - title: Timing is context, not a gate
+  - title: Elapsed time
     details: Wall-clock measurements are recorded, but contention makes them too noisy for a tight CI threshold.
     link: /guide/methodology#two-tiers-of-metrics
-  - title: History stays in git
+  - title: Benchmark history
     details: Measurements are JSON lines in refs/notes/tak, with no database, account, or hosted service.
     link: /guide/ci
 ---
