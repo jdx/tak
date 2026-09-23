@@ -194,8 +194,8 @@ requirements.
 
 ## GitHub interactions
 
-Opening pull requests and discussions is fine. Issues are disabled on this repository, as on
-every jdx project — discussions are where that traffic goes.
+Opening pull requests, issues, and discussions is fine. Report bugs as issues; use discussions
+for questions and ideas.
 
 PR titles follow the same conventional-commit format as commits. Do not prefix them with agent
 or tool labels such as `[claude]` or `[codex]`.
