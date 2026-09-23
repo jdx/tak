@@ -1,8 +1,8 @@
 min_version = "2026.9.2"
 
 [tools]
-mr-boxington = "1.14.0"
-usage = "6.11.0"
+mr-boxington = { version = "latest", minimum_release_age = "0s" }
+usage = { version = "latest", minimum_release_age = "0s" }
 # communique rewrites release bodies and Node builds the docs. Rust-only CI jobs
 # run mise-action with `install: false` and
 # dedicated jobs install only what they need. Rust comes from the runner in CI
@@ -11,7 +11,7 @@ usage = "6.11.0"
 # Resolved by mise.lock, not floating: 1.2.3 cleared a draft release's tag_name
 # while rewriting the body, and v0.0.3, v0.0.4 and v0.0.5 each shipped as an
 # untagged draft because of it. Bump with `mise lock`, deliberately.
-communique = "latest"
+communique = { version = "latest", minimum_release_age = "0s" }
 node = "24"
 
 [wrappers.cargo]
