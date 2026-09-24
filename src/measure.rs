@@ -995,7 +995,8 @@ mod tests {
             check: Some(vec![
                 "/bin/sh".into(),
                 "-c".into(),
-                "echo check >> checked; test $(( $(wc -l < n) % 2 )) = 1 || { echo \"run $(wc -l < n) is even\" >&2; exit 1; }".into(),
+                // Arithmetic strips the padding macOS `wc -l` puts before the count.
+                "echo check >> checked; runs=$(( $(wc -l < n) )); test $(( runs % 2 )) = 1 || { echo \"run $runs is even\" >&2; exit 1; }".into(),
             ]),
             dir: Some(dir.to_path_buf()),
             env: BTreeMap::new(),
