@@ -168,6 +168,11 @@ pub fn render(mut s: Subject, bench: &str, env: &BTreeMap<String, String>) -> Re
             *a = one(&ctx, "check", a)?;
         }
     }
+    if let Some(version) = &mut s.version_cmd {
+        for a in version {
+            *a = one(&ctx, "version_cmd", a)?;
+        }
+    }
     if let Some(dir) = &mut s.dir {
         let text = dir.to_string_lossy().into_owned();
         *dir = one(&ctx, "dir", &text)?.into();
@@ -232,6 +237,19 @@ mod tests {
 
     /// An unset variable is an error before anything runs, not an empty
     /// string that sends a command to the wrong path.
+    #[test]
+    fn version_cmd_is_rendered() {
+        let s = subject(
+            r#"
+            [bench.b.subject.aube]
+            cmd = ["aube", "install"]
+            version_cmd = ["{{ env.AUBE_BIN }}", "--version"]
+            "#,
+        );
+        let r = render(s, "b", &env(&[("AUBE_BIN", "/opt/aube")])).unwrap();
+        assert_eq!(r.version_cmd.unwrap(), ["/opt/aube", "--version"]);
+    }
+
     #[test]
     fn an_undefined_variable_is_an_error() {
         let s = subject("[bench.b]\ncmd = [\"{{ env.NOT_SET_ANYWHERE }}\"]");

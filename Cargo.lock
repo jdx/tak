@@ -324,12 +324,14 @@ dependencies = [
  "expr-lang",
  "fastrand",
  "indexmap",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
  "tera",
  "toml",
  "usage-rs",
+ "windows-sys",
 ]
 
 [[package]]

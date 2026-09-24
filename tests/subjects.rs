@@ -554,6 +554,223 @@ fn the_export_records_version_seed_and_runner() {
     assert_eq!(json["results"].as_array().unwrap().len(), 1);
 }
 
+/// The export says what the run was measured on, and which version of each
+/// subject: a failing `version_cmd` costs the label, not the measurement.
+#[test]
+fn the_export_records_the_machine_and_subject_versions() {
+    let p = Project::new(
+        "export-versions",
+        r#"
+[defaults]
+runs = 1
+warmup = 0
+version_cmd = ["sh", "-c", "echo {{ subject }} $TOOL_VERSION; echo licence banner"]
+env = { TOOL_VERSION = "1.2.3" }
+
+[subject.good]
+cmd = ["true"]
+
+[subject.broken]
+cmd = ["true"]
+version_cmd = ["sh", "-c", "echo no such flag >&2; exit 2"]
+
+[bench.cmp]
+subjects = ["good", "broken"]
+
+"#,
+    );
+    let out = p.run(&["--no-progress", "--export-json", "r.json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("cmp (broken): version_cmd failed")
+            && stderr(&out).contains("no such flag"),
+        "{}",
+        stderr(&out)
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    let results = json["results"].as_array().unwrap();
+    let by = |n: &str| results.iter().find(|r| r["subject"] == n).unwrap();
+    assert_eq!(
+        by("good")["version"],
+        "good 1.2.3",
+        "first line, subject env"
+    );
+    assert!(by("broken")["version"].is_null(), "failed, still measured");
+
+    let m = &json["machine"];
+    assert_eq!(m["os"], std::env::consts::OS);
+    assert_eq!(m["arch"], std::env::consts::ARCH);
+    assert!(m["cpus"].as_u64().unwrap() >= 1, "{m}");
+    for key in ["os_version", "kernel", "cpu", "memory_bytes"] {
+        assert!(m.get(key).is_some(), "{key} present, even if null: {m}");
+    }
+}
+
+/// `version_cmd` runs after `setup`, which may be what creates the program,
+/// and before any sample.
+#[test]
+fn version_cmd_runs_after_setup() {
+    let p = Project::new(
+        "version-after-setup",
+        r#"
+[bench.cmp.subject.built]
+setup = ["sh", "-c", "printf '#!/bin/sh\necho built 4.5.6\n' > tool && chmod +x tool && echo setup >> log"]
+version_cmd = ["sh", "-c", "echo version >> log; ./tool"]
+cmd = ["sh", "-c", "echo run >> log"]
+runs = 1
+warmup = 1
+"#,
+    );
+    let out = p.run(&["--no-progress", "--export-json", "r.json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(p.log(), ["setup", "version", "run", "run"]);
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    assert_eq!(json["results"][0]["version"], "built 4.5.6");
+}
+
+/// Ctrl-C while a `version_cmd` hangs stops what it started, not just tak:
+/// the command runs in its own process group, which the terminal's signal
+/// would otherwise never reach.
+#[test]
+fn an_interrupt_during_version_cmd_stops_its_process_group() {
+    use std::os::unix::process::ExitStatusExt;
+    let p = Project::new(
+        "version-sigint",
+        r#"
+[bench.one]
+cmd = ["true"]
+version_cmd = ["sh", "-c", "sleep 30 & echo $! > sleep.pid; wait"]
+runs = 1
+warmup = 0
+"#,
+    );
+    let mut tak = Command::new(env!("CARGO_BIN_EXE_tak"))
+        .args(["run", "--no-progress", "--no-counters"])
+        .current_dir(&p.dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pidfile = p.path("sleep.pid");
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let pid = loop {
+        if let Some(pid) = std::fs::read_to_string(&pidfile)
+            .ok()
+            .filter(|t| t.ends_with('\n'))
+        {
+            break pid.trim().to_string();
+        }
+        assert!(
+            std::time::Instant::now() < until,
+            "version_cmd never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    // SAFETY: sends a signal to the tak we spawned.
+    unsafe { libc::kill(tak.id() as libc::pid_t, libc::SIGINT) };
+    let status = tak.wait().unwrap();
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGINT),
+        "tak still stops as it would"
+    );
+
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while running(&pid) && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(!running(&pid), "the version_cmd's sleep {pid} outlived tak");
+}
+
+/// Whether `pid` is still running. A zombie is not: its parent was killed
+/// with it, and where PID 1 does not reap orphans it stays one.
+fn running(pid: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        let state = stat
+            .rfind(')')
+            .and_then(|i| stat[i + 1..].trim_start().chars().next());
+        !matches!(state, None | Some('Z' | 'X' | 'x'))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let Ok(out) = Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .stderr(std::process::Stdio::null())
+            .output()
+        else {
+            return false;
+        };
+        let stat = String::from_utf8_lossy(&out.stdout);
+        let stat = stat.trim();
+        out.status.success() && !stat.is_empty() && !stat.starts_with('Z')
+    }
+}
+
+/// A subject without `version_cmd` has no `version` key at all, so a
+/// hyperfine consumer sees nothing new.
+#[test]
+fn a_subject_without_version_cmd_exports_no_version() {
+    let p = Project::new(
+        "export-no-version",
+        "[bench.one]\ncmd = [\"true\"]\nruns = 1\nwarmup = 0\n",
+    );
+    let out = p.run(&["--no-progress", "--no-counters", "--export-json", "r.json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    assert!(json["results"][0].get("version").is_none(), "{json}");
+}
+
+/// `cpus` is what the run could use, not what the machine has: a benchmark
+/// pinned to one CPU with taskset says so.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_exported_cpu_count_follows_the_affinity_mask() {
+    if Command::new("taskset").arg("-V").output().is_err() {
+        eprintln!("taskset not found; skipping");
+        return;
+    }
+    // A CPU this process may run on: CPU 0 need not be in a runner's or
+    // container's allowed set, and pinning to one outside it fails.
+    let Some(cpu) = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .find_map(|l| l.strip_prefix("Cpus_allowed_list:"))
+                .and_then(|v| {
+                    v.trim()
+                        .split([',', '-'])
+                        .next()
+                        .and_then(|n| n.trim().parse::<u32>().ok())
+                })
+        })
+    else {
+        eprintln!("no allowed CPU found in /proc/self/status; skipping");
+        return;
+    };
+    let cpu = cpu.to_string();
+    let p = Project::new(
+        "export-affinity",
+        "[bench.one]\ncmd = [\"true\"]\nruns = 1\nwarmup = 0\n",
+    );
+    let out = Command::new("taskset")
+        .args(["-c", &cpu, env!("CARGO_BIN_EXE_tak"), "run"])
+        .args(["--no-progress", "--no-counters", "--export-json", "r.json"])
+        .current_dir(&p.dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    assert_eq!(json["machine"]["cpus"], 1);
+}
+
 /// `when` leaves a subject or benchmark out before it is rendered, says so,
 /// and refuses a --subject that its own `when` switches off.
 #[test]

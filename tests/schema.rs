@@ -32,6 +32,7 @@ ok_exit_codes = [0]
 prepare = ["true"]
 setup = ["true"]
 check = ["true"]
+version_cmd = ["true", "--version"]
 dir = "."
 env = { A = "1" }
 vars = { v = "x" }
@@ -49,6 +50,7 @@ ok_exit_codes = [0, 1]
 prepare = "true"
 setup = "true"
 check = "true"
+version_cmd = "true --version"
 dir = "."
 env = { B = "2" }
 vars = { w = "y" }
@@ -65,6 +67,7 @@ ok_exit_codes = [1]
 prepare = ["true"]
 setup = "true"
 check = ["true"]
+version_cmd = ["true"]
 dir = "."
 env = { C = "3" }
 vars = { u = "z" }
