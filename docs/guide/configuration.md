@@ -61,6 +61,30 @@ the measurement. `dir` is relative to `tak.toml` and only sets the working direc
 the ones in `env.deny`, so a variable written here reaches the command even when it is denied
 by default.
 
+## Accepting other exit codes
+
+tak drops a subject when its command exits with anything but 0, because a failed run usually
+didn't do the work being measured. Some programs exit non-zero by design: pre-commit exits 1
+whenever a hook modifies files, linters and test runners exit 1 when they find problems, and
+`grep` exits 1 when nothing matches. List the codes that count as success with `ok_exit_codes`:
+
+```toml
+[bench.pre-commit]
+cmd = ["pre-commit", "run", "--all-files"]
+prepare = ["git", "checkout", "--", "."]
+ok_exit_codes = [0, 1]   # 1: a hook modified files, which is the case being measured
+```
+
+- The default is `[0]`. A list replaces the default rather than adding to it, so leave 0 out to
+  require a non-zero code, such as `[1]` for a `grep` that must not match.
+- It applies to warmups, timed samples and the instruction-count run under valgrind. Any other
+  code still drops the subject, and so does a command killed by a signal, whatever the list
+  holds.
+- `prepare` must still exit 0. A reset that failed would leave every later sample starting from
+  the wrong state.
+- `--export-json` records each sample's real exit code in `exit_codes`.
+- Codes are 0 to 255, and the list can't be empty.
+
 ## Comparing several programs
 
 To compare programs against each other, declare them as subjects of one benchmark instead of
@@ -87,7 +111,8 @@ tak interleaves the samples: every round takes one sample of each subject in a f
 order, rather than every sample of one subject and then the next. See
 [methodology](/guide/methodology#comparing-programs) for why.
 
-- Subjects inherit the benchmark's `runs`, `warmup`, `prepare`, `dir` and `env`. A subject's
+- Subjects inherit the benchmark's `runs`, `warmup`, `prepare`, `dir`, `env` and
+  `ok_exit_codes`. A subject's
   own `prepare` replaces the benchmark's, and its `env` entries override matching keys.
 - A subject with fewer `runs` than the others is spread evenly across the run.
 - Each subject is recorded as its own series, with the subject name as the tool. Instruction
@@ -192,7 +217,7 @@ Settings stack from least to most specific: `[defaults]`, then the benchmark, th
 shared `[subject.NAME]`, then the benchmark's own `[bench.B.subject.NAME]`. Each layer's
 setting replaces the one before, except `env` and `vars`, which merge key by key. `[defaults]`
 takes every benchmark setting (`runs`, `warmup`, `budget`, `min_runs`, `max_runs`,
-`prepare`, `dir`, `env`, `vars`). It is a separate table because `[env]` already holds
+`ok_exit_codes`, `prepare`, `dir`, `env`, `vars`). It is a separate table because `[env]` already holds
 `env.deny` and `env.allow`.
 
 ## Templates

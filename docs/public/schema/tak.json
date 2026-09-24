@@ -126,6 +126,17 @@
         "type": "integer",
         "minimum": 1
       },
+      "ok_exit_codes": {
+        "description": "Exit codes that count as a successful sample, timed or warmup, and under valgrind. Default [0]. A death by signal always fails, and prepare must still exit 0.",
+        "type": "array",
+        "items": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "minItems": 1,
+        "uniqueItems": true
+      },
       "prepare": {
         "description": "Untimed command run before every sample, warmups included.",
         "$ref": "#/definitions/cmd"
@@ -168,6 +179,9 @@
         "max_runs": {
           "$ref": "#/definitions/layerProperties/max_runs"
         },
+        "ok_exit_codes": {
+          "$ref": "#/definitions/layerProperties/ok_exit_codes"
+        },
         "prepare": {
           "$ref": "#/definitions/layerProperties/prepare"
         },
@@ -207,6 +221,9 @@
         },
         "max_runs": {
           "$ref": "#/definitions/layerProperties/max_runs"
+        },
+        "ok_exit_codes": {
+          "$ref": "#/definitions/layerProperties/ok_exit_codes"
         },
         "prepare": {
           "$ref": "#/definitions/layerProperties/prepare"
@@ -263,6 +280,9 @@
         },
         "max_runs": {
           "$ref": "#/definitions/layerProperties/max_runs"
+        },
+        "ok_exit_codes": {
+          "$ref": "#/definitions/layerProperties/ok_exit_codes"
         },
         "prepare": {
           "$ref": "#/definitions/layerProperties/prepare"

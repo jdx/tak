@@ -31,6 +31,10 @@ pub const DEFAULT_BUDGET: Duration = Duration::from_secs(30);
 pub const DEFAULT_MIN_RUNS: u32 = 5;
 pub const DEFAULT_MAX_RUNS: u32 = 50;
 
+/// Exit codes a sample may end with and still count, unless `ok_exit_codes`
+/// says otherwise: success, and nothing else, as a shell would judge it.
+pub const DEFAULT_OK_EXIT_CODES: [i32; 1] = [0];
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
     /// Benchmarks by name. A BTreeMap so runs are ordered and reproducible
@@ -65,6 +69,9 @@ struct Layer {
     min_runs: Option<u32>,
     /// `runs = "auto"`: most runs any subject gets.
     max_runs: Option<u32>,
+    /// Exit codes that count as a successful sample. Replaces, not merges:
+    /// a subject listing `[0, 1]` means exactly those.
+    ok_exit_codes: Option<Vec<i64>>,
     /// Untimed command run before every sample.
     prepare: Option<Cmd>,
     /// Directory to run in, relative to `tak.toml`.
@@ -298,6 +305,10 @@ pub struct Subject {
     pub auto: AutoRuns,
     pub warmup: u32,
     pub counters: bool,
+    /// Exit codes a timed or warmup sample may end with and still count.
+    /// Never empty. A death by signal fails whatever this holds, and
+    /// `prepare` is always held to exit 0.
+    pub ok_exit_codes: Vec<i32>,
 }
 
 impl Subject {
@@ -401,6 +412,21 @@ impl Config {
 }
 
 impl Config {
+    /// Every settings layer in the file, with where it is.
+    fn layers(&self) -> Vec<(String, &Layer)> {
+        let mut out = vec![("defaults".to_string(), &self.defaults)];
+        for (n, d) in &self.subject {
+            out.push((format!("subject.{n}"), &d.layer));
+        }
+        for (b, bench) in &self.bench {
+            out.push((format!("bench.{b}"), &bench.layer));
+            for (n, d) in &bench.subject {
+                out.push((format!("bench.{b}.subject.{n}"), &d.layer));
+            }
+        }
+        out
+    }
+
     /// Every `when` in the file, with where it is.
     fn conditions(&self) -> Vec<(String, &str)> {
         let mut out = Vec::new();
@@ -531,7 +557,33 @@ fn resolve(
             .copied()
             .unwrap_or(DEFAULT_WARMUP),
         counters,
+        ok_exit_codes: match last(layers, |l| l.ok_exit_codes.as_ref()) {
+            Some(codes) => ok_exit_codes(codes)?,
+            None => DEFAULT_OK_EXIT_CODES.to_vec(),
+        },
     })
+}
+
+/// Check `ok_exit_codes` as written, returning it sorted and deduplicated.
+///
+/// An exit status is 0–255 on Unix: a process's code is taken modulo 256, so
+/// `256` or `-1` could never match what `exit(256)` or `exit(-1)` actually
+/// reports, and would silently fail every sample. An empty list would fail
+/// every sample too, so it is an error here rather than a confusing run.
+fn ok_exit_codes(codes: &[i64]) -> Result<Vec<i32>> {
+    if codes.is_empty() {
+        bail!("ok_exit_codes must list at least one exit code");
+    }
+    let mut out = codes
+        .iter()
+        .map(|&c| match u8::try_from(c) {
+            Ok(c) => Ok(i32::from(c)),
+            Err(_) => bail!("ok_exit_codes: {c} is not an exit code (0 to 255)"),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
 }
 
 impl Config {
@@ -545,6 +597,13 @@ impl Config {
         }
         for (place, when) in cfg.conditions() {
             crate::condition::check(when).with_context(|| format!("in {place}"))?;
+        }
+        // Likewise every `ok_exit_codes`, including one in a layer that
+        // nothing resolves through yet.
+        for (place, l) in cfg.layers() {
+            if let Some(codes) = &l.ok_exit_codes {
+                ok_exit_codes(codes).with_context(|| format!("in {place}"))?;
+            }
         }
         // Every declared benchmark is validated up front rather than failing
         // partway through a run that has already spent minutes measuring.
@@ -1005,6 +1064,79 @@ cmd = "mycli 'two words'""#,
         let c = Config::parse("[bench.b]\nsubjects = [\"x\"]\n[bench.b.subject.x]\ncmd = [\"x\"]")
             .unwrap();
         assert_eq!(c.subjects("b").unwrap()[0].cmd, ["x"]);
+    }
+
+    /// Only exit 0 counts unless a layer says otherwise, and the most specific
+    /// layer's list replaces the others' rather than adding to them.
+    #[test]
+    fn ok_exit_codes_default_to_zero_and_stack_by_replacing() {
+        let c = Config::parse(
+            r#"
+            [defaults]
+            ok_exit_codes = [0, 1]
+
+            [subject.grep]
+            cmd = ["grep", "x", "file"]
+            ok_exit_codes = [1, 0, 1]
+
+            [subject.lint]
+            cmd = ["lint"]
+
+            [bench.plain]
+            cmd = "x"
+
+            [bench.cmp]
+            subjects = ["grep", "lint"]
+            ok_exit_codes = [0, 2]
+
+            [bench.strict]
+            subjects = ["grep"]
+            [bench.strict.subject.grep]
+            ok_exit_codes = [0]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(only(&c, "plain").ok_exit_codes, [0, 1], "from defaults");
+        let cmp = c.subjects("cmp").unwrap();
+        assert_eq!(
+            cmp[0].ok_exit_codes,
+            [0, 1],
+            "shared subject, sorted and deduplicated"
+        );
+        assert_eq!(cmp[1].ok_exit_codes, [0, 2], "bench over defaults");
+        assert_eq!(
+            only(&c, "strict").ok_exit_codes,
+            [0],
+            "bench's own subject table"
+        );
+
+        let bare = Config::parse("[bench.a]\ncmd = \"x\"").unwrap();
+        assert_eq!(only(&bare, "a").ok_exit_codes, DEFAULT_OK_EXIT_CODES);
+    }
+
+    /// A list that could never match a real exit status would fail every
+    /// sample, so it is rejected before anything runs — even in a layer no
+    /// benchmark uses yet.
+    #[test]
+    fn bad_ok_exit_codes_are_rejected_at_parse_time() {
+        for bad in [
+            "ok_exit_codes = []",
+            "ok_exit_codes = [-1]",
+            "ok_exit_codes = [256]",
+            "ok_exit_codes = [0, 1000]",
+            "ok_exit_codes = [\"1\"]",
+            "ok_exit_codes = 1",
+        ] {
+            let toml = format!("[bench.a]\ncmd = \"x\"\n{bad}");
+            assert!(Config::parse(&toml).is_err(), "accepted: {bad}");
+        }
+        let unused = "[subject.spare]\ncmd = \"y\"\nok_exit_codes = [300]\n[bench.a]\ncmd = \"x\"";
+        let err = Config::parse(unused).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("subject.spare") && msg.contains("300"),
+            "{msg}"
+        );
     }
 
     /// The syntax check covers the whole file, not only what some benchmark

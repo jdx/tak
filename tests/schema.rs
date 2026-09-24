@@ -28,6 +28,7 @@ warmup = 1
 budget = "30s"
 min_runs = 5
 max_runs = 50
+ok_exit_codes = [0]
 prepare = ["true"]
 dir = "."
 env = { A = "1" }
@@ -42,6 +43,7 @@ warmup = 0
 budget = "1s"
 min_runs = 1
 max_runs = 2
+ok_exit_codes = [0, 1]
 prepare = "true"
 dir = "."
 env = { B = "2" }
@@ -55,6 +57,7 @@ warmup = 0
 budget = "5s"
 min_runs = 1
 max_runs = 3
+ok_exit_codes = [1]
 prepare = ["true"]
 dir = "."
 env = { C = "3" }

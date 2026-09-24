@@ -293,7 +293,7 @@ struct RunOpts {
 struct Measured {
     bench: String,
     subject: Subject,
-    samples: Vec<f64>,
+    samples: Vec<measure::Sample>,
     record: Record,
 }
 
@@ -325,6 +325,7 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         },
         warmup: opts.warmup.unwrap_or(DEFAULT_WARMUP),
         counters: true,
+        ok_exit_codes: config::DEFAULT_OK_EXIT_CODES.to_vec(),
     };
     let seed = opts.seed.unwrap_or_else(random_seed);
     if opts.dry_run {
@@ -576,6 +577,11 @@ fn print_plan(bench: &str, multi: bool, subjects: &[Subject], no_counters: bool)
             ),
         };
         println!("{pad}runs     {runs}, warmup {}", s.warmup);
+        // Only when it differs from the default, which every subject has.
+        if s.ok_exit_codes != config::DEFAULT_OK_EXIT_CODES {
+            let codes: Vec<String> = s.ok_exit_codes.iter().map(i32::to_string).collect();
+            println!("{pad}ok exit  {}", codes.join(", "));
+        }
         // As the run would do it: --no-counters overrides the file.
         if s.counters && !no_counters {
             println!("{pad}counters on");
@@ -711,13 +717,14 @@ fn measure_bench(
                 continue;
             }
         };
-        let mut metrics = measure::stats(&samples);
+        let ms: Vec<f64> = samples.iter().map(|s| s.ms).collect();
+        let mut metrics = measure::stats(&ms);
         let label = if multi {
             format!("{bench} ({})", s.name)
         } else {
             bench.to_string()
         };
-        for w in measure::warnings(&samples) {
+        for w in measure::warnings(&ms) {
             eprintln!("  warning: {label}: {w}");
         }
         if s.counters && !opts.no_counters {

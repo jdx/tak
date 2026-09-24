@@ -194,6 +194,7 @@ fn a_subject_is_prepared_before_every_counted_run() {
         },
         warmup: 0,
         counters: true,
+        ok_exit_codes: vec![0],
     };
     let c = measure::subject_instructions(&s, &Settings::default())
         .expect("cachegrind invocation failed")
@@ -208,4 +209,41 @@ fn a_subject_is_prepared_before_every_counted_run() {
     let expected = "prep\nrun:set\n".repeat(c.runs as usize);
     assert_eq!(log, expected);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `ok_exit_codes` reaches the cachegrind run: a subject that exits 1 by
+/// design is counted when it allows 1, and still fails when it does not.
+/// cachegrind exits with its client's code, which is what makes this work.
+#[cfg(unix)]
+#[test]
+fn ok_exit_codes_apply_under_valgrind() {
+    if !valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let subject = |ok: Vec<i32>| tak_cli::config::Subject {
+        name: "x".into(),
+        cmd: ["/bin/sh", "-c", "exit 1"].map(String::from).to_vec(),
+        prepare: None,
+        dir: None,
+        env: Default::default(),
+        vars: Default::default(),
+        when: None,
+        runs: tak_cli::config::Runs::Fixed(1),
+        auto: tak_cli::config::AutoRuns {
+            budget: std::time::Duration::from_secs(30),
+            min: 5,
+            max: 50,
+        },
+        warmup: 0,
+        counters: true,
+        ok_exit_codes: ok,
+    };
+    let c = measure::subject_instructions(&subject(vec![0, 1]), &Settings::default())
+        .expect("exit 1 is allowed")
+        .expect("valgrind present but no I refs parsed");
+    assert!(c.min > 10_000, "implausibly low: {}", c.min);
+
+    let err = measure::subject_instructions(&subject(vec![0]), &Settings::default()).unwrap_err();
+    assert!(format!("{err:#}").contains("under valgrind"), "{err:#}");
 }

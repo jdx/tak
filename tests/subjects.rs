@@ -724,3 +724,120 @@ cmd = ["sh", "-c", "echo b >> log"]
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(p.log(), ["b"]);
 }
+
+/// A subject that exits 1 by design, like pre-commit after a hook modified
+/// files, is kept when `ok_exit_codes` allows it, warmups included, and its
+/// real exit codes are exported. Without the setting the same command is
+/// dropped, and a code the list leaves out still drops it.
+#[test]
+fn ok_exit_codes_keep_a_subject_that_exits_non_zero_by_design() {
+    let p = Project::new(
+        "ok-exit",
+        r#"
+[bench.cmp]
+runs = 3
+warmup = 1
+
+[bench.cmp.subject.allowed]
+cmd = ["sh", "-c", "echo run:allowed >> log; exit 1"]
+ok_exit_codes = [0, 1]
+
+[bench.cmp.subject.default]
+cmd = ["sh", "-c", "exit 1"]
+
+[bench.cmp.subject.other]
+cmd = ["sh", "-c", "exit 2"]
+ok_exit_codes = [0, 1]
+"#,
+    );
+    let out = p.run(&["--export-json", "results.json", "--no-progress"]);
+    assert!(!out.status.success(), "two subjects failed");
+    let err = stderr(&out);
+    assert!(
+        err.contains("cmp (default) dropped") && err.contains("exited with exit status: 1"),
+        "{err}"
+    );
+    assert!(
+        err.contains("cmp (other) dropped")
+            && err.contains("exit status: 2, and ok_exit_codes is 0, 1"),
+        "{err}"
+    );
+    assert!(!err.contains("cmp (allowed) dropped"), "{err}");
+
+    let runs = p.log().iter().filter(|l| *l == "run:allowed").count();
+    assert_eq!(runs, 1 + 3, "the warmup and every timed run");
+
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("results.json")).unwrap()).unwrap();
+    let results = json["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["subject"], "allowed");
+    assert_eq!(results[0]["exit_codes"], serde_json::json!([1, 1, 1]));
+}
+
+/// `ok_exit_codes` describes the program being measured, not its reset: a
+/// prepare step that fails still drops the subject.
+#[test]
+fn ok_exit_codes_do_not_excuse_a_failing_prepare() {
+    let p = Project::new(
+        "ok-exit-prepare",
+        r#"
+[bench.one]
+cmd = ["sh", "-c", "exit 1"]
+prepare = ["sh", "-c", "exit 1"]
+ok_exit_codes = [0, 1]
+runs = 1
+warmup = 0
+"#,
+    );
+    let out = p.run(&["--no-progress"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("prepare"), "{}", stderr(&out));
+}
+
+/// A single-command benchmark takes the setting too, and it may leave 0 out:
+/// `grep` for something that must not be there.
+#[test]
+fn ok_exit_codes_may_require_a_non_zero_code() {
+    let p = Project::new(
+        "ok-exit-single",
+        r#"
+[bench.nomatch]
+cmd = ["sh", "-c", "exit 1"]
+ok_exit_codes = [1]
+runs = 2
+warmup = 0
+
+[bench.match]
+cmd = ["true"]
+ok_exit_codes = [1]
+runs = 1
+warmup = 0
+"#,
+    );
+    let out = p.run(&["--bench", "nomatch", "--no-progress"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = p.run(&["--bench", "match", "--no-progress"]);
+    assert!(!out.status.success(), "exit 0 is not in the list");
+}
+
+/// --dry-run shows `ok_exit_codes` only where it differs from the default.
+#[test]
+fn dry_run_shows_non_default_ok_exit_codes() {
+    let p = Project::new(
+        "ok-exit-dry-run",
+        r#"
+[bench.cmp.subject.lenient]
+cmd = ["true"]
+ok_exit_codes = [1, 0]
+
+[bench.cmp.subject.strict]
+cmd = ["true"]
+"#,
+    );
+    let out = p.run(&["--dry-run"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.matches("ok exit").count(), 1, "{stdout}");
+    assert!(stdout.contains("ok exit  0, 1"), "{stdout}");
+}

@@ -13,7 +13,7 @@
 //! clock (~1%) but not deterministic, because they move with thread scheduling.
 //! They are recorded, and may be flagged, but must not gate at a tight threshold.
 
-use crate::config::{AutoRuns, Runs, SELF_TOOL, Subject};
+use crate::config::{AutoRuns, DEFAULT_OK_EXIT_CODES, Runs, SELF_TOOL, Subject};
 use crate::settings::Settings;
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
@@ -86,12 +86,44 @@ fn command(argv: &[String], site: &Site) -> Result<Command> {
     Ok(c)
 }
 
-/// Run once, discarding output, returning elapsed wall time in milliseconds.
+/// One successful run of a subject.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sample {
+    /// Elapsed wall time in milliseconds.
+    pub ms: f64,
+    /// What the command exited with: one of its `ok_exit_codes`, kept so the
+    /// export shows what actually happened rather than assuming 0.
+    pub exit_code: i32,
+}
+
+/// The exit code of a sample that counts, or the error that drops its
+/// subject.
+///
+/// A death by signal has no exit code and always fails: a subject that
+/// crashed or was killed did not do the work being measured, whatever its
+/// `ok_exit_codes` allow.
+fn accepted(bin: &str, status: std::process::ExitStatus, ok: &[i32], via: &str) -> Result<i32> {
+    match status.code() {
+        Some(code) if ok.contains(&code) => Ok(code),
+        // Name the accepted codes only when they are not the default, where
+        // "exited with 1" alone would leave the reader wondering why that
+        // was a failure.
+        _ if ok == DEFAULT_OK_EXIT_CODES => {
+            bail!("benchmark subject `{bin}` exited with {status}{via}")
+        }
+        _ => bail!(
+            "benchmark subject `{bin}` exited with {status}{via}, and ok_exit_codes is {}",
+            ok.iter().map(i32::to_string).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
+/// Run once, discarding output, returning elapsed wall time and exit code.
 ///
 /// No shell. Spawning a shell adds its own startup cost and variance to every
 /// sample, which for commands in the 10ms range is a large fraction of the
 /// measurement — the same reasoning behind poop's refusal to support one.
-fn time_once(cmd: &[String], site: &Site) -> Result<f64> {
+fn time_once(cmd: &[String], site: &Site, ok: &[i32]) -> Result<Sample> {
     let mut c = command(cmd, site)?;
     c.stdout(Stdio::null()).stderr(Stdio::null());
     let bin = &cmd[0];
@@ -99,11 +131,9 @@ fn time_once(cmd: &[String], site: &Site) -> Result<f64> {
     let status = c
         .status()
         .with_context(|| format!("failed to spawn `{bin}`"))?;
-    let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-    if !status.success() {
-        bail!("benchmark subject `{bin}` exited with {status}");
-    }
-    Ok(elapsed)
+    let ms = start.elapsed().as_secs_f64() * 1000.0;
+    let exit_code = accepted(bin, status, ok, "")?;
+    Ok(Sample { ms, exit_code })
 }
 
 /// How much of a failing prepare step's stderr to keep for the error message.
@@ -113,6 +143,10 @@ const PREPARE_STDERR_TAIL: usize = 4096;
 
 /// Run a subject's prepare step. Untimed, so reading its stderr for the error
 /// message costs the measurement nothing.
+///
+/// Held to exit 0 whatever the subject's `ok_exit_codes` say: those describe
+/// the program being measured, and a reset that failed leaves every later
+/// sample starting from the wrong state.
 fn prepare_once(cmd: &[String], site: &Site) -> Result<()> {
     use std::io::Read;
 
@@ -248,9 +282,9 @@ pub fn interleaved(
     seed: u64,
     settings: &Settings,
     observer: &mut dyn Observer,
-) -> Vec<Result<Vec<f64>>> {
+) -> Vec<Result<Vec<Sample>>> {
     let mut rng = fastrand::Rng::with_seed(seed);
-    let mut results: Vec<Result<Vec<f64>>> = subjects
+    let mut results: Vec<Result<Vec<Sample>>> = subjects
         .iter()
         .map(|s| {
             // Zero runs would leave nothing to report on.
@@ -330,7 +364,7 @@ fn run_slots(
     slots: &[Slot],
     subjects: &[Subject],
     settings: &Settings,
-    results: &mut [Result<Vec<f64>>],
+    results: &mut [Result<Vec<Sample>>],
     fastest: &mut [Option<Duration>],
     observer: &mut dyn Observer,
 ) {
@@ -350,12 +384,12 @@ fn run_slots(
             .prepare
             .as_deref()
             .map_or(Ok(()), |p| prepare_once(p, &site))
-            .and_then(|()| time_once(&s.cmd, &site));
+            .and_then(|()| time_once(&s.cmd, &site, &s.ok_exit_codes));
         let elapsed = began.elapsed();
         match taken {
-            Ok(ms) => {
+            Ok(sample) => {
                 if slot.timed {
-                    samples.push(ms);
+                    samples.push(sample);
                 }
                 let f = &mut fastest[slot.subject];
                 *f = Some(f.map_or(elapsed, |f| f.min(elapsed)));
@@ -492,6 +526,7 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
         },
         warmup: plan.warmup,
         counters: false,
+        ok_exit_codes: DEFAULT_OK_EXIT_CODES.to_vec(),
     };
     // One subject has one possible order, so the seed is irrelevant.
     let samples = interleaved(
@@ -502,7 +537,8 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
     )
     .pop()
     .expect("one result per subject")?;
-    Ok(stats(&samples))
+    let ms: Vec<f64> = samples.iter().map(|s| s.ms).collect();
+    Ok(stats(&ms))
 }
 
 /// Is cachegrind usable on this machine?
@@ -582,12 +618,13 @@ pub fn instructions(
             env: &BTreeMap::new(),
             settings,
         },
+        &DEFAULT_OK_EXIT_CODES,
     )
 }
 
-/// [`instructions`] for a declared subject: its environment, and its prepare
-/// step before every cachegrind run, since each run has to start from the
-/// same state the timed samples did.
+/// [`instructions`] for a declared subject: its environment, its
+/// `ok_exit_codes`, and its prepare step before every cachegrind run, since
+/// each run has to start from the same state the timed samples did.
 pub fn subject_instructions(s: &Subject, settings: &Settings) -> Result<Option<Counted>> {
     count(
         &s.cmd,
@@ -597,10 +634,18 @@ pub fn subject_instructions(s: &Subject, settings: &Settings) -> Result<Option<C
             env: &s.env,
             settings,
         },
+        &s.ok_exit_codes,
     )
 }
 
-fn count(cmd: &[String], prepare: Option<&[String]>, site: &Site) -> Result<Option<Counted>> {
+/// `ok` applies to the subject under valgrind: cachegrind exits with its
+/// client's code, and re-raises the signal a client died of.
+fn count(
+    cmd: &[String],
+    prepare: Option<&[String]>,
+    site: &Site,
+    ok: &[i32],
+) -> Result<Option<Counted>> {
     if !valgrind_available() {
         return Ok(None);
     }
@@ -626,13 +671,8 @@ fn count(cmd: &[String], prepare: Option<&[String]>, site: &Site) -> Result<Opti
 
         // cachegrind writes its summary to stderr as e.g. "I refs:  48,349,132".
         let stderr = String::from_utf8_lossy(&out.stderr);
-        if !out.status.success() {
-            let bin = cmd.first().map(String::as_str).unwrap_or("(empty command)");
-            bail!(
-                "benchmark subject `{bin}` exited with {} under valgrind",
-                out.status
-            );
-        }
+        let bin = cmd.first().map(String::as_str).unwrap_or("(empty command)");
+        accepted(bin, out.status, ok, " under valgrind")?;
         match parse_irefs(&stderr) {
             Some(n) => samples.push(n),
             // Valgrind is installed but produced no summary — a real failure,
@@ -871,6 +911,7 @@ mod tests {
             },
             warmup: 1,
             counters: false,
+            ok_exit_codes: vec![0],
         };
         let res = interleaved(
             &[mk("ok", &["true"]), mk("bad", &["false"])],
@@ -907,6 +948,7 @@ mod tests {
                 },
                 warmup: 0,
                 counters: false,
+                ok_exit_codes: vec![0],
             }],
             0,
             &Settings::default(),
@@ -953,6 +995,7 @@ mod tests {
             },
             warmup,
             counters: false,
+            ok_exit_codes: vec![0],
         };
         let mut log = Log::default();
         // The slow one has no warmup, so its first kept sample sizes it.
