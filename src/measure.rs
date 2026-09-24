@@ -621,20 +621,70 @@ pub fn subject_version(s: &Subject, settings: &Settings) -> Option<Result<String
     Some(version_once(argv, &site))
 }
 
+/// How much of each stream a `version_cmd` gets read. A version is its first
+/// non-empty line; a tool that follows it with a banner, or never stops
+/// printing, must not be held in memory or waited on for the rest.
+const VERSION_OUTPUT_CAP: usize = 8192;
+
+/// Read up to `cap` bytes, then stop. Returns what was read and whether the
+/// cap cut it short. The reader is dropped on return, so a child still
+/// writing gets a closed pipe rather than blocking on a full one.
+fn read_prefix(mut r: impl std::io::Read, cap: usize) -> (Vec<u8>, bool) {
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    while out.len() < cap {
+        match r.read(&mut buf) {
+            Ok(0) | Err(_) => return (out, false),
+            Ok(n) if n > cap - out.len() => {
+                out.extend_from_slice(&buf[..cap - out.len()]);
+                return (out, true);
+            }
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+        }
+    }
+    // Full: cut short only if there was more to come.
+    let more = matches!(r.read(&mut buf[..1]), Ok(n) if n > 0);
+    (out, more)
+}
+
 fn version_once(argv: &[String], site: &Site) -> Result<String> {
     let bin = argv
         .first()
         .map(String::as_str)
         .unwrap_or("(empty command)");
-    let out = command(argv, site)?
+    let mut child = command(argv, site)?
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("failed to spawn `{bin}`"))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
+    // stderr on its own thread, so neither pipe can fill while the other is
+    // being read.
+    let err = child
+        .stderr
+        .take()
+        .map(|e| std::thread::spawn(move || read_prefix(e, VERSION_OUTPUT_CAP)));
+    let (stdout, out_cut) = child
+        .stdout
+        .take()
+        .map_or((Vec::new(), false), |o| read_prefix(o, VERSION_OUTPUT_CAP));
+    if out_cut {
+        // It has already said everything used; one that would print forever
+        // is stopped rather than waited on.
+        let _ = child.kill();
+    }
+    let (stderr, err_cut) = err
+        .and_then(|t| t.join().ok())
+        .unwrap_or((Vec::new(), false));
+    let status = child
+        .wait()
+        .with_context(|| format!("failed to wait for `{bin}`"))?;
+    // Output cut short ends however the cut made it end — killed, or by a
+    // closed pipe — so its status says nothing about the version it printed.
+    if !status.success() && !(out_cut || err_cut) {
+        let stderr = String::from_utf8_lossy(&stderr);
         bail!(
-            "`{bin}` exited with {}: {}",
-            out.status,
+            "`{bin}` exited with {status}: {}",
             stderr.lines().last().unwrap_or("(no output)").trim()
         );
     }
@@ -645,8 +695,8 @@ fn version_once(argv: &[String], site: &Site) -> Result<String> {
             .find(|l| !l.is_empty())
             .map(str::to_string)
     };
-    first(&out.stdout)
-        .or_else(|| first(&out.stderr))
+    first(&stdout)
+        .or_else(|| first(&stderr))
         .with_context(|| format!("`{bin}` printed nothing"))
 }
 
@@ -955,6 +1005,32 @@ mod tests {
         let err = format!("{:#}", sh("echo nope >&2; exit 2").unwrap_err());
         assert!(err.contains("`sh`") && err.contains("nope"), "{err}");
         assert!(sh("true").is_err(), "no output is no version");
+    }
+
+    /// Only a prefix of each stream is read: a tool that prints megabytes,
+    /// or never stops, still yields its first line and is not waited on.
+    #[cfg(unix)]
+    #[test]
+    fn a_version_is_read_from_a_capped_prefix() {
+        let settings = Settings::default();
+        let env = BTreeMap::new();
+        let site = Site {
+            dir: None,
+            env: &env,
+            settings: &settings,
+        };
+        let sh = |script: &str| version_once(&["sh".into(), "-c".into(), script.into()], &site);
+        assert_eq!(sh("yes 'tool 1.0' | head -c 10000000").unwrap(), "tool 1.0");
+        assert_eq!(sh("yes 'tool 2.0'").unwrap(), "tool 2.0", "never exits");
+        assert_eq!(
+            sh("yes 'java 21' | head -c 10000000 >&2").unwrap(),
+            "java 21",
+            "a flood on stderr"
+        );
+        let (got, cut) = read_prefix(&[7u8; 100][..], 10);
+        assert_eq!((got.len(), cut), (10, true));
+        let (got, cut) = read_prefix(&[7u8; 10][..], 10);
+        assert_eq!((got.len(), cut), (10, false), "exactly the cap is not cut");
     }
 
     /// A prepare step that fails stops its subject, and says it was prepare.

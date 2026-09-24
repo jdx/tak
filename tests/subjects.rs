@@ -623,7 +623,7 @@ fn a_subject_without_version_cmd_exports_no_version() {
 }
 
 /// `cpus` is what the run could use, not what the machine has: a benchmark
-/// pinned with taskset says so.
+/// pinned to one CPU with taskset says so.
 #[cfg(target_os = "linux")]
 #[test]
 fn the_exported_cpu_count_follows_the_affinity_mask() {
@@ -631,12 +631,31 @@ fn the_exported_cpu_count_follows_the_affinity_mask() {
         eprintln!("taskset not found; skipping");
         return;
     }
+    // A CPU this process may run on: CPU 0 need not be in a runner's or
+    // container's allowed set, and pinning to one outside it fails.
+    let Some(cpu) = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .find_map(|l| l.strip_prefix("Cpus_allowed_list:"))
+                .and_then(|v| {
+                    v.trim()
+                        .split([',', '-'])
+                        .next()
+                        .and_then(|n| n.trim().parse::<u32>().ok())
+                })
+        })
+    else {
+        eprintln!("no allowed CPU found in /proc/self/status; skipping");
+        return;
+    };
+    let cpu = cpu.to_string();
     let p = Project::new(
         "export-affinity",
         "[bench.one]\ncmd = [\"true\"]\nruns = 1\nwarmup = 0\n",
     );
     let out = Command::new("taskset")
-        .args(["-c", "0", env!("CARGO_BIN_EXE_tak"), "run"])
+        .args(["-c", &cpu, env!("CARGO_BIN_EXE_tak"), "run"])
         .args(["--no-progress", "--no-counters", "--export-json", "r.json"])
         .current_dir(&p.dir)
         .output()
