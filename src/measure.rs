@@ -106,14 +106,23 @@ fn time_once(cmd: &[String], site: &Site) -> Result<f64> {
     Ok(elapsed)
 }
 
-/// How much of a failing prepare step's stderr to keep for the error message.
-/// Enough for the last few lines; a verbose reset command's full output would
-/// otherwise sit in memory before every sample.
+/// How much of a failing prepare or setup step's stderr to keep for the error
+/// message. Enough for the last few lines; a verbose reset command's full
+/// output would otherwise sit in memory before every sample.
 const PREPARE_STDERR_TAIL: usize = 4096;
 
 /// Run a subject's prepare step. Untimed, so reading its stderr for the error
 /// message costs the measurement nothing.
 fn prepare_once(cmd: &[String], site: &Site) -> Result<()> {
+    untimed("prepare", cmd, site)
+}
+
+/// Run an untimed step — `prepare` or `setup`, named by `what` in errors.
+///
+/// Its output is not passed through: on a terminal it would tear up the
+/// progress bar, and in a log a setup that clones a fixture could bury the
+/// results. The tail of stderr is kept for the error when it fails.
+fn untimed(what: &str, cmd: &[String], site: &Site) -> Result<()> {
     use std::io::Read;
 
     let mut c = command(cmd, site)?;
@@ -123,7 +132,7 @@ fn prepare_once(cmd: &[String], site: &Site) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("failed to spawn prepare `{bin}`"))?;
+        .with_context(|| format!("failed to spawn {what} `{bin}`"))?;
     // Keep only the tail, reading as it arrives so the child never blocks on a
     // full pipe.
     let mut tail: Vec<u8> = Vec::new();
@@ -142,11 +151,11 @@ fn prepare_once(cmd: &[String], site: &Site) -> Result<()> {
     }
     let status = child
         .wait()
-        .with_context(|| format!("failed to wait for prepare `{bin}`"))?;
+        .with_context(|| format!("failed to wait for {what} `{bin}`"))?;
     if !status.success() {
         let stderr = String::from_utf8_lossy(&tail);
         bail!(
-            "prepare `{bin}` exited with {status}: {}",
+            "{what} `{bin}` exited with {status}: {}",
             stderr.lines().last().unwrap_or("(no output)").trim()
         );
     }
@@ -219,6 +228,9 @@ pub trait Observer {
     /// Samples still to take per subject, warmups included. Called before the
     /// first sample and again once `runs = "auto"` has settled its counts.
     fn planned(&mut self, _remaining: &[u64]) {}
+    /// `subject`'s setup step is starting. Untimed and not a sample, so it
+    /// counts toward neither the samples taken nor their average.
+    fn setting_up(&mut self, _subject: usize) {}
     /// A sample of `subject` is starting.
     fn started(&mut self, _subject: usize) {}
     /// A sample of `subject` finished; `elapsed` covers its prepare step too.
@@ -239,10 +251,16 @@ impl Observer for Quiet {}
 /// away a long run's worth of everyone else's samples. Subject directories
 /// are used as given, so the caller resolves them first.
 ///
-/// Runs in two phases. The warmups come first, plus one kept sample of every
-/// `runs = "auto"` subject that has no warmups, so each auto subject has been
-/// timed at least once. Its run count is then fixed from the fastest of those
-/// samples, and every remaining timed sample is taken in shuffled rounds.
+/// Every subject's `setup` runs first, once, in the order given: before
+/// any warmup, so a subject's first sample never shares the machine with
+/// another's setup and none of it is counted toward an auto run count. A
+/// subject whose setup fails is dropped like one whose prepare does.
+///
+/// Sampling then runs in two phases. The warmups come first, plus one kept
+/// sample of every `runs = "auto"` subject that has no warmups, so each auto
+/// subject has been timed at least once. Its run count is then fixed from the
+/// fastest of those samples, and every remaining timed sample is taken in
+/// shuffled rounds.
 pub fn interleaved(
     subjects: &[Subject],
     seed: u64,
@@ -282,6 +300,22 @@ pub fn interleaved(
         })
         .collect();
     observer.planned(&provisional);
+
+    for (i, s) in subjects.iter().enumerate() {
+        let (Some(setup), Ok(_)) = (&s.setup, &results[i]) else {
+            continue;
+        };
+        observer.setting_up(i);
+        let site = Site {
+            dir: s.setup_dir.as_deref(),
+            env: &s.env,
+            settings,
+        };
+        if let Err(e) = untimed("setup", setup, &site) {
+            results[i] = Err(e);
+            observer.dropped(i);
+        }
+    }
 
     let mut first = rounds(&warmups, false, &mut rng);
     first.extend(rounds(&pilots, true, &mut rng));
@@ -480,6 +514,8 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
         name: SELF_TOOL.to_string(),
         cmd: plan.cmd.clone(),
         prepare: None,
+        setup: None,
+        setup_dir: None,
         dir: plan.dir.clone(),
         env: BTreeMap::new(),
         vars: BTreeMap::new(),
@@ -859,6 +895,8 @@ mod tests {
             name: name.into(),
             cmd: cmd.iter().map(|s| s.to_string()).collect(),
             prepare: None,
+            setup: None,
+            setup_dir: None,
             dir: None,
             env: BTreeMap::new(),
             vars: BTreeMap::new(),
@@ -895,6 +933,8 @@ mod tests {
                     "-c".into(),
                     "echo nope >&2; exit 3".into(),
                 ]),
+                setup: None,
+                setup_dir: None,
                 dir: None,
                 env: BTreeMap::new(),
                 vars: BTreeMap::new(),
@@ -921,14 +961,72 @@ mod tests {
     struct Log {
         plans: Vec<Vec<u64>>,
         finished: Vec<usize>,
+        /// Every event in order, as `setup:N`, `start:N` and `drop:N`.
+        events: Vec<String>,
     }
     impl Observer for Log {
         fn planned(&mut self, remaining: &[u64]) {
             self.plans.push(remaining.to_vec());
         }
+        fn setting_up(&mut self, subject: usize) {
+            self.events.push(format!("setup:{subject}"));
+        }
+        fn started(&mut self, subject: usize) {
+            self.events.push(format!("start:{subject}"));
+        }
+        fn dropped(&mut self, subject: usize) {
+            self.events.push(format!("drop:{subject}"));
+        }
         fn finished(&mut self, subject: usize, _: Duration) {
             self.finished.push(subject);
         }
+    }
+
+    /// Every setup runs once, before any sample; a failing one drops its
+    /// subject before it takes a sample, and says it was setup.
+    #[cfg(unix)]
+    #[test]
+    fn setups_run_once_first_and_a_failing_one_drops_its_subject() {
+        let sh = |script: &str| Some(["/bin/sh", "-c", script].map(String::from).to_vec());
+        let mk = |name: &str, setup: Option<Vec<String>>| Subject {
+            name: name.into(),
+            cmd: vec!["true".into()],
+            prepare: None,
+            setup,
+            setup_dir: None,
+            dir: None,
+            env: BTreeMap::new(),
+            vars: BTreeMap::new(),
+            when: None,
+            runs: Runs::Auto,
+            auto: AutoRuns {
+                budget: Duration::from_secs(30),
+                min: 2,
+                max: 2,
+            },
+            warmup: 1,
+            counters: false,
+        };
+        let mut log = Log::default();
+        let res = interleaved(
+            &[
+                mk("ok", sh("true")),
+                mk("bad", sh("echo no fixture >&2; exit 2")),
+                mk("none", None),
+            ],
+            3,
+            &Settings::default(),
+            &mut log,
+        );
+        assert_eq!(log.events[..3], ["setup:0", "setup:1", "drop:1"]);
+        assert!(!log.events[3..].iter().any(|e| e.starts_with("setup:")));
+        assert!(!log.events.contains(&"start:1".to_string()));
+        assert_eq!(res[0].as_ref().unwrap().len(), 2);
+        assert_eq!(res[2].as_ref().unwrap().len(), 2);
+        let msg = format!("{:#}", res[1].as_ref().unwrap_err());
+        assert!(msg.contains("setup") && msg.contains("no fixture"), "{msg}");
+        // Setup is not a sample: only warmups and runs finish.
+        assert_eq!(log.finished.len(), 2 * (1 + 2));
     }
 
     /// `runs = "auto"` sizes each subject from its own speed: a subject too
@@ -941,6 +1039,8 @@ mod tests {
             name: name.into(),
             cmd: vec!["sleep".into(), secs.into()],
             prepare: None,
+            setup: None,
+            setup_dir: None,
             dir: None,
             env: BTreeMap::new(),
             vars: BTreeMap::new(),

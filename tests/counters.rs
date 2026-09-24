@@ -182,6 +182,8 @@ fn a_subject_is_prepared_before_every_counted_run() {
                 .map(String::from)
                 .to_vec(),
         ),
+        setup: None,
+        setup_dir: None,
         dir: Some(dir.clone()),
         env: [("MARK".to_string(), "set".to_string())].into(),
         vars: Default::default(),
