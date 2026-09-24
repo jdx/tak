@@ -212,6 +212,19 @@ impl TakConfigLayer {
         Ok(Self { found: None })
     }
 
+    /// Parse the settings in a given file, for `tak run --config`. Unlike
+    /// `find`, a missing file is an error: it was asked for by name.
+    pub fn at(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("could not read {}", path.display()))?;
+        let table: toml::Table = text
+            .parse()
+            .with_context(|| format!("could not parse {}", path.display()))?;
+        Ok(Self {
+            found: Some((path.to_path_buf(), table)),
+        })
+    }
+
     /// No file at all — what a missing `tak.toml` resolves with, and what
     /// `doctor` falls back to when the file cannot be read.
     pub fn empty() -> Self {
@@ -391,8 +404,17 @@ impl Settings {
     /// Resolve against the real process environment and the `tak.toml` found
     /// upward from the current directory.
     pub fn from_process(cli: &CliLayer) -> Result<Self> {
-        let config =
-            TakConfigLayer::find(&std::env::current_dir()?).context("could not read settings")?;
+        Self::from_process_at(cli, None)
+    }
+
+    /// As [`Self::from_process`], reading `config` instead of searching for
+    /// `tak.toml` when one is given.
+    pub fn from_process_at(cli: &CliLayer, config: Option<&Path>) -> Result<Self> {
+        let config = match config {
+            Some(path) => TakConfigLayer::at(path),
+            None => TakConfigLayer::find(&std::env::current_dir()?),
+        }
+        .context("could not read settings")?;
         Self::resolve(cli, &EnvLayer::from_process(), &config)
     }
 

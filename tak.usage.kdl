@@ -43,6 +43,10 @@ cmd run help="Benchmark a command, or everything declared in tak.toml." {
     flag --seed help="Seed for the order subjects are sampled in. Every multi-subject run prints the seed it used, so an order can be repeated." {
         arg <N>
     }
+    flag --config help="Read this file instead of searching for tak.toml." {
+        arg <PATH>
+    }
+    flag --dry-run help="Print what would run — every subject's command, prepare, directory, environment and run count, templates rendered — without running it."
     flag --export-json help="Write every sample and summary to PATH as hyperfine-compatible JSON." {
         arg <PATH>
     }

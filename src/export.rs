@@ -14,7 +14,26 @@ use std::path::Path;
 
 #[derive(Debug, Serialize)]
 pub struct Export {
+    /// How the run was made, so a surprising result can be traced and its
+    /// sample order repeated. Extra top-level keys; hyperfine has none.
+    #[serde(flatten)]
+    pub meta: Meta,
     pub results: Vec<ExportResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Meta {
+    pub tak_version: String,
+    /// The run's seed: `tak run --seed` with it repeats the sample order, as
+    /// long as `runs = "auto"` settles on the same counts. A string, because
+    /// a seed given with `--seed` can exceed 2^53, and a JSON number that
+    /// large is rounded by JavaScript and jq — silently naming another order.
+    #[serde(serialize_with = "as_string")]
+    pub seed: u64,
+    /// The runner class the run would be recorded under.
+    pub runner: String,
+    /// When the run finished, RFC 3339.
+    pub time: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,8 +89,12 @@ impl ExportResult {
     }
 }
 
-pub fn write(path: &Path, results: Vec<ExportResult>) -> Result<()> {
-    let json = serde_json::to_string_pretty(&Export { results })?;
+fn as_string<S: serde::Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&v.to_string())
+}
+
+pub fn write(path: &Path, meta: Meta, results: Vec<ExportResult>) -> Result<()> {
+    let json = serde_json::to_string_pretty(&Export { meta, results })?;
     std::fs::write(path, json + "\n").with_context(|| format!("could not write {}", path.display()))
 }
 
