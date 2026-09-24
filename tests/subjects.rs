@@ -550,3 +550,13 @@ fn the_export_records_version_seed_and_runner() {
     assert!(json["time"].as_str().unwrap().ends_with('Z'));
     assert_eq!(json["results"].as_array().unwrap().len(), 1);
 }
+
+/// --dry-run reflects --no-counters the way a real run would.
+#[test]
+fn dry_run_honours_no_counters() {
+    let p = Project::new("dry-counters", "[bench.one]\ncmd = [\"true\"]\n");
+    let on = p.run(&["--dry-run"]);
+    assert!(String::from_utf8_lossy(&on.stdout).contains("counters on"));
+    let off = p.run(&["--dry-run", "--no-counters"]);
+    assert!(!String::from_utf8_lossy(&off.stdout).contains("counters on"));
+}

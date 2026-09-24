@@ -327,7 +327,12 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
     };
     let seed = opts.seed.unwrap_or_else(|| fastrand::u64(..));
     if opts.dry_run {
-        print_plan(&bench, false, std::slice::from_ref(&subject));
+        print_plan(
+            &bench,
+            false,
+            std::slice::from_ref(&subject),
+            opts.no_counters,
+        );
         return Ok(());
     }
     let (measured, _) = measure_bench(&bench, &[subject], false, seed, &opts, settings)?;
@@ -428,7 +433,7 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
     if opts.dry_run {
         println!("{}", path.display());
         for (name, multi, subjects) in &plans {
-            print_plan(name, *multi, subjects);
+            print_plan(name, *multi, subjects, opts.no_counters);
         }
         return Ok(());
     }
@@ -447,7 +452,7 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
 /// Print a benchmark's subjects as they would run, for `tak run --dry-run`:
 /// every layer applied, templates rendered, paths anchored and command-line
 /// overrides taken into account.
-fn print_plan(bench: &str, multi: bool, subjects: &[Subject]) {
+fn print_plan(bench: &str, multi: bool, subjects: &[Subject], no_counters: bool) {
     println!(
         "\n  {bench}{}",
         if multi { "" } else { "  (single command)" }
@@ -477,7 +482,8 @@ fn print_plan(bench: &str, multi: bool, subjects: &[Subject]) {
             ),
         };
         println!("{pad}runs     {runs}, warmup {}", s.warmup);
-        if s.counters {
+        // As the run would do it: --no-counters overrides the file.
+        if s.counters && !no_counters {
             println!("{pad}counters on");
         }
     }
