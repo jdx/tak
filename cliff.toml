@@ -77,7 +77,7 @@ commit_parsers = [
   { message = '^chore\(release\): prepare for', skip = true },
   { message = '^chore\(pr\)', skip = true },
   { message = '^chore\(pull\)', skip = true },
-  { message = '^chore: (release|Release)', skip = true },
+  { message = '^chore(\([^)]+\))?: (release|Release)( |$)', skip = true },
   { message = '^Release', skip = true },
   { message = "^Merge commit", skip = true },
   { body = '.*security', group = "<!-- 08 -->🛡️ Security" },
