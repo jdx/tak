@@ -185,6 +185,7 @@ fn a_subject_is_prepared_before_every_counted_run() {
         dir: Some(dir.clone()),
         env: [("MARK".to_string(), "set".to_string())].into(),
         vars: Default::default(),
+        when: None,
         runs: tak_cli::config::Runs::Fixed(1),
         auto: tak_cli::config::AutoRuns {
             budget: std::time::Duration::from_secs(30),

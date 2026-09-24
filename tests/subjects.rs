@@ -525,3 +525,70 @@ fn the_export_records_version_seed_and_runner() {
     assert!(json["time"].as_str().unwrap().ends_with('Z'));
     assert_eq!(json["results"].as_array().unwrap().len(), 1);
 }
+
+/// `when` leaves a subject or benchmark out before it is rendered, says so,
+/// and refuses a --subject that its own `when` switches off.
+#[test]
+fn when_skips_subjects_and_benchmarks() {
+    let p = Project::new(
+        "when",
+        r#"
+[defaults]
+warmup = 0
+runs = 1
+
+[subject.here]
+cmd = ["sh", "-c", "echo here >> log"]
+
+[subject.absent]
+when = '(env.TAK_TEST_ABSENT_BIN ?? "") != ""'
+cmd = ["{{ env.TAK_TEST_ABSENT_BIN }}"]
+
+[bench.cmp]
+subjects = ["here", "absent"]
+
+[bench.never]
+when = "false"
+cmd = ["sh", "-c", "echo never >> log"]
+"#,
+    );
+    let out = p.run(&["--no-progress"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(p.log(), ["here"]);
+    let err = stderr(&out);
+    assert!(err.contains("skipping cmp (absent)"), "{err}");
+    assert!(err.contains("skipping never"), "{err}");
+
+    // Set, the same subject runs: the condition really reads the variable.
+    let present = p.run_env(
+        &["--no-progress", "--subject", "absent"],
+        &[("TAK_TEST_ABSENT_BIN", "true")],
+    );
+    assert!(present.status.success(), "{}", stderr(&present));
+
+    let asked = p.run(&["--no-progress", "--subject", "absent"]);
+    assert!(!asked.status.success());
+    assert!(
+        stderr(&asked).contains("`when` is false"),
+        "{}",
+        stderr(&asked)
+    );
+}
+
+/// A spike in a subject's samples is reported on stderr.
+#[test]
+fn an_outlier_is_warned_about() {
+    let p = Project::new(
+        "outlier",
+        r#"
+[bench.spiky]
+warmup = 0
+runs = 7
+# The third sample sleeps; the rest do not.
+cmd = ["sh", "-c", "n=$(cat n 2>/dev/null || echo 0); echo $((n+1)) > n; [ \"$n\" = 2 ] && sleep 0.3; true"]
+"#,
+    );
+    let out = p.run(&["--no-progress", "--no-counters"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("outliers"), "{}", stderr(&out));
+}

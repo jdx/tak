@@ -396,6 +396,59 @@ pub fn stats(samples: &[f64]) -> BTreeMap<String, f64> {
     ])
 }
 
+/// Signs a subject's samples should not be taken at face value, as
+/// sentences for stderr. `samples` must be in the order they were taken.
+///
+/// Two, both from hyperfine's experience of what goes wrong:
+///
+/// - **Outliers**, by modified z-score (0.6745 x distance from the median /
+///   median absolute deviation) above 3.5, the usual cut-off. Something else
+///   on the machine ran, or the command's own work varies from run to run.
+/// - **A slow first sample**, over twice the median of the rest: a cache the
+///   warmup did not fill. The first timed sample should look like the others.
+///
+/// Nothing is dropped or corrected — the minimum is already robust to both —
+/// the point is to say when a comparison deserves a second run.
+pub fn warnings(samples: &[f64]) -> Vec<String> {
+    let mut out = Vec::new();
+    let n = samples.len();
+    if n < 5 {
+        return out;
+    }
+    let median = |v: &mut Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        let m = v.len();
+        if m.is_multiple_of(2) {
+            (v[m / 2 - 1] + v[m / 2]) / 2.0
+        } else {
+            v[m / 2]
+        }
+    };
+    let med = median(&mut samples.to_vec());
+    let mad = median(&mut samples.iter().map(|x| (x - med).abs()).collect());
+    if mad > 0.0 {
+        let outliers = samples
+            .iter()
+            .filter(|&&x| 0.6745 * (x - med).abs() / mad > 3.5)
+            .count();
+        if outliers > 0 {
+            out.push(format!(
+                "{outliers} of {n} samples are outliers; something else was running, or the command's \
+                 work varies. The minimum is unaffected, but consider a quieter machine or more runs."
+            ));
+        }
+    }
+    let rest = median(&mut samples[1..].to_vec());
+    if rest > 0.0 && samples[0] > 2.0 * rest {
+        out.push(format!(
+            "the first sample took {:.1}x the median of the rest; the warmup did not fill some \
+             cache. Consider more warmup runs.",
+            samples[0] / rest
+        ));
+    }
+    out
+}
+
 /// Wall-clock statistics over `plan.runs` samples of one command.
 pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
     let subject = Subject {
@@ -405,6 +458,7 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
         dir: plan.dir.clone(),
         env: BTreeMap::new(),
         vars: BTreeMap::new(),
+        when: None,
         runs: Runs::Fixed(plan.runs),
         auto: AutoRuns {
             budget: crate::config::DEFAULT_BUDGET,
@@ -783,6 +837,7 @@ mod tests {
             dir: None,
             env: BTreeMap::new(),
             vars: BTreeMap::new(),
+            when: None,
             runs: Runs::Fixed(4),
             auto: AutoRuns {
                 budget: Duration::from_secs(30),
@@ -818,6 +873,7 @@ mod tests {
                 dir: None,
                 env: BTreeMap::new(),
                 vars: BTreeMap::new(),
+                when: None,
                 runs: Runs::Fixed(1),
                 auto: AutoRuns {
                     budget: Duration::from_secs(30),
@@ -863,6 +919,7 @@ mod tests {
             dir: None,
             env: BTreeMap::new(),
             vars: BTreeMap::new(),
+            when: None,
             runs: Runs::Auto,
             auto: AutoRuns {
                 budget: Duration::from_millis(400),
@@ -888,5 +945,27 @@ mod tests {
         assert_eq!(log.plans[0], [1 + 2, 2]);
         assert_eq!(log.plans.len(), 2);
         assert_eq!(log.finished.len(), 1 + fast + slow);
+    }
+
+    #[test]
+    fn steady_samples_raise_no_warning() {
+        assert!(warnings(&[10.0, 10.2, 9.9, 10.1, 10.0, 10.3]).is_empty());
+        assert!(warnings(&[10.0, 50.0]).is_empty(), "too few to judge");
+    }
+
+    #[test]
+    fn a_spike_is_an_outlier() {
+        let w = warnings(&[10.0, 10.2, 9.9, 10.1, 40.0, 10.0, 10.1]);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].starts_with("1 of 7 samples are outliers"), "{w:?}");
+    }
+
+    #[test]
+    fn a_slow_first_sample_is_called_out() {
+        let w = warnings(&[35.0, 10.0, 10.2, 9.9, 10.1, 10.0]);
+        assert!(
+            w.iter().any(|m| m.contains("first sample took 3.5x")),
+            "{w:?}"
+        );
     }
 }

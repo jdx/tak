@@ -9,6 +9,7 @@
 pub mod artifact;
 pub mod backfill;
 pub mod compare;
+pub mod condition;
 pub mod config;
 pub mod export;
 pub mod measure;

@@ -127,6 +127,12 @@ While a benchmark runs, tak shows progress on stderr: a bar in a terminal, or a 
 every tenth of the way (or every 30 seconds) anywhere else, such as CI logs. The time
 remaining is estimated separately for each subject from its own samples so far, so a slow
 subject's remaining samples are counted at its own speed. Pass `--no-progress` to turn it off.
+
+tak also warns on stderr when a subject's samples look suspect: when some are outliers (a
+modified z-score above 3.5, meaning something else ran or the command's work varies), or when
+the first timed sample took over twice the median of the rest (the warmup didn't fill some
+cache). Nothing is dropped; the minimum already isn't affected by either. The warning means
+the comparison may be worth running again.
 A multi-subject benchmark prints one summary line per subject. This is the output of a real run
 comparing `sleep 0.1` (`fast`) with `sleep 0.8` (`slow`), using `runs = "auto"`, `budget = "3s"`
 and `min_runs = 3`:
@@ -219,6 +225,30 @@ that sends a command to the wrong path. Template syntax is checked for the whole
 front; values are rendered only for the benchmarks being run, so a variable needed by one
 benchmark doesn't have to be set to run another.
 :::
+
+## Conditions
+
+`when` limits a benchmark or subject to the times an [expr](https://expr-lang.org) condition
+holds, the expression language mise uses for its own conditions. A comparison can list every
+tool and leave out whichever isn't installed:
+
+```toml
+[subject.vlt]
+when = '(env.VLT_BIN ?? "") != ""'
+cmd = ["{{ env.VLT_BIN }}", "install"]
+
+[bench.linux-only]
+when = 'os == "linux"'
+cmd = ["./target/release/mycli", "--version"]
+```
+
+A condition can use `env` (tak's environment), `os` and `arch` (as Rust names them: `linux`,
+`macos`, `x86_64`, `aarch64`), `ci` (whether `CI` is set to anything but empty or `false`),
+`bench`, and `subject`. It must evaluate to `true` or `false`. Conditions are decided before
+templates are rendered, so a skipped subject's variables don't need to be set. tak prints each
+skipped benchmark or subject on stderr, and a subject asked for with `--subject` whose `when` is
+false is an error. A benchmark's own subject table replaces a shared subject's `when`.
+Conditions are syntax-checked when `tak.toml` is loaded.
 
 ## Environment and runner settings
 

@@ -35,6 +35,7 @@ vars = { v = "x" }
 
 [subject.shared]
 cmd = ["true"]
+when = "true"
 counters = false
 runs = 3
 warmup = 0
@@ -48,6 +49,7 @@ vars = { w = "y" }
 
 [bench.single]
 cmd = "true"
+when = 'os != ""'
 runs = 2
 warmup = 0
 budget = "5s"
