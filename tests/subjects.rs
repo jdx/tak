@@ -677,6 +677,16 @@ cmd = ["true"]
         "{}",
         stderr(&export)
     );
+    // ...but a dry run writes nothing either way, so it does not fail.
+    let dry = p.run(&[
+        "--dry-run",
+        "--bench",
+        "off",
+        "--record",
+        "--export-json",
+        "r.json",
+    ]);
+    assert!(dry.status.success(), "{}", stderr(&dry));
     assert!(String::from_utf8_lossy(&none.stdout).contains("nothing to run"));
     assert!(stderr(&none).contains("skipping off"), "{}", stderr(&none));
 }
