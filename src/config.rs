@@ -211,7 +211,9 @@ pub fn parse_duration(text: &str) -> Result<Duration> {
     if !secs.is_finite() || secs <= 0.0 {
         bail!("a duration must be positive: {text:?}");
     }
-    Ok(Duration::from_secs_f64(secs))
+    // Finite and positive can still be too large for a Duration; that is a
+    // configuration error, not a panic.
+    Duration::try_from_secs_f64(secs).map_err(|_| anyhow::anyhow!("duration too large: {text:?}"))
 }
 
 /// The name a single-command benchmark records under. `compare` renders this
@@ -688,6 +690,10 @@ cmd = "mycli 'two words'""#,
         assert_eq!(parse_duration("45").unwrap(), Duration::from_secs(45));
         assert_eq!(parse_duration("2m").unwrap(), Duration::from_secs(120));
         assert_eq!(parse_duration("1.5h").unwrap(), Duration::from_secs(5400));
+        assert!(
+            parse_duration("1e300h").is_err(),
+            "too large is an error, not a panic"
+        );
     }
 
     /// A slow subject is held at the floor, a fast one at the ceiling, and

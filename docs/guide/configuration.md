@@ -109,12 +109,14 @@ While a benchmark runs, tak shows progress on stderr: a bar in a terminal, or a 
 every tenth of the way (or every 30 seconds) anywhere else, such as CI logs. The time
 remaining is estimated separately for each subject from its own samples so far, so a slow
 subject's remaining samples are counted at its own speed. Pass `--no-progress` to turn it off.
-A multi-subject benchmark prints one summary line per subject:
+A multi-subject benchmark prints one summary line per subject. This is the output of a real run
+comparing `sleep 0.1` (`fast`) with `sleep 0.8` (`slow`), using `runs = "auto"`, `budget = "3s"`
+and `min_runs = 3`:
 
-```
-  install: 2 subjects, interleaved (--seed 1234)
-    mycli      min    256.25  p50    257.13  mean    261.78 ± 8.82     max    271.95 ms  n=17
-    othertool  min    848.03  p50    883.24  mean    865.64 ± 24.90    max    883.24 ms  n=5
+```text
+  install: 2 subjects, interleaved (--seed 3)
+    fast  min    102.62  p50    106.99  mean    106.49 ± 1.50     max    108.41 ms  n=28
+    slow  min    803.47  p50    807.21  mean    806.24 ± 2.44     max    808.05 ms  n=3
 ```
 
 Every multi-subject run prints its seed. Pass it back with `--seed` to repeat an order.

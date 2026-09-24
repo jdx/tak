@@ -13,12 +13,88 @@
 
 use crate::measure::Observer;
 use std::io::{IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// How often a non-terminal prints, at most, when no tenth has been crossed.
 const LOG_EVERY: Duration = Duration::from_secs(30);
 
+/// How often the ticker wakes. A terminal bar redraws its elapsed time this
+/// often while a sample runs; a log checks whether LOG_EVERY has passed.
+const TICK: Duration = Duration::from_secs(1);
+
+/// The progress reporter. Samples can run for minutes — a cold install, or a
+/// prepare step that re-downloads everything — so a ticker thread keeps the
+/// output alive between them rather than only when one finishes.
 pub struct Bar {
+    state: Arc<Mutex<State>>,
+    stop: Arc<AtomicBool>,
+    ticker: Option<JoinHandle<()>>,
+}
+
+impl Bar {
+    pub fn new(label: &str, names: Vec<String>) -> Self {
+        let state = Arc::new(Mutex::new(State::new(label, names)));
+        let stop = Arc::new(AtomicBool::new(false));
+        let ticker = {
+            let (state, stop) = (Arc::clone(&state), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    std::thread::park_timeout(TICK);
+                    if !stop.load(Ordering::Relaxed) {
+                        lock(&state).tick();
+                    }
+                }
+            })
+        };
+        Bar {
+            state,
+            stop,
+            ticker: Some(ticker),
+        }
+    }
+
+    /// Stop the ticker and clear the bar so results print on a clean line.
+    /// Call once the run is over, whatever its outcome.
+    pub fn finish(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.ticker.take() {
+            t.thread().unpark();
+            t.join().ok();
+        }
+        lock(&self.state).clear();
+    }
+}
+
+impl Drop for Bar {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+/// A panic elsewhere must not also take the progress output down with it.
+fn lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
+    state.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Observer for Bar {
+    fn planned(&mut self, remaining: &[u64]) {
+        lock(&self.state).planned(remaining);
+    }
+    fn started(&mut self, subject: usize) {
+        lock(&self.state).started(subject);
+    }
+    fn finished(&mut self, subject: usize, elapsed: Duration) {
+        lock(&self.state).finished(subject, elapsed);
+    }
+    fn dropped(&mut self, subject: usize) {
+        lock(&self.state).dropped(subject);
+    }
+}
+
+struct State {
     label: String,
     names: Vec<String>,
     remaining: Vec<u64>,
@@ -33,11 +109,11 @@ pub struct Bar {
     drawn: bool,
 }
 
-impl Bar {
-    pub fn new(label: &str, names: Vec<String>) -> Self {
+impl State {
+    fn new(label: &str, names: Vec<String>) -> Self {
         let n = names.len();
         let now = Instant::now();
-        Bar {
+        State {
             label: label.to_string(),
             names,
             remaining: vec![0; n],
@@ -57,7 +133,7 @@ impl Bar {
     }
 
     /// Estimated time left, or `None` until anything has been timed.
-    pub fn eta(&self) -> Option<Duration> {
+    fn eta(&self) -> Option<Duration> {
         let (all, n) = self
             .spent
             .iter()
@@ -131,17 +207,32 @@ impl Bar {
         }
     }
 
-    /// Clear the bar so results print on a clean line. Call once the run is
-    /// over, whatever its outcome.
-    pub fn finish(&mut self) {
+    /// Called by the ticker between events: redraw a terminal bar so its
+    /// elapsed time keeps moving, and give a log its periodic line even while
+    /// one long sample is still running.
+    fn tick(&mut self) {
+        if self.total() == 0 {
+            return;
+        }
+        if self.tty {
+            if self.drawn {
+                self.draw(false);
+            }
+        } else if self.last_log.elapsed() >= LOG_EVERY {
+            self.draw(true);
+        }
+    }
+
+    fn clear(&mut self) {
         if self.tty && self.drawn {
             eprint!("\r\x1b[2K");
             std::io::stderr().flush().ok();
+            self.drawn = false;
         }
     }
 }
 
-impl Observer for Bar {
+impl Observer for State {
     fn planned(&mut self, remaining: &[u64]) {
         self.remaining = remaining.to_vec();
         self.draw(false);
@@ -187,8 +278,8 @@ pub fn fmt(d: Duration) -> String {
 mod tests {
     use super::*;
 
-    fn bar(names: &[&str]) -> Bar {
-        let mut b = Bar::new("b", names.iter().map(|s| s.to_string()).collect());
+    fn bar(names: &[&str]) -> State {
+        let mut b = State::new("b", names.iter().map(|s| s.to_string()).collect());
         b.tty = false;
         b.last_log = Instant::now();
         b
@@ -248,5 +339,31 @@ mod tests {
         assert!(line.chars().count() < 80, "{line}");
         assert!(line.contains("10/40") && line.contains("25%"), "{line}");
         assert!(line.contains("~7s left"), "{line}");
+    }
+
+    /// A log gets a line every LOG_EVERY even when no sample has finished —
+    /// the case of one very long prepare step or sample.
+    #[test]
+    fn a_log_hears_from_a_long_sample_before_it_finishes() {
+        let mut b = bar(&["slow"]);
+        b.planned(&[5]);
+        b.started(0);
+        let before = b.last_log;
+        b.tick();
+        assert_eq!(b.last_log, before, "too soon to log again");
+        b.last_log = Instant::now() - LOG_EVERY;
+        b.tick();
+        assert!(b.last_log > before, "the ticker logged mid-sample");
+    }
+
+    /// The ticker thread starts and stops cleanly, and finishing twice (the
+    /// explicit call, then Drop) is harmless.
+    #[test]
+    fn the_ticker_stops_when_finished() {
+        let mut b = Bar::new("b", vec!["a".into()]);
+        b.planned(&[1]);
+        b.finished(0, Duration::from_millis(1));
+        b.finish();
+        assert!(b.ticker.is_none());
     }
 }

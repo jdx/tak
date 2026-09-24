@@ -506,8 +506,12 @@ fn measure_bench(
             // One line per subject, in the order of a quick read: the floor
             // first, since that is the robust estimator, then the spread.
             // The command is in tak.toml; repeating it here buried the numbers.
+            // Instruction counts, when a subject opted in, stay on its line.
+            let count = metrics
+                .get("instructions")
+                .map_or(String::new(), |i| format!("  instructions {i:.0}"));
             println!(
-                "    {:<width$}  min {:>9.2}  p50 {:>9.2}  mean {:>9.2} ± {:<8.2} max {:>9.2} ms  n={}",
+                "    {:<width$}  min {:>9.2}  p50 {:>9.2}  mean {:>9.2} ± {:<8.2} max {:>9.2} ms  n={}{count}",
                 s.name,
                 metrics["wall_min_ms"],
                 metrics["wall_p50_ms"],
@@ -517,13 +521,6 @@ fn measure_bench(
                 samples.len(),
                 width = subjects.iter().map(|s| s.name.len()).max().unwrap_or(0),
             );
-            if let Some(i) = metrics.get("instructions") {
-                println!(
-                    "    {:<width$}  instructions {i:.0}",
-                    "",
-                    width = subjects.iter().map(|s| s.name.len()).max().unwrap_or(0)
-                );
-            }
         } else {
             println!("  {bench}  {}", s.cmd.join(" "));
         }
