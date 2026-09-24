@@ -67,7 +67,8 @@ privileges over your mounted checkout.
 
 ```
 src/main.rs        clap CLI, one cmd_* fn per subcommand, runner_class(), now_rfc3339()
-src/measure.rs     the two tiers: wall() and instructions()
+src/measure.rs     the two tiers: wall() and instructions(); interleaved multi-subject sampling
+src/export.rs      hyperfine-compatible `tak run --export-json`
 src/notes.rs       refs/notes/tak storage; shells out to git for all network I/O
 src/record.rs      the on-disk line format and its schema version
 src/config.rs      tak.toml — declared benchmarks

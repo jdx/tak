@@ -33,7 +33,7 @@ That leads to one narrow rule:
 | tier | metrics | may gate CI? |
 |---|---|---|
 | deterministic | `instructions` | yes |
-| timing | `wall_min_ms`, `wall_p50_ms`, `wall_mean_ms`, `wall_max_ms` | never |
+| timing | `wall_min_ms`, `wall_p50_ms`, `wall_mean_ms`, `wall_max_ms`, `wall_stddev_ms` | never |
 
 Syscall counts and peak RSS are not deterministic enough for a tight threshold because thread
 scheduling changes them.
@@ -43,6 +43,27 @@ scheduling changes them.
 Contention is one-sided: a busy machine can only make a run slower. A command that sometimes
 consults the network can only retire more instructions. The floor is therefore the robust
 estimator for both timing and instruction counts.
+
+## Comparing programs
+
+When one benchmark compares several programs, the order samples are taken in matters as much as
+how many there are. Running every sample of one program and then every sample of the next puts
+anything that drifts during the run on whichever program was running at the time. That drift
+might be contention on a shared host, thermal throttling or a cache filling up. The difference
+then looks like one program being slower than another.
+
+tak takes one sample of each program per round and shuffles the order every round. Drift is
+then spread across all the programs instead of landing on one of them. Shuffling also stops a
+program from always running first, or always running right after the same other program and
+inheriting whatever state it left behind. A program with fewer samples takes part in evenly
+spaced rounds rather than only the early ones.
+
+A `prepare` step can reset state before each sample without being timed. It runs directly
+before its sample, so the reset is as fresh for the last round as for the first.
+
+The seed makes an order repeatable. It does not make the timings repeatable: wall-clock
+comparisons between programs are still subject to the noise described above, and are never
+gated.
 
 ## Why runner classes matter
 

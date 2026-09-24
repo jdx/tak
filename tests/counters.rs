@@ -157,3 +157,48 @@ fn wall_clock_works_without_counters() {
     assert!(m["wall_p50_ms"] <= m["wall_max_ms"]);
     assert!(m["wall_min_ms"] > 0.0);
 }
+
+/// A declared subject's prepare step runs before every cachegrind run, and its
+/// env reaches the subject under valgrind — each counted run has to start from
+/// the same state the timed samples did.
+#[cfg(unix)]
+#[test]
+fn a_subject_is_prepared_before_every_counted_run() {
+    if !valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("tak-counters-prep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let s = tak_cli::config::Subject {
+        name: "x".into(),
+        cmd: ["/bin/sh", "-c", "echo \"run:$MARK\" >> log"]
+            .map(String::from)
+            .to_vec(),
+        prepare: Some(
+            ["/bin/sh", "-c", "echo prep >> log"]
+                .map(String::from)
+                .to_vec(),
+        ),
+        dir: Some(dir.clone()),
+        env: [("MARK".to_string(), "set".to_string())].into(),
+        runs: 1,
+        warmup: 0,
+        counters: true,
+    };
+    let c = measure::subject_instructions(&s, &Settings::default())
+        .expect("cachegrind invocation failed")
+        .expect("valgrind present but no I refs parsed");
+    assert!(
+        c.min > 10_000,
+        "implausibly low instruction count: {}",
+        c.min
+    );
+
+    let log = std::fs::read_to_string(dir.join("log")).unwrap();
+    let expected = "prep\nrun:set\n".repeat(c.runs as usize);
+    assert_eq!(log, expected);
+    std::fs::remove_dir_all(&dir).ok();
+}

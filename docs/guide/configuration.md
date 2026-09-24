@@ -23,6 +23,69 @@ Command-line values override the file:
 tak run --bench startup --runs 20 --warmup 3
 ```
 
+## Resetting state before each sample
+
+`prepare` runs before every sample, warmups included, and is not timed. Use it when each sample
+has to start from the same state, such as an install benchmark that needs an empty
+`node_modules`:
+
+```toml
+[bench.install]
+cmd = ["./target/release/mycli", "install"]
+prepare = ["sh", "-c", "rm -rf node_modules"]
+dir = "fixtures/app"
+env = { MYCLI_OFFLINE = "1" }
+```
+
+`prepare` uses the same syntax as `cmd`, and there is still no implicit shell: write
+`["sh", "-c", "…"]` when you need one. A shell costs nothing here because `prepare` is outside
+the measurement. `dir` is relative to `tak.toml` and only sets the working directory. A program path containing a `/`, such as `./target/release/mycli`, is still found relative to `tak.toml`; a bare name like `mycli` is looked up on `PATH`. Variables in `env` are set after tak removes
+the ones in `env.deny`, so a variable written here reaches the command even when it is denied
+by default.
+
+## Comparing several programs
+
+To compare programs against each other, declare them as subjects of one benchmark instead of
+giving the benchmark a `cmd`:
+
+```toml
+[bench.install]
+runs = 10
+warmup = 1
+prepare = ["sh", "-c", "rm -rf node_modules"]
+
+[bench.install.subject.mycli]
+cmd = ["./target/release/mycli", "install"]
+dir = "fixtures/mycli"
+
+[bench.install.subject.othertool]
+cmd = ["othertool", "install"]
+dir = "fixtures/othertool"
+env = { HOME = "/tmp/othertool-home" }
+runs = 5
+```
+
+tak interleaves the samples: every round takes one sample of each subject in a freshly shuffled
+order, rather than every sample of one subject and then the next. See
+[methodology](/guide/methodology#comparing-programs) for why.
+
+- Subjects inherit the benchmark's `runs`, `warmup`, `prepare`, `dir` and `env`. A subject's
+  own `prepare` replaces the benchmark's, and its `env` entries override matching keys.
+- A subject with fewer `runs` than the others is spread evenly across the run.
+- Each subject is recorded as its own series, with the subject name as the tool. Instruction
+  counts are off for subjects unless they set `counters = true`, so another program's upgrade
+  cannot trip the gate.
+- If a subject fails, tak drops it and keeps measuring the others. The run then exits non-zero
+  and `--record` writes nothing, because a partial set of measurements would look complete.
+
+Every multi-subject run prints its seed. Pass it back with `--seed` to repeat an order.
+`--subject NAME` limits a run to the named subjects, and `--export-json PATH` writes every sample
+in hyperfine's `--export-json` shape, with `bench` and `subject` fields added:
+
+```sh
+tak run --bench install --seed 1234 --export-json results.json
+```
+
 ## Environment and runner settings
 
 tak removes known sources of non-determinism from measured commands. Inspect every resolved

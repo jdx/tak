@@ -36,6 +36,15 @@ cmd run help="Benchmark a command, or everything declared in tak.toml." {
     }
     flag --no-counters help="Skip instruction counting even where valgrind is available."
     flag --record help="Append the result to refs/notes/tak for the current commit."
+    flag --subject help="Measure only this subject of each multi-subject benchmark. Repeatable. Benchmarks with none of the named subjects are skipped." var=#true {
+        arg <NAME>
+    }
+    flag --seed help="Seed for the order subjects are sampled in. Every multi-subject run prints the seed it used, so an order can be repeated." {
+        arg <N>
+    }
+    flag --export-json help="Write every sample and summary to PATH as hyperfine-compatible JSON." {
+        arg <PATH>
+    }
     flag "-h --help" help="Print help" action=help builtin=#true
     arg "[CMD]..." help="Command to benchmark, after `--`. Omit to run what tak.toml declares." double_dash=required
 }

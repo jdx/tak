@@ -9,7 +9,8 @@ use usage_rs::{Args, Cli, Subcommands};
 
 use tak_cli::backfill;
 use tak_cli::compare;
-use tak_cli::config::{self, Config, DEFAULT_RUNS, DEFAULT_WARMUP};
+use tak_cli::config::{self, Config, DEFAULT_RUNS, DEFAULT_WARMUP, SELF_TOOL, Subject};
+use tak_cli::export::{self, ExportResult};
 use tak_cli::measure::{self, Plan};
 use tak_cli::notes;
 use tak_cli::record::{Record, SCHEMA_VERSION};
@@ -84,6 +85,17 @@ enum Cmd {
         /// Append the result to refs/notes/tak for the current commit.
         #[usage(long)]
         record: bool,
+        /// Measure only this subject of each multi-subject benchmark.
+        /// Repeatable. Benchmarks with none of the named subjects are skipped.
+        #[usage(long, value_name = "NAME")]
+        subject: Vec<String>,
+        /// Seed for the order subjects are sampled in. Every multi-subject
+        /// run prints the seed it used, so an order can be repeated.
+        #[usage(long, value_name = "N")]
+        seed: Option<u64>,
+        /// Write every sample and summary to PATH as hyperfine-compatible JSON.
+        #[usage(long, value_name = "PATH")]
+        export_json: Option<std::path::PathBuf>,
         /// Command to benchmark, after `--`. Omit to run what tak.toml declares.
         #[usage(arg, double_dash = "required")]
         cmd: Vec<String>,
@@ -248,44 +260,55 @@ fn now_rfc3339() -> String {
     )
 }
 
-fn cmd_run(
+/// `tak run`'s options, gathered so they travel as one value.
+struct RunOpts {
     bench: Option<String>,
     runs: Option<u32>,
     warmup: Option<u32>,
     no_counters: bool,
-    record_it: bool,
-    cmd: Vec<String>,
-    settings: &Settings,
-) -> Result<()> {
+    record: bool,
+    subjects: Vec<String>,
+    seed: Option<u64>,
+    export_json: Option<std::path::PathBuf>,
+}
+
+/// One subject's successful measurement.
+struct Measured {
+    bench: String,
+    subject: Subject,
+    samples: Vec<f64>,
+    record: Record,
+}
+
+fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
     // An explicit command always wins; tak.toml is only consulted when none is
     // given, so ad-hoc measurement never depends on repository state.
     if cmd.is_empty() {
-        return run_declared(bench, runs, warmup, no_counters, record_it, settings);
+        return run_declared(opts, settings);
     }
-    let bench = bench.unwrap_or_else(|| "default".to_string());
-    let plan = Plan {
-        cmd: cmd.clone(),
-        warmup: warmup.unwrap_or(DEFAULT_WARMUP),
-        runs: runs.unwrap_or(DEFAULT_RUNS),
+    if !opts.subjects.is_empty() {
+        bail!(
+            "--subject selects subjects declared in tak.toml; it cannot be used with a command after `--`"
+        );
+    }
+    let bench = opts.bench.clone().unwrap_or_else(|| "default".to_string());
+    let subject = Subject {
+        name: SELF_TOOL.to_string(),
+        cmd,
+        prepare: None,
         dir: None,
-        settings: settings.clone(),
+        env: BTreeMap::new(),
+        runs: opts.runs.unwrap_or(DEFAULT_RUNS),
+        warmup: opts.warmup.unwrap_or(DEFAULT_WARMUP),
+        counters: true,
     };
-    let rec = measure_and_report(&bench, &plan, no_counters)?;
-    if record_it {
-        record_all(&[rec])?;
-    }
-    Ok(())
+    let seed = opts.seed.unwrap_or_else(|| fastrand::u64(..));
+    let (measured, _) = measure_bench(&bench, &[subject], false, seed, &opts, settings)?;
+    finish(measured, Vec::new(), &opts)
 }
 
 /// Run the benchmarks declared in `tak.toml`.
-fn run_declared(
-    only: Option<String>,
-    runs: Option<u32>,
-    warmup: Option<u32>,
-    no_counters: bool,
-    record_it: bool,
-    settings: &Settings,
-) -> Result<()> {
+fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let Some((path, cfg)) = Config::find(&cwd)? else {
         bail!(
@@ -298,7 +321,7 @@ fn run_declared(
         );
     };
 
-    let selected: Vec<_> = match &only {
+    let selected: Vec<_> = match &opts.bench {
         Some(name) => {
             let b = cfg.bench.get(name).with_context(|| {
                 format!(
@@ -316,30 +339,88 @@ fn run_declared(
         None => cfg.bench.iter().map(|(k, v)| (k.clone(), v)).collect(),
     };
 
-    if selected.is_empty() {
+    // Commands are relative to tak.toml, not to wherever this was invoked.
+    let root = path.parent().map(Path::to_path_buf).unwrap_or_default();
+
+    // Resolve and filter everything before measuring anything, so a mistyped
+    // --subject fails now rather than after the benchmarks before it ran.
+    let mut plans = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (name, b) in selected {
+        let mut subjects = b.subjects()?;
+        for s in &mut subjects {
+            seen.insert(s.name.clone());
+            s.anchor(&root);
+            // An explicit flag beats the file; the file beats the default.
+            s.runs = opts.runs.unwrap_or(s.runs);
+            s.warmup = opts.warmup.unwrap_or(s.warmup);
+        }
+        if !opts.subjects.is_empty() {
+            subjects.retain(|s| opts.subjects.contains(&s.name));
+            if subjects.is_empty() {
+                continue;
+            }
+        }
+        plans.push((name, b.is_multi(), subjects));
+    }
+    if let Some(missing) = opts.subjects.iter().find(|s| !seen.contains(*s)) {
+        bail!(
+            "no subject `{missing}` in the selected benchmarks (found: {})",
+            seen.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+
+    if plans.is_empty() {
         println!("{} declares no benchmarks", path.display());
         return Ok(());
     }
 
-    // Commands are relative to tak.toml, not to wherever this was invoked.
-    let root = path.parent().map(Path::to_path_buf);
-
-    // Everything is measured before anything is written. Recording as each
-    // benchmark finishes would leave a partial set behind when a later one
-    // fails to spawn — an incomplete run that looks like a complete one.
-    let mut records = Vec::new();
-    for (name, b) in selected {
-        let plan = Plan {
-            cmd: b.argv()?,
-            // An explicit flag beats the file; the file beats the default.
-            warmup: warmup.unwrap_or_else(|| b.warmup()),
-            runs: runs.unwrap_or_else(|| b.runs()),
-            dir: root.clone(),
-            settings: settings.clone(),
-        };
-        records.push(measure_and_report(&name, &plan, no_counters)?);
+    let seed = opts.seed.unwrap_or_else(|| fastrand::u64(..));
+    let mut measured = Vec::new();
+    let mut failed = Vec::new();
+    for (name, multi, subjects) in &plans {
+        let (m, f) = measure_bench(name, subjects, *multi, seed, &opts, settings)?;
+        measured.extend(m);
+        failed.extend(f);
     }
-    if record_it {
+    finish(measured, failed, &opts)
+}
+
+/// Export and record what was measured, then report any failures.
+fn finish(measured: Vec<Measured>, failed: Vec<String>, opts: &RunOpts) -> Result<()> {
+    // The export is written even when a subject failed: it is this run's
+    // results, the failed subject is simply absent, and a consumer comparing
+    // subjects has to handle a missing one anyway.
+    if let Some(path) = &opts.export_json {
+        let results = measured
+            .iter()
+            .map(|m| {
+                let command = if m.subject.name == SELF_TOOL {
+                    &m.bench
+                } else {
+                    &m.subject.name
+                };
+                ExportResult::new(&m.bench, &m.subject.name, command, &m.samples)
+            })
+            .collect();
+        export::write(path, results)?;
+        println!(
+            "\n  exported {} result(s) to {}",
+            measured.len(),
+            path.display()
+        );
+    }
+    if !failed.is_empty() {
+        // Everything is measured before anything is written, and that holds
+        // here too: a run missing a subject is stored whole or not at all,
+        // because a partial set left in history looks like a complete one.
+        if opts.record {
+            eprintln!("\n  not recording: a run with a failed subject would be stored incomplete");
+        }
+        bail!("{} subject(s) failed: {}", failed.len(), failed.join(", "));
+    }
+    if opts.record {
+        let records: Vec<Record> = measured.into_iter().map(|m| m.record).collect();
         record_all(&records)?;
     }
     Ok(())
@@ -362,61 +443,112 @@ fn record_all(records: &[Record]) -> Result<()> {
     Ok(())
 }
 
-/// Measure one benchmark, print it, and optionally record it.
-/// Measure one benchmark and print it. Returns the record; writing is the
-/// caller's job, so a multi-benchmark run can be stored atomically.
-fn measure_and_report(bench: &str, plan: &Plan, no_counters: bool) -> Result<Record> {
-    let cmd = &plan.cmd;
-    let mut metrics: BTreeMap<String, f64> = measure::wall(plan)?;
-
-    if !no_counters {
-        match measure::instructions(cmd, plan.dir.as_deref(), &plan.settings) {
-            Ok(Some(c)) => {
-                metrics.insert("instructions".into(), c.min as f64);
-                if c.is_suspect() {
-                    eprintln!(
-                        "warning: instruction count varied {:.2}% across {} runs. \
-                         The metric is deterministic, so this means the command \
-                         itself does environment-dependent work (an update check, \
-                         a cache it populates on first run, DNS). Its counts are \
-                         not a usable gate until that is removed.",
-                        c.spread_pct(),
-                        c.runs
-                    );
-                }
+/// Measure one benchmark's subjects, interleaved, and print them.
+///
+/// A single-command benchmark fails as a whole, as it always has. In a
+/// multi-subject one a failing subject is reported and dropped, and its name
+/// is returned alongside the subjects that succeeded.
+fn measure_bench(
+    bench: &str,
+    subjects: &[Subject],
+    multi: bool,
+    seed: u64,
+    opts: &RunOpts,
+    settings: &Settings,
+) -> Result<(Vec<Measured>, Vec<String>)> {
+    if multi {
+        println!(
+            "  {bench}: {} subjects, interleaved (--seed {seed})",
+            subjects.len()
+        );
+    }
+    let results = measure::interleaved(subjects, measure::seed_for(seed, bench), settings);
+    let mut measured = Vec::new();
+    let mut failed = Vec::new();
+    for (s, result) in subjects.iter().zip(results) {
+        let samples = match result {
+            Ok(samples) => samples,
+            Err(e) if !multi => return Err(e),
+            Err(e) => {
+                eprintln!("  error: {bench} ({}) dropped: {e:#}", s.name);
+                failed.push(format!("{bench} ({})", s.name));
+                continue;
             }
-            Ok(None) => eprintln!(
-                "note: valgrind not found — recording timing only. \
-                 Instruction counts are the only gate-able metric; on macOS/Windows \
-                 run tak in a Linux container to get them."
-            ),
-            // Valgrind exists but the measurement failed. Say so rather than
-            // blaming a missing install, and keep the timing we did collect.
-            Err(e) => eprintln!("warning: instruction counting failed: {e}"),
+        };
+        let mut metrics = measure::stats(&samples);
+        if s.counters && !opts.no_counters {
+            count_into(&mut metrics, s, settings);
         }
-    }
 
-    println!("  {bench}  {}", cmd.join(" "));
-    for (k, v) in &metrics {
-        if k == "wall_n" {
-            continue;
-        }
-        if k == "instructions" {
-            println!("  {k:<16} {v:>14.0}");
+        if multi {
+            println!("  {bench} ({})  {}", s.name, s.cmd.join(" "));
         } else {
-            println!("  {k:<16} {v:>14.2}");
+            println!("  {bench}  {}", s.cmd.join(" "));
         }
-    }
+        for (k, v) in &metrics {
+            if k == "wall_n" {
+                continue;
+            }
+            if k == "instructions" {
+                println!("  {k:<16} {v:>14.0}");
+            } else {
+                println!("  {k:<16} {v:>14.2}");
+            }
+        }
 
-    Ok(Record {
-        v: SCHEMA_VERSION,
-        bench: bench.to_string(),
-        tool: std::env::var("TAK_TOOL").unwrap_or_else(|_| "self".into()),
-        version: None,
-        runner: runner_class(&plan.settings),
-        ts: now_rfc3339(),
-        metrics,
-    })
+        // TAK_TOOL only ever renames the single-command series. Keyed on the
+        // benchmark's shape rather than the subject's name, so a declared
+        // subject can never be recorded as anything but itself.
+        let tool = if multi {
+            s.name.clone()
+        } else {
+            std::env::var("TAK_TOOL").unwrap_or_else(|_| SELF_TOOL.into())
+        };
+        measured.push(Measured {
+            bench: bench.to_string(),
+            subject: s.clone(),
+            samples,
+            record: Record {
+                v: SCHEMA_VERSION,
+                bench: bench.to_string(),
+                tool,
+                version: None,
+                runner: runner_class(settings),
+                ts: now_rfc3339(),
+                metrics,
+            },
+        });
+    }
+    Ok((measured, failed))
+}
+
+/// Add a subject's instruction count to its metrics, warning rather than
+/// failing when it cannot be had: the timing already collected is still good.
+fn count_into(metrics: &mut BTreeMap<String, f64>, s: &Subject, settings: &Settings) {
+    match measure::subject_instructions(s, settings) {
+        Ok(Some(c)) => {
+            metrics.insert("instructions".into(), c.min as f64);
+            if c.is_suspect() {
+                eprintln!(
+                    "warning: instruction count varied {:.2}% across {} runs. \
+                     The metric is deterministic, so this means the command \
+                     itself does environment-dependent work (an update check, \
+                     a cache it populates on first run, DNS). Its counts are \
+                     not a usable gate until that is removed.",
+                    c.spread_pct(),
+                    c.runs
+                );
+            }
+        }
+        Ok(None) => eprintln!(
+            "note: valgrind not found — recording timing only. \
+             Instruction counts are the only gate-able metric; on macOS/Windows \
+             run tak in a Linux container to get them."
+        ),
+        // Valgrind exists but the measurement failed. Say so rather than
+        // blaming a missing install, and keep the timing we did collect.
+        Err(e) => eprintln!("warning: instruction counting failed: {e}"),
+    }
 }
 
 fn cmd_history(rev: String, remote: String) -> Result<()> {
@@ -843,13 +975,21 @@ fn main() -> Result<()> {
             warmup,
             no_counters,
             record,
+            subject,
+            seed,
+            export_json,
             cmd,
         } => cmd_run(
-            bench,
-            runs,
-            warmup,
-            no_counters,
-            record,
+            RunOpts {
+                bench,
+                runs,
+                warmup,
+                no_counters,
+                record,
+                subjects: subject,
+                seed,
+                export_json,
+            },
             cmd,
             &resolve_settings(&overrides)?,
         ),

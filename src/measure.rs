@@ -13,9 +13,11 @@
 //! clock (~1%) but not deterministic, because they move with thread scheduling.
 //! They are recorded, and may be flagged, but must not gate at a tight threshold.
 
+use crate::config::{SELF_TOOL, Subject};
 use crate::settings::Settings;
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -60,18 +62,38 @@ fn subject(bin: &str, settings: &Settings) -> Command {
     c
 }
 
+/// Where a command runs and what it sees, beyond its argv.
+#[derive(Debug, Clone, Copy)]
+struct Site<'a> {
+    dir: Option<&'a Path>,
+    env: &'a BTreeMap<String, String>,
+    settings: &'a Settings,
+}
+
+/// Build a spawn of `argv` at `site`.
+///
+/// Declared variables are applied after the scrub. A variable written into
+/// `tak.toml` for a subject is an explicit choice, not something inherited by
+/// accident, which is the only thing the scrub exists to stop.
+fn command(argv: &[String], site: &Site) -> Result<Command> {
+    let (bin, args) = argv.split_first().context("empty command")?;
+    let mut c = subject(bin, site.settings);
+    c.args(args).envs(site.env);
+    if let Some(d) = site.dir {
+        c.current_dir(d);
+    }
+    Ok(c)
+}
+
 /// Run once, discarding output, returning elapsed wall time in milliseconds.
 ///
 /// No shell. Spawning a shell adds its own startup cost and variance to every
 /// sample, which for commands in the 10ms range is a large fraction of the
 /// measurement — the same reasoning behind poop's refusal to support one.
-fn time_once(cmd: &[String], dir: Option<&std::path::Path>, settings: &Settings) -> Result<f64> {
-    let (bin, args) = cmd.split_first().context("empty command")?;
-    let mut c = subject(bin, settings);
-    c.args(args).stdout(Stdio::null()).stderr(Stdio::null());
-    if let Some(d) = dir {
-        c.current_dir(d);
-    }
+fn time_once(cmd: &[String], site: &Site) -> Result<f64> {
+    let mut c = command(cmd, site)?;
+    c.stdout(Stdio::null()).stderr(Stdio::null());
+    let bin = &cmd[0];
     let start = Instant::now();
     let status = c
         .status()
@@ -83,37 +105,198 @@ fn time_once(cmd: &[String], dir: Option<&std::path::Path>, settings: &Settings)
     Ok(elapsed)
 }
 
-/// Wall-clock statistics over `plan.runs` samples.
+/// How much of a failing prepare step's stderr to keep for the error message.
+/// Enough for the last few lines; a verbose reset command's full output would
+/// otherwise sit in memory before every sample.
+const PREPARE_STDERR_TAIL: usize = 4096;
+
+/// Run a subject's prepare step. Untimed, so reading its stderr for the error
+/// message costs the measurement nothing.
+fn prepare_once(cmd: &[String], site: &Site) -> Result<()> {
+    use std::io::Read;
+
+    let mut c = command(cmd, site)?;
+    let bin = &cmd[0];
+    let mut child = c
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to spawn prepare `{bin}`"))?;
+    // Keep only the tail, reading as it arrives so the child never blocks on a
+    // full pipe.
+    let mut tail: Vec<u8> = Vec::new();
+    if let Some(mut err) = child.stderr.take() {
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = err.read(&mut buf).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            tail.extend_from_slice(&buf[..n]);
+            if tail.len() > PREPARE_STDERR_TAIL {
+                tail.drain(..tail.len() - PREPARE_STDERR_TAIL);
+            }
+        }
+    }
+    let status = child
+        .wait()
+        .with_context(|| format!("failed to wait for prepare `{bin}`"))?;
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&tail);
+        bail!(
+            "prepare `{bin}` exited with {status}: {}",
+            stderr.lines().last().unwrap_or("(no output)").trim()
+        );
+    }
+    Ok(())
+}
+
+/// One entry in a run's sample order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Slot {
+    /// Index into the subjects being measured.
+    pub subject: usize,
+    /// Whether this sample is kept. Warmup samples run through the same
+    /// prepare-then-run path and are discarded.
+    pub timed: bool,
+}
+
+/// The order in which to take samples: every warmup round, then every timed
+/// round, each round a fresh shuffle of the subjects due in it.
+///
+/// Measuring one subject to completion before starting the next puts any
+/// drift over the run — contention on a shared host, thermal throttling, a
+/// cache filling up — entirely on whichever subjects ran while it happened,
+/// where it reads as a difference between them. One sample of each per round
+/// spreads that drift across all of them, and shuffling each round stops any
+/// subject from systematically running first (cold) or right after a
+/// particular other one (whose leftovers it inherits).
+///
+/// A subject with fewer samples than there are rounds sits out evenly spaced
+/// rounds rather than dropping out at the end, which would leave the late
+/// part of the run — and its drift — to the others.
+///
+/// `counts` is `(warmup, runs)` per subject. The same seed gives the same
+/// order for the same subjects.
+pub fn schedule(counts: &[(u32, u32)], seed: u64) -> Vec<Slot> {
+    let mut rng = fastrand::Rng::with_seed(seed);
+    let mut out = Vec::new();
+    for timed in [false, true] {
+        let count = |i: usize| {
+            let (warmup, runs) = counts[i];
+            u64::from(if timed { runs } else { warmup })
+        };
+        let rounds = (0..counts.len()).map(count).max().unwrap_or(0);
+        for round in 0..rounds {
+            // Subject i is due in the rounds where floor(r * k / R) steps up:
+            // exactly k of the R rounds, as evenly spaced as integers allow.
+            let mut due: Vec<usize> = (0..counts.len())
+                .filter(|&i| (round + 1) * count(i) / rounds > round * count(i) / rounds)
+                .collect();
+            rng.shuffle(&mut due);
+            out.extend(due.into_iter().map(|subject| Slot { subject, timed }));
+        }
+    }
+    out
+}
+
+/// Derive a benchmark's seed from the run's, so `--bench x --seed n` takes
+/// the same order for `x` as the full run with `--seed n` did.
+pub fn seed_for(seed: u64, bench: &str) -> u64 {
+    // FNV-1a: a fixed function, unlike std's randomly keyed hasher.
+    bench.bytes().fold(seed ^ 0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// Measure several subjects against each other, interleaved.
+///
+/// Returns each subject's timed samples in the order they were taken, or the
+/// error that stopped it. A failing subject is dropped from the remaining
+/// rounds and the others carry on: one competitor breaking should not throw
+/// away a long run's worth of everyone else's samples. Subject directories
+/// are used as given, so the caller resolves them first.
+pub fn interleaved(subjects: &[Subject], seed: u64, settings: &Settings) -> Vec<Result<Vec<f64>>> {
+    let counts: Vec<_> = subjects.iter().map(|s| (s.warmup, s.runs)).collect();
+    let mut results: Vec<Result<Vec<f64>>> = subjects
+        .iter()
+        .map(|s| {
+            // Zero runs would leave nothing to report on.
+            if s.runs == 0 {
+                bail!("runs must be at least 1");
+            }
+            Ok(Vec::with_capacity(s.runs as usize))
+        })
+        .collect();
+    for slot in schedule(&counts, seed) {
+        let Ok(samples) = &mut results[slot.subject] else {
+            continue;
+        };
+        let s = &subjects[slot.subject];
+        let site = Site {
+            dir: s.dir.as_deref(),
+            env: &s.env,
+            settings,
+        };
+        let taken = s
+            .prepare
+            .as_deref()
+            .map_or(Ok(()), |p| prepare_once(p, &site))
+            .and_then(|()| time_once(&s.cmd, &site));
+        match taken {
+            Ok(ms) if slot.timed => samples.push(ms),
+            Ok(_) => {}
+            Err(e) => results[slot.subject] = Err(e),
+        }
+    }
+    results
+}
+
+/// Wall-clock statistics over a set of samples, in milliseconds.
 ///
 /// Reports `min` alongside the mean because contention is one-sided — a busy
 /// machine can only make a run slower, never faster — so the minimum is a far
-/// more robust estimator than the mean on shared CI hardware.
-pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
-    // Zero runs would leave `samples` empty and index straight off the end.
-    if plan.runs == 0 {
-        bail!("runs must be at least 1");
-    }
-    let dir = plan.dir.as_deref();
-    for _ in 0..plan.warmup {
-        time_once(&plan.cmd, dir, &plan.settings)?;
-    }
-    let mut samples = Vec::with_capacity(plan.runs as usize);
-    for _ in 0..plan.runs {
-        samples.push(time_once(&plan.cmd, dir, &plan.settings)?);
-    }
-    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-    let n = samples.len();
-    let mean = samples.iter().sum::<f64>() / n as f64;
-    let p50 = samples[n / 2];
-
-    Ok(BTreeMap::from([
-        ("wall_min_ms".to_string(), samples[0]),
-        ("wall_p50_ms".to_string(), p50),
+/// more robust estimator than the mean on shared CI hardware. The standard
+/// deviation is there to show how noisy the run was, not to be compared.
+pub fn stats(samples: &[f64]) -> BTreeMap<String, f64> {
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let n = sorted.len();
+    let mean = sorted.iter().sum::<f64>() / n as f64;
+    // Sample (n - 1) deviation, as hyperfine reports; a single sample has none.
+    let stddev = if n > 1 {
+        (sorted.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64).sqrt()
+    } else {
+        0.0
+    };
+    BTreeMap::from([
+        ("wall_min_ms".to_string(), sorted[0]),
+        ("wall_p50_ms".to_string(), sorted[n / 2]),
         ("wall_mean_ms".to_string(), mean),
-        ("wall_max_ms".to_string(), samples[n - 1]),
+        ("wall_max_ms".to_string(), sorted[n - 1]),
+        ("wall_stddev_ms".to_string(), stddev),
         ("wall_n".to_string(), n as f64),
-    ]))
+    ])
+}
+
+/// Wall-clock statistics over `plan.runs` samples of one command.
+pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
+    let subject = Subject {
+        name: SELF_TOOL.to_string(),
+        cmd: plan.cmd.clone(),
+        prepare: None,
+        dir: plan.dir.clone(),
+        env: BTreeMap::new(),
+        runs: plan.runs,
+        warmup: plan.warmup,
+        counters: false,
+    };
+    // One subject has one possible order, so the seed is irrelevant.
+    let samples = interleaved(std::slice::from_ref(&subject), 0, &plan.settings)
+        .pop()
+        .expect("one result per subject")?;
+    Ok(stats(&samples))
 }
 
 /// Is cachegrind usable on this machine?
@@ -185,24 +368,54 @@ pub fn instructions(
     dir: Option<&std::path::Path>,
     settings: &Settings,
 ) -> Result<Option<Counted>> {
+    count(
+        cmd,
+        None,
+        &Site {
+            dir,
+            env: &BTreeMap::new(),
+            settings,
+        },
+    )
+}
+
+/// [`instructions`] for a declared subject: its environment, and its prepare
+/// step before every cachegrind run, since each run has to start from the
+/// same state the timed samples did.
+pub fn subject_instructions(s: &Subject, settings: &Settings) -> Result<Option<Counted>> {
+    count(
+        &s.cmd,
+        s.prepare.as_deref(),
+        &Site {
+            dir: s.dir.as_deref(),
+            env: &s.env,
+            settings,
+        },
+    )
+}
+
+fn count(cmd: &[String], prepare: Option<&[String]>, site: &Site) -> Result<Option<Counted>> {
     if !valgrind_available() {
         return Ok(None);
     }
 
     let mut samples: Vec<u64> = Vec::with_capacity(COUNTER_RUNS as usize);
     for _ in 0..COUNTER_RUNS {
-        let mut c = subject("valgrind", settings);
-        c.args([
+        if let Some(p) = prepare {
+            prepare_once(p, site)?;
+        }
+        let mut argv: Vec<String> = [
+            "valgrind",
             "--tool=cachegrind",
             "--cache-sim=no",
             "--branch-sim=no",
             "--cachegrind-out-file=/dev/null",
-        ])
-        .args(cmd)
-        .stdout(Stdio::null());
-        if let Some(d) = dir {
-            c.current_dir(d);
-        }
+        ]
+        .map(String::from)
+        .to_vec();
+        argv.extend_from_slice(cmd);
+        let mut c = command(&argv, site)?;
+        c.stdout(Stdio::null());
         let out = c.output().context("failed to run valgrind")?;
 
         // cachegrind writes its summary to stderr as e.g. "I refs:  48,349,132".
@@ -349,5 +562,135 @@ mod tests {
         assert!(m["wall_min_ms"] <= m["wall_p50_ms"]);
         assert!(m["wall_p50_ms"] <= m["wall_max_ms"]);
         assert_eq!(m["wall_n"], 5.0);
+    }
+
+    /// Every subject gets exactly its warmups and runs, warmups first.
+    #[test]
+    fn the_schedule_gives_each_subject_its_counts() {
+        let counts = [(2, 10), (1, 5), (0, 3)];
+        let order = schedule(&counts, 7);
+        for (i, &(warmup, runs)) in counts.iter().enumerate() {
+            let of = |timed| {
+                order
+                    .iter()
+                    .filter(|s| s.subject == i && s.timed == timed)
+                    .count()
+            };
+            assert_eq!(of(false), warmup as usize, "subject {i} warmups");
+            assert_eq!(of(true), runs as usize, "subject {i} runs");
+        }
+        let first_timed = order.iter().position(|s| s.timed).unwrap();
+        assert!(order[first_timed..].iter().all(|s| s.timed));
+    }
+
+    #[test]
+    fn the_same_seed_gives_the_same_order() {
+        let counts = [(1, 8), (1, 8), (1, 8)];
+        assert_eq!(schedule(&counts, 42), schedule(&counts, 42));
+        assert_ne!(schedule(&counts, 42), schedule(&counts, 43));
+    }
+
+    /// Interleaving is the point: with equal counts, every round holds each
+    /// subject once, and the order is not the same in every round.
+    #[test]
+    fn each_round_runs_every_subject_once_in_a_varying_order() {
+        let order = schedule(&[(0, 20), (0, 20), (0, 20)], 1);
+        let rounds: Vec<Vec<usize>> = order
+            .chunks(3)
+            .map(|r| r.iter().map(|s| s.subject).collect())
+            .collect();
+        assert_eq!(rounds.len(), 20);
+        for r in &rounds {
+            let mut sorted = r.clone();
+            sorted.sort();
+            assert_eq!(sorted, [0, 1, 2], "round {r:?}");
+        }
+        assert!(rounds.iter().any(|r| r != &rounds[0]), "never shuffled");
+    }
+
+    /// A subject with half the runs takes part in alternate rounds, not only
+    /// the first half — otherwise drift late in the run lands on the others.
+    #[test]
+    fn a_subject_with_fewer_runs_is_spread_across_the_run() {
+        let order = schedule(&[(0, 10), (0, 5)], 3);
+        let fewer: Vec<usize> = order
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.subject == 1)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(fewer.len(), 5);
+        assert!(
+            *fewer.last().unwrap() >= order.len() - 3,
+            "last sample of the smaller subject is near the end: {fewer:?} of {}",
+            order.len()
+        );
+    }
+
+    #[test]
+    fn a_benchmark_seed_depends_on_its_name_and_the_run_seed() {
+        assert_eq!(seed_for(1, "a"), seed_for(1, "a"));
+        assert_ne!(seed_for(1, "a"), seed_for(1, "b"));
+        assert_ne!(seed_for(1, "a"), seed_for(2, "a"));
+    }
+
+    #[test]
+    fn stats_report_the_sample_standard_deviation() {
+        let m = stats(&[2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]);
+        assert_eq!(m["wall_min_ms"], 2.0);
+        assert_eq!(m["wall_max_ms"], 9.0);
+        assert_eq!(m["wall_mean_ms"], 5.0);
+        // sqrt(32 / 7)
+        assert!((m["wall_stddev_ms"] - 2.138_089_935).abs() < 1e-6);
+        assert_eq!(stats(&[3.0])["wall_stddev_ms"], 0.0);
+    }
+
+    /// A failing subject is dropped; the others still get every sample.
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_subject_does_not_stop_the_others() {
+        let mk = |name: &str, cmd: &[&str]| Subject {
+            name: name.into(),
+            cmd: cmd.iter().map(|s| s.to_string()).collect(),
+            prepare: None,
+            dir: None,
+            env: BTreeMap::new(),
+            runs: 4,
+            warmup: 1,
+            counters: false,
+        };
+        let res = interleaved(
+            &[mk("ok", &["true"]), mk("bad", &["false"])],
+            5,
+            &Settings::default(),
+        );
+        assert_eq!(res[0].as_ref().unwrap().len(), 4);
+        assert!(format!("{:#}", res[1].as_ref().unwrap_err()).contains("exited with"));
+    }
+
+    /// A prepare step that fails stops its subject, and says it was prepare.
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_prepare_is_reported_as_prepare() {
+        let res = interleaved(
+            &[Subject {
+                name: "x".into(),
+                cmd: vec!["true".into()],
+                prepare: Some(vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "echo nope >&2; exit 3".into(),
+                ]),
+                dir: None,
+                env: BTreeMap::new(),
+                runs: 1,
+                warmup: 0,
+                counters: false,
+            }],
+            0,
+            &Settings::default(),
+        );
+        let msg = format!("{:#}", res[0].as_ref().unwrap_err());
+        assert!(msg.contains("prepare") && msg.contains("nope"), "{msg}");
     }
 }

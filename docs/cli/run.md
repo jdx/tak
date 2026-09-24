@@ -14,4 +14,7 @@ Benchmark a command, or everything declared in tak.toml.
 - **`--warmup <WARMUP>`** — Untimed warmup runs. Overrides tak.toml when both are given.
 - **`--no-counters`** — Skip instruction counting even where valgrind is available.
 - **`--record`** — Append the result to refs/notes/tak for the current commit.
+- **`--subject <NAME>`** — Measure only this subject of each multi-subject benchmark. Repeatable. Benchmarks with none of the named subjects are skipped.
+- **`--seed <N>`** — Seed for the order subjects are sampled in. Every multi-subject run prints the seed it used, so an order can be repeated.
+- **`--export-json <PATH>`** — Write every sample and summary to PATH as hyperfine-compatible JSON.
 - **`-h --help`** — Print help
