@@ -524,6 +524,13 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Load a named config file, for `tak run --config`.
+    pub fn load(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("could not read {}", path.display()))?;
+        Self::parse(&text).with_context(|| format!("in {}", path.display()))
+    }
+
     /// Find and load `tak.toml`, searching upward from `start`.
     ///
     /// Walking up means `tak run` behaves the same from a subdirectory as from

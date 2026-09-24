@@ -437,3 +437,91 @@ cmd = ["{{ env.TAK_TEST_NEVER_SET }}"]
     let out = p.run(&["--no-progress", "--subject", "ok"]);
     assert!(out.status.success(), "{}", stderr(&out));
 }
+
+/// --config reads the named file instead of searching, and commands resolve
+/// relative to that file, not to where tak was started.
+#[test]
+fn config_names_the_file_to_read() {
+    let p = Project::new("config-flag", "[bench.root]\ncmd = [\"false\"]\n");
+    std::fs::create_dir(p.path("sub")).unwrap();
+    std::fs::write(
+        p.path("sub/other.toml"),
+        "[bench.other]\nwarmup = 0\nruns = 1\ncmd = [\"sh\", \"-c\", \"pwd > where\"]\n",
+    )
+    .unwrap();
+    let out = p.run(&["--no-progress", "--config", "sub/other.toml"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let where_ = std::fs::read_to_string(p.path("sub/where")).unwrap();
+    assert!(where_.trim_end().ends_with("sub"), "{where_}");
+
+    let missing = p.run(&["--config", "nope.toml"]);
+    assert!(!missing.status.success());
+    assert!(
+        stderr(&missing).contains("nope.toml"),
+        "{}",
+        stderr(&missing)
+    );
+}
+
+/// --dry-run prints what would run, templates rendered and overrides
+/// applied, and runs nothing.
+#[test]
+fn dry_run_shows_the_resolved_plan_without_running() {
+    let p = Project::new(
+        "dry-run",
+        r#"
+[defaults]
+runs = "auto"
+env = { HOME = "{{ env.TAK_TEST_BASE }}/home-{{ subject }}" }
+
+[subject.a]
+cmd = ["sh", "-c", "echo ran >> log"]
+
+[bench.cmp]
+subjects = ["a"]
+"#,
+    );
+    let out = p.run_env(
+        &["--dry-run", "--warmup", "4"],
+        &[("TAK_TEST_BASE", "/base")],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("cmp"), "{stdout}");
+    assert!(
+        stdout.contains("cmd      sh -c 'echo ran >> log'"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("HOME=/base/home-a"), "{stdout}");
+    assert!(
+        stdout.contains("runs     auto (30s budget, 5..=50), warmup 4"),
+        "{stdout}"
+    );
+    assert!(p.log().is_empty(), "nothing ran");
+}
+
+/// The export records how the run was made.
+#[test]
+fn the_export_records_version_seed_and_runner() {
+    let p = Project::new(
+        "export-meta",
+        &format!("[bench.cmp]\nwarmup = 0\n{}", logging_subject("a", 1)),
+    );
+    let out = p.run(&[
+        "--no-progress",
+        "--seed",
+        "77",
+        "--runner",
+        "test-class",
+        "--export-json",
+        "r.json",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    assert_eq!(json["seed"], 77);
+    assert_eq!(json["runner"], "test-class");
+    assert_eq!(json["tak_version"], env!("CARGO_PKG_VERSION"));
+    assert!(json["time"].as_str().unwrap().ends_with('Z'));
+    assert_eq!(json["results"].as_array().unwrap().len(), 1);
+}

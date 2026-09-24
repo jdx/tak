@@ -1,0 +1,192 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://tak.jdx.dev/schema/tak.json",
+  "title": "tak.toml",
+  "description": "Benchmarks and settings for tak (https://tak.jdx.dev). Pre-v1: keys may change between releases.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "bench": {
+      "description": "Benchmarks by name.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/bench" }
+    },
+    "defaults": {
+      "description": "Settings every benchmark starts from.",
+      "$ref": "#/definitions/layer"
+    },
+    "subject": {
+      "description": "Subjects declared once, for benchmarks to list in `subjects`.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/subject" }
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "deny": {
+          "description": "Variables removed from measured commands. Replaces the default list (GITHUB_TOKEN, GH_TOKEN).",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "allow": {
+          "description": "Variables kept even though `deny` lists them.",
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pct": {
+          "description": "Percentage an instruction count may rise before `tak compare` fails.",
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "report": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "credit": {
+          "description": "End generated reports with a line naming tak.",
+          "type": "boolean"
+        }
+      }
+    },
+    "runner": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "class": {
+          "description": "Machine class to record under, overriding the derived name.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  "definitions": {
+    "cmd": {
+      "description": "A command: a list of arguments, or a string split on whitespace. Never run through a shell. Values may be tera templates.",
+      "oneOf": [
+        { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        { "type": "string", "minLength": 1 }
+      ]
+    },
+    "layerProperties": {
+      "runs": {
+        "description": "Timed runs, or \"auto\" to size each subject from how long its samples take.",
+        "oneOf": [
+          { "type": "integer", "minimum": 1 },
+          { "const": "auto" }
+        ]
+      },
+      "warmup": {
+        "description": "Untimed runs before the timed ones.",
+        "type": "integer",
+        "minimum": 0
+      },
+      "budget": {
+        "description": "runs = \"auto\": wall time per subject, prepare included, such as \"30s\", \"2m\" or \"500ms\".",
+        "type": "string",
+        "pattern": "^\\s*[0-9.]+\\s*(ms|s|m|h)?\\s*$"
+      },
+      "min_runs": {
+        "description": "runs = \"auto\": fewest runs a subject gets.",
+        "type": "integer",
+        "minimum": 1
+      },
+      "max_runs": {
+        "description": "runs = \"auto\": most runs a subject gets.",
+        "type": "integer",
+        "minimum": 1
+      },
+      "prepare": {
+        "description": "Untimed command run before every sample, warmups included.",
+        "$ref": "#/definitions/cmd"
+      },
+      "dir": {
+        "description": "Directory to run in, relative to tak.toml. May be a tera template.",
+        "type": "string"
+      },
+      "env": {
+        "description": "Variables set for the command, merged key by key across layers. Values may be tera templates.",
+        "type": "object",
+        "additionalProperties": { "type": "string" }
+      },
+      "vars": {
+        "description": "Values for templates, as {{ vars.name }}. Not passed to the command.",
+        "type": "object",
+        "additionalProperties": { "type": "string" }
+      }
+    },
+    "layer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runs": { "$ref": "#/definitions/layerProperties/runs" },
+        "warmup": { "$ref": "#/definitions/layerProperties/warmup" },
+        "budget": { "$ref": "#/definitions/layerProperties/budget" },
+        "min_runs": { "$ref": "#/definitions/layerProperties/min_runs" },
+        "max_runs": { "$ref": "#/definitions/layerProperties/max_runs" },
+        "prepare": { "$ref": "#/definitions/layerProperties/prepare" },
+        "dir": { "$ref": "#/definitions/layerProperties/dir" },
+        "env": { "$ref": "#/definitions/layerProperties/env" },
+        "vars": { "$ref": "#/definitions/layerProperties/vars" }
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cmd": { "$ref": "#/definitions/cmd" },
+        "counters": {
+          "description": "Count instructions for this subject. Off by default for named subjects.",
+          "type": "boolean"
+        },
+        "runs": { "$ref": "#/definitions/layerProperties/runs" },
+        "warmup": { "$ref": "#/definitions/layerProperties/warmup" },
+        "budget": { "$ref": "#/definitions/layerProperties/budget" },
+        "min_runs": { "$ref": "#/definitions/layerProperties/min_runs" },
+        "max_runs": { "$ref": "#/definitions/layerProperties/max_runs" },
+        "prepare": { "$ref": "#/definitions/layerProperties/prepare" },
+        "dir": { "$ref": "#/definitions/layerProperties/dir" },
+        "env": { "$ref": "#/definitions/layerProperties/env" },
+        "vars": { "$ref": "#/definitions/layerProperties/vars" }
+      }
+    },
+    "bench": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cmd": {
+          "description": "The command, for a benchmark of one program. Not combined with subjects.",
+          "$ref": "#/definitions/cmd"
+        },
+        "subjects": {
+          "description": "Shared [subject.NAME] tables this benchmark measures.",
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "subject": {
+          "description": "Subjects declared here, or overrides of shared ones for this benchmark.",
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/subject" }
+        },
+        "runs": { "$ref": "#/definitions/layerProperties/runs" },
+        "warmup": { "$ref": "#/definitions/layerProperties/warmup" },
+        "budget": { "$ref": "#/definitions/layerProperties/budget" },
+        "min_runs": { "$ref": "#/definitions/layerProperties/min_runs" },
+        "max_runs": { "$ref": "#/definitions/layerProperties/max_runs" },
+        "prepare": { "$ref": "#/definitions/layerProperties/prepare" },
+        "dir": { "$ref": "#/definitions/layerProperties/dir" },
+        "env": { "$ref": "#/definitions/layerProperties/env" },
+        "vars": { "$ref": "#/definitions/layerProperties/vars" }
+      }
+    }
+  }
+}

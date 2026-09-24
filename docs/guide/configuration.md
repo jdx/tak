@@ -1,7 +1,25 @@
 # Benchmark configuration
 
 tak searches upward from the working directory for `tak.toml`. Commands run relative to the
-directory containing that file, so CI and local runs use the same paths.
+directory containing that file, so CI and local runs use the same paths. `tak run --config PATH`
+reads a named file instead, including the settings it holds, and commands then run relative to
+that file. That's useful for a second set of benchmarks kept apart from the main ones.
+
+Editors that read [JSON Schema](https://json-schema.org), such as Even Better TOML or taplo, can
+complete and check `tak.toml` against `https://tak.jdx.dev/schema/tak.json`. Add this as the
+file's first line:
+
+```toml
+#:schema https://tak.jdx.dev/schema/tak.json
+```
+
+To see exactly what a run would do, with defaults and shared subjects applied, templates
+rendered and command-line overrides taken into account, run it with `--dry-run`. Nothing is
+measured:
+
+```sh
+tak run --bench install --dry-run
+```
 
 ## Benchmarks
 
@@ -121,7 +139,8 @@ and `min_runs = 3`:
 
 Every multi-subject run prints its seed. Pass it back with `--seed` to repeat an order.
 `--subject NAME` limits a run to the named subjects, and `--export-json PATH` writes every sample
-in hyperfine's `--export-json` shape, with `bench` and `subject` fields added:
+in hyperfine's `--export-json` shape, with `bench` and `subject` fields added to each result.
+The file also records how the run was made: `tak_version`, `seed`, `runner` and `time`.
 
 ```sh
 tak run --bench install --seed 1234 --export-json results.json

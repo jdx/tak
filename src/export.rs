@@ -14,7 +14,23 @@ use std::path::Path;
 
 #[derive(Debug, Serialize)]
 pub struct Export {
+    /// How the run was made, so a surprising result can be traced and its
+    /// sample order repeated. Extra top-level keys; hyperfine has none.
+    #[serde(flatten)]
+    pub meta: Meta,
     pub results: Vec<ExportResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Meta {
+    pub tak_version: String,
+    /// The run's seed: `tak run --seed` with it repeats the sample order, as
+    /// long as `runs = "auto"` settles on the same counts.
+    pub seed: u64,
+    /// The runner class the run would be recorded under.
+    pub runner: String,
+    /// When the run finished, RFC 3339.
+    pub time: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,8 +86,8 @@ impl ExportResult {
     }
 }
 
-pub fn write(path: &Path, results: Vec<ExportResult>) -> Result<()> {
-    let json = serde_json::to_string_pretty(&Export { results })?;
+pub fn write(path: &Path, meta: Meta, results: Vec<ExportResult>) -> Result<()> {
+    let json = serde_json::to_string_pretty(&Export { meta, results })?;
     std::fs::write(path, json + "\n").with_context(|| format!("could not write {}", path.display()))
 }
 

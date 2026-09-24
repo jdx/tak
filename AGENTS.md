@@ -77,6 +77,7 @@ src/template.rs    tera templates in tak.toml values, rendered before measuring
 src/backfill.rs    benchmark published release binaries to bootstrap history
 crates/asset-picker/   release-asset selection, extracted from mise; published separately
 tests/counters.rs  exercises the real cachegrind subprocess
+tests/schema.rs    docs/public/schema/tak.json and the parser accept the same keys
 ```
 
 `src/lib.rs` re-exports the modules so integration tests can reach them. That is the only

@@ -215,6 +215,37 @@
             }
           },
           {
+            "name": "config",
+            "usage": "--config <PATH>",
+            "help": "Read this file instead of searching for tak.toml.",
+            "help_first_line": "Read this file instead of searching for tak.toml.",
+            "short": [],
+            "long": [
+              "config"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "PATH",
+              "usage": "<PATH>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "dry-run",
+            "usage": "--dry-run",
+            "help": "Print what would run — every subject's command, prepare, directory, environment and run count, templates rendered — without running it.",
+            "help_first_line": "Print what would run — every subject's command, prepare, directory, environment and run count, templates rendered — without running it.",
+            "short": [],
+            "long": [
+              "dry-run"
+            ],
+            "hide": false,
+            "global": false
+          },
+          {
             "name": "export-json",
             "usage": "--export-json <PATH>",
             "help": "Write every sample and summary to PATH as hyperfine-compatible JSON.",

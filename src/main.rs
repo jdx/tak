@@ -100,6 +100,13 @@ enum Cmd {
         /// run prints the seed it used, so an order can be repeated.
         #[usage(long, value_name = "N")]
         seed: Option<u64>,
+        /// Read this file instead of searching for tak.toml.
+        #[usage(long, value_name = "PATH")]
+        config: Option<std::path::PathBuf>,
+        /// Print what would run — every subject's command, prepare, directory,
+        /// environment and run count, templates rendered — without running it.
+        #[usage(long)]
+        dry_run: bool,
         /// Write every sample and summary to PATH as hyperfine-compatible JSON.
         #[usage(long, value_name = "PATH")]
         export_json: Option<std::path::PathBuf>,
@@ -278,6 +285,8 @@ struct RunOpts {
     subjects: Vec<String>,
     seed: Option<u64>,
     export_json: Option<std::path::PathBuf>,
+    config: Option<std::path::PathBuf>,
+    dry_run: bool,
 }
 
 /// One subject's successful measurement.
@@ -317,14 +326,22 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         counters: true,
     };
     let seed = opts.seed.unwrap_or_else(|| fastrand::u64(..));
+    if opts.dry_run {
+        print_plan(&bench, false, std::slice::from_ref(&subject));
+        return Ok(());
+    }
     let (measured, _) = measure_bench(&bench, &[subject], false, seed, &opts, settings)?;
-    finish(measured, Vec::new(), &opts)
+    finish(measured, Vec::new(), &opts, seed, settings)
 }
 
 /// Run the benchmarks declared in `tak.toml`.
 fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let Some((path, cfg)) = Config::find(&cwd)? else {
+    let found = match &opts.config {
+        Some(path) => Some((path.clone(), Config::load(path)?)),
+        None => Config::find(&cwd)?,
+    };
+    let Some((path, cfg)) = found else {
         bail!(
             "no command given and no {} found in {} or any parent.\n\
              Pass a command after `--`, or declare one:\n\n\
@@ -400,6 +417,14 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
         return Ok(());
     }
 
+    if opts.dry_run {
+        println!("{}", path.display());
+        for (name, multi, subjects) in &plans {
+            print_plan(name, *multi, subjects);
+        }
+        return Ok(());
+    }
+
     let seed = opts.seed.unwrap_or_else(|| fastrand::u64(..));
     let mut measured = Vec::new();
     let mut failed = Vec::new();
@@ -408,11 +433,74 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
         measured.extend(m);
         failed.extend(f);
     }
-    finish(measured, failed, &opts)
+    finish(measured, failed, &opts, seed, settings)
+}
+
+/// Print a benchmark's subjects as they would run, for `tak run --dry-run`:
+/// every layer applied, templates rendered, paths anchored and command-line
+/// overrides taken into account.
+fn print_plan(bench: &str, multi: bool, subjects: &[Subject]) {
+    println!(
+        "\n  {bench}{}",
+        if multi { "" } else { "  (single command)" }
+    );
+    for s in subjects {
+        if multi {
+            println!("    {}", s.name);
+        }
+        let pad = if multi { "      " } else { "    " };
+        println!("{pad}cmd      {}", shell_words(&s.cmd));
+        if let Some(p) = &s.prepare {
+            println!("{pad}prepare  {}", shell_words(p));
+        }
+        if let Some(d) = &s.dir {
+            println!("{pad}dir      {}", d.display());
+        }
+        for (k, v) in &s.env {
+            println!("{pad}env      {k}={}", shell_words(std::slice::from_ref(v)));
+        }
+        let runs = match s.runs {
+            Runs::Fixed(n) => n.to_string(),
+            Runs::Auto => format!(
+                "auto ({} budget, {}..={})",
+                tak_cli::progress::fmt(s.auto.budget),
+                s.auto.min,
+                s.auto.max
+            ),
+        };
+        println!("{pad}runs     {runs}, warmup {}", s.warmup);
+        if s.counters {
+            println!("{pad}counters on");
+        }
+    }
+}
+
+/// Arguments joined for reading, quoting any that a shell would split. For
+/// display only: tak itself never passes a command through a shell.
+fn shell_words(argv: &[String]) -> String {
+    argv.iter()
+        .map(|a| {
+            if !a.is_empty()
+                && a.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_./=:,@%+".contains(c))
+            {
+                a.clone()
+            } else {
+                format!("'{}'", a.replace('\'', r"'\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Export and record what was measured, then report any failures.
-fn finish(measured: Vec<Measured>, failed: Vec<String>, opts: &RunOpts) -> Result<()> {
+fn finish(
+    measured: Vec<Measured>,
+    failed: Vec<String>,
+    opts: &RunOpts,
+    seed: u64,
+    settings: &Settings,
+) -> Result<()> {
     // The export is written even when a subject failed: it is this run's
     // results, the failed subject is simply absent, and a consumer comparing
     // subjects has to handle a missing one anyway.
@@ -428,7 +516,13 @@ fn finish(measured: Vec<Measured>, failed: Vec<String>, opts: &RunOpts) -> Resul
                 ExportResult::new(&m.bench, &m.subject.name, command, &m.samples)
             })
             .collect();
-        export::write(path, results)?;
+        let meta = export::Meta {
+            tak_version: env!("CARGO_PKG_VERSION").to_string(),
+            seed,
+            runner: runner_class(settings),
+            time: now_rfc3339(),
+        };
+        export::write(path, meta, results)?;
         println!(
             "\n  exported {} result(s) to {}",
             measured.len(),
@@ -1030,22 +1124,29 @@ fn main() -> Result<()> {
             subject,
             seed,
             export_json,
+            config,
+            dry_run,
             cmd,
-        } => cmd_run(
-            RunOpts {
-                bench,
-                runs: runs.as_deref().map(str::parse).transpose()?,
-                warmup,
-                no_counters,
-                record,
-                no_progress,
-                subjects: subject,
-                seed,
-                export_json,
-            },
-            cmd,
-            &resolve_settings(&overrides)?,
-        ),
+        } => {
+            let settings = Settings::from_process_at(&overrides, config.as_deref())?;
+            cmd_run(
+                RunOpts {
+                    bench,
+                    runs: runs.as_deref().map(str::parse).transpose()?,
+                    warmup,
+                    no_counters,
+                    record,
+                    no_progress,
+                    subjects: subject,
+                    seed,
+                    export_json,
+                    config,
+                    dry_run,
+                },
+                cmd,
+                &settings,
+            )
+        }
         Cmd::History { rev, remote } => cmd_history(rev, remote),
         Cmd::Push(RemoteArgs { remote }) => {
             notes::push(&remote)?;
