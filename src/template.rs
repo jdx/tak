@@ -41,37 +41,16 @@ fn is_template(s: &str) -> bool {
     s.contains("{{") || s.contains("{%") || s.contains("{#")
 }
 
-/// Check every template in `s` compiles, without rendering. Run when
-/// `tak.toml` is loaded, so a typo fails before any benchmark runs even when
-/// the variables it needs are only set later.
-pub fn check(s: &Subject) -> Result<()> {
-    let mut tera = Tera::default();
-    for (field, value) in strings(s) {
-        if is_template(value) {
-            tera.add_raw_template("check", value)
-                .with_context(|| format!("invalid template in {field}: {value:?}"))?;
-        }
+/// Check a value's template compiles, without rendering it. Run over the
+/// whole of `tak.toml` when it is loaded, so a typo fails before any
+/// benchmark runs even when the variables it needs are only set later.
+pub fn check_str(value: &str) -> Result<()> {
+    if is_template(value) {
+        Tera::default()
+            .add_raw_template("check", value)
+            .with_context(|| format!("invalid template: {value:?}"))?;
     }
     Ok(())
-}
-
-/// Every template-bearing string of a subject, with a name for errors.
-fn strings(s: &Subject) -> Vec<(String, &str)> {
-    let mut out = Vec::new();
-    out.extend(s.cmd.iter().map(|a| ("cmd".to_string(), a.as_str())));
-    for p in s.prepare.iter().flatten() {
-        out.push(("prepare".to_string(), p.as_str()));
-    }
-    out.extend(s.env.iter().map(|(k, v)| (format!("env.{k}"), v.as_str())));
-    if let Some(d) = s.dir.as_ref().and_then(|d| d.to_str()) {
-        out.push(("dir".to_string(), d));
-    }
-    out.extend(
-        s.vars
-            .iter()
-            .map(|(k, v)| (format!("vars.{k}"), v.as_str())),
-    );
-    out
 }
 
 /// Render every template in `s` for benchmark `bench`.
@@ -91,13 +70,31 @@ pub fn render(mut s: Subject, bench: &str, env: &BTreeMap<String, String>) -> Re
             .with_context(|| format!("could not render {field}: {value:?}"))
     };
 
-    let vars: BTreeMap<String, String> = s
-        .vars
-        .iter()
-        .map(|(k, v)| Ok((k.clone(), one(&ctx, &format!("vars.{k}"), v)?)))
-        .collect::<Result<_>>()?;
-    ctx.insert("vars", &vars);
-    s.vars = vars;
+    // `vars` may refer to each other, in any order: render in passes, each
+    // with the values finished so far, until a pass makes no progress. What
+    // is left then refers to something undefined, or to itself.
+    let mut done: BTreeMap<String, String> = BTreeMap::new();
+    let mut pending: Vec<(&String, &String)> = s.vars.iter().collect();
+    while !pending.is_empty() {
+        ctx.insert("vars", &done);
+        let before = pending.len();
+        let mut failed = None;
+        pending.retain(|&(k, v)| match one(&ctx, &format!("vars.{k}"), v) {
+            Ok(r) => {
+                done.insert(k.clone(), r);
+                false
+            }
+            Err(e) => {
+                failed.get_or_insert(e);
+                true
+            }
+        });
+        if pending.len() == before {
+            return Err(failed.expect("a pass without progress had a failure"));
+        }
+    }
+    ctx.insert("vars", &done);
+    s.vars = done;
 
     for a in &mut s.cmd {
         *a = one(&ctx, "cmd", a)?;
@@ -181,5 +178,35 @@ mod tests {
         );
         let r = render(s, "b", &env(&[])).unwrap();
         assert_eq!(r.cmd, ["fallback", "plain $HOME"]);
+    }
+
+    /// `vars` can build on each other, whatever order they are written in.
+    #[test]
+    fn vars_may_refer_to_other_vars() {
+        let s = subject(
+            "[bench.b]\ncmd = [\"{{ vars.project }}\"]\nvars = { project = \"{{ vars.root }}/app\", root = \"/tmp\" }",
+        );
+        let r = render(s, "b", &env(&[])).unwrap();
+        assert_eq!(r.cmd, ["/tmp/app"]);
+    }
+
+    #[test]
+    fn a_var_cycle_is_an_error_not_a_hang() {
+        let s = subject(
+            "[bench.b]\ncmd = [\"x\"]\nvars = { a = \"{{ vars.b }}\", b = \"{{ vars.a }}\" }",
+        );
+        assert!(render(s, "b", &env(&[])).is_err());
+    }
+
+    /// A template in a string command stays one argument rather than being
+    /// split at the spaces inside its tag.
+    #[test]
+    fn a_string_command_keeps_template_tags_whole() {
+        let s = subject(
+            "[bench.b]\ncmd = \"mycli --lockfile {{ vars.lockfile }}\"\nvars = { lockfile = \"a.lock\" }",
+        );
+        assert_eq!(s.cmd, ["mycli", "--lockfile", "{{ vars.lockfile }}"]);
+        let r = render(s, "b", &env(&[])).unwrap();
+        assert_eq!(r.cmd, ["mycli", "--lockfile", "a.lock"]);
     }
 }

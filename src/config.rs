@@ -132,13 +132,54 @@ impl Cmd {
     fn argv(&self) -> Result<Vec<String>> {
         let v = match self {
             Cmd::Argv(v) => v.clone(),
-            Cmd::Line(s) => s.split_whitespace().map(str::to_string).collect(),
+            Cmd::Line(s) => split_line(s),
         };
         if v.is_empty() {
             bail!("empty command");
         }
         Ok(v)
     }
+}
+
+/// Split a string command on whitespace, keeping each template tag whole:
+/// `mycli {{ vars.lockfile }}` is two arguments, the second rendered later.
+/// Nothing else is special — no quotes, no escapes — as for any string
+/// command.
+fn split_line(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut close: Option<&str> = None;
+    let mut rest = line;
+    while let Some(c) = rest.chars().next() {
+        if let Some(end) = close {
+            if rest.starts_with(end) {
+                cur.push_str(end);
+                rest = &rest[end.len()..];
+                close = None;
+                continue;
+            }
+        } else if let Some(end) = [("{{", "}}"), ("{%", "%}"), ("{#", "#}")]
+            .iter()
+            .find_map(|(open, end)| rest.starts_with(open).then_some(*end))
+        {
+            cur.push_str(&rest[..2]);
+            rest = &rest[2..];
+            close = Some(end);
+            continue;
+        } else if c.is_whitespace() {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            rest = &rest[c.len_utf8()..];
+            continue;
+        }
+        cur.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 /// `runs` as written: a count, or a word. Only `"auto"` is a valid word,
@@ -323,7 +364,7 @@ impl Config {
             .map(|n| {
                 let shared = self.subject.get(n);
                 let local = b.subject.get(n);
-                if b.subjects.contains(n) && shared.is_none() {
+                if b.subjects.contains(n) && shared.is_none() && local.is_none() {
                     bail!("lists subject `{n}`, but there is no [subject.{n}]");
                 }
                 let cmd = local
@@ -340,6 +381,53 @@ impl Config {
                 resolve(n, cmd, counters, &layers).with_context(|| format!("subject `{n}`"))
             })
             .collect()
+    }
+}
+
+impl Config {
+    /// Every string that may hold a template, as written, with where it is.
+    fn template_strings(&self) -> Vec<(String, &str)> {
+        fn layer<'a>(out: &mut Vec<(String, &'a str)>, at: &str, l: &'a Layer) {
+            if let Some(p) = &l.prepare {
+                cmd(out, &format!("{at}.prepare"), p);
+            }
+            if let Some(d) = l.dir.as_ref().and_then(|d| d.to_str()) {
+                out.push((format!("{at}.dir"), d));
+            }
+            for (k, v) in &l.env {
+                out.push((format!("{at}.env.{k}"), v));
+            }
+            for (k, v) in &l.vars {
+                out.push((format!("{at}.vars.{k}"), v));
+            }
+        }
+        fn cmd<'a>(out: &mut Vec<(String, &'a str)>, at: &str, c: &'a Cmd) {
+            match c {
+                Cmd::Argv(v) => out.extend(v.iter().map(|a| (at.to_string(), a.as_str()))),
+                Cmd::Line(l) => out.push((at.to_string(), l)),
+            }
+        }
+        fn subject<'a>(out: &mut Vec<(String, &'a str)>, at: &str, d: &'a SubjectDecl) {
+            if let Some(c) = &d.cmd {
+                cmd(out, &format!("{at}.cmd"), c);
+            }
+            layer(out, at, &d.layer);
+        }
+        let mut out = Vec::new();
+        layer(&mut out, "defaults", &self.defaults);
+        for (n, d) in &self.subject {
+            subject(&mut out, &format!("subject.{n}"), d);
+        }
+        for (b, bench) in &self.bench {
+            if let Some(c) = &bench.cmd {
+                cmd(&mut out, &format!("bench.{b}.cmd"), c);
+            }
+            layer(&mut out, &format!("bench.{b}"), &bench.layer);
+            for (n, d) in &bench.subject {
+                subject(&mut out, &format!("bench.{b}.subject.{n}"), d);
+            }
+        }
+        out
     }
 }
 
@@ -402,6 +490,12 @@ fn resolve(name: &str, cmd: &Cmd, counters: bool, layers: &[&Layer]) -> Result<S
 impl Config {
     pub fn parse(text: &str) -> Result<Self> {
         let cfg: Config = toml::from_str(text).context("could not parse tak.toml")?;
+        // Every template in the file, used or not: a typo in a shared subject
+        // no benchmark lists yet, or in a value an override replaces, is
+        // still a typo, and should not wait to be found until it is used.
+        for (place, value) in cfg.template_strings() {
+            crate::template::check_str(value).with_context(|| format!("in {place}"))?;
+        }
         // Every declared benchmark is validated up front rather than failing
         // partway through a run that has already spent minutes measuring.
         for (name, b) in &cfg.bench {
@@ -417,8 +511,6 @@ impl Config {
                 if s.name.trim().is_empty() {
                     bail!("benchmark `{name}`: a subject needs a name");
                 }
-                crate::template::check(s)
-                    .with_context(|| format!("benchmark `{name}`, subject `{}`", s.name))?;
                 // `self` is the series a single-command benchmark records
                 // under. A subject taking it would be recorded, printed and
                 // exported as that series instead of as itself.
@@ -847,5 +939,27 @@ cmd = "mycli 'two words'""#,
     fn a_broken_template_is_rejected_at_parse_time() {
         let err = Config::parse("[bench.a]\ncmd = [\"x\", \"{{ env.X \"]").unwrap_err();
         assert!(format!("{err:#}").contains("template"), "{err:#}");
+    }
+
+    /// A subject a benchmark both lists and declares itself is fine without a
+    /// shared table: the local one provides everything.
+    #[test]
+    fn a_listed_subject_may_be_declared_locally() {
+        let c = Config::parse("[bench.b]\nsubjects = [\"x\"]\n[bench.b.subject.x]\ncmd = [\"x\"]")
+            .unwrap();
+        assert_eq!(c.subjects("b").unwrap()[0].cmd, ["x"]);
+    }
+
+    /// The syntax check covers the whole file, not only what some benchmark
+    /// ends up using.
+    #[test]
+    fn an_unused_broken_template_is_still_rejected() {
+        let unused = "[subject.spare]\ncmd = [\"{{ env.X \"]\n[bench.b]\ncmd = [\"x\"]";
+        assert!(Config::parse(unused).is_err(), "unlisted shared subject");
+        let overridden = "[subject.a]\ncmd = [\"{% if %}\"]\n[bench.b]\nsubjects = [\"a\"]\n[bench.b.subject.a]\ncmd = [\"x\"]";
+        assert!(
+            Config::parse(overridden).is_err(),
+            "shared value an override replaces"
+        );
     }
 }

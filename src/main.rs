@@ -362,8 +362,17 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
     let mut seen = std::collections::BTreeSet::new();
     let env = tak_cli::template::env();
     for (name, b) in selected {
-        let mut subjects = cfg
-            .subjects(&name)?
+        let mut subjects = cfg.subjects(&name)?;
+        seen.extend(subjects.iter().map(|s| s.name.clone()));
+        // Filter before rendering: a subject that is not being measured must
+        // not fail the run over a variable only it needs.
+        if !opts.subjects.is_empty() {
+            subjects.retain(|s| opts.subjects.contains(&s.name));
+            if subjects.is_empty() {
+                continue;
+            }
+        }
+        let mut subjects = subjects
             .into_iter()
             .map(|s| {
                 let subject = s.name.clone();
@@ -372,17 +381,10 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
             })
             .collect::<Result<Vec<_>>>()?;
         for s in &mut subjects {
-            seen.insert(s.name.clone());
             s.anchor(&root);
             // An explicit flag beats the file; the file beats the default.
             s.runs = opts.runs.unwrap_or(s.runs);
             s.warmup = opts.warmup.unwrap_or(s.warmup);
-        }
-        if !opts.subjects.is_empty() {
-            subjects.retain(|s| opts.subjects.contains(&s.name));
-            if subjects.is_empty() {
-                continue;
-            }
         }
         plans.push((name, b.is_multi(), subjects));
     }

@@ -415,3 +415,25 @@ cmd = ["true"]
             .success()
     );
 }
+
+/// Subjects left out with --subject are not rendered, so a variable only
+/// they need does not have to be set.
+#[test]
+fn an_excluded_subject_is_not_rendered() {
+    let p = Project::new(
+        "exclude-render",
+        r#"
+[bench.cmp]
+warmup = 0
+runs = 1
+
+[bench.cmp.subject.ok]
+cmd = ["true"]
+
+[bench.cmp.subject.needs]
+cmd = ["{{ env.TAK_TEST_NEVER_SET }}"]
+"#,
+    );
+    let out = p.run(&["--no-progress", "--subject", "ok"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
