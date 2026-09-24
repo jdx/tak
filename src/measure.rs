@@ -838,19 +838,92 @@ fn keep_prefix(mut r: impl std::io::Read, cap: usize, kept: &Mutex<Vec<u8>>) {
 /// terminal's signals directly.
 #[cfg(unix)]
 mod forward_signals {
-    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering::SeqCst};
 
     const SIGNALS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
 
-    /// The group to kill, or 0 when there is none yet. An atomic, because
-    /// a signal handler may read nothing else safely.
-    static PGID: AtomicI32 = AtomicI32::new(0);
+    /// What the handler knows, as atomics alone: nothing else is safe to
+    /// touch from a signal handler.
+    pub(super) struct State {
+        /// Between installing the handlers and recording the group: a
+        /// command may exist whose group the handler cannot know yet.
+        spawning: AtomicBool,
+        /// The group to kill, or 0 when there is none.
+        pgid: AtomicI32,
+        /// A signal that arrived while `spawning`, for the spawning thread
+        /// to act on once the group is known.
+        pending: AtomicI32,
+    }
 
-    extern "C" fn forward(sig: libc::c_int) {
-        let pgid = PGID.load(Ordering::SeqCst);
-        // SAFETY: killpg, signal and raise are async-signal-safe. The signal
-        // is blocked while this runs, so the raise takes effect — with the
-        // default action, stopping tak — as soon as the handler returns.
+    /// What the handler should do with a signal.
+    #[derive(Debug, PartialEq, Eq)]
+    pub(super) enum Act {
+        /// Leave it for [`State::spawned`], which has the group.
+        Defer,
+        /// Kill this group (0 for none) and stop tak.
+        Die { pgid: i32 },
+    }
+
+    impl State {
+        pub(super) const fn new() -> State {
+            State {
+                spawning: AtomicBool::new(false),
+                pgid: AtomicI32::new(0),
+                pending: AtomicI32::new(0),
+            }
+        }
+
+        pub(super) fn begin(&self) {
+            self.pending.store(0, SeqCst);
+            self.pgid.store(0, SeqCst);
+            self.spawning.store(true, SeqCst);
+        }
+
+        /// The handler's decision. `spawning` is read before `pgid`, and
+        /// [`State::spawned`] writes them in the opposite order, so a
+        /// handler that sees `spawning` cleared also sees the group. One
+        /// that defers re-reads the group after recording the signal: if
+        /// `spawned` had already collected `pending` by then, it had also
+        /// stored the group, so exactly one of the two sees the signal
+        /// with the group known, and neither loses it.
+        pub(super) fn on_signal(&self, sig: libc::c_int) -> Act {
+            let spawning = self.spawning.load(SeqCst);
+            let pgid = self.pgid.load(SeqCst);
+            if spawning && pgid == 0 {
+                self.pending.store(sig, SeqCst);
+                let pgid = self.pgid.load(SeqCst);
+                if pgid > 0 {
+                    return Act::Die { pgid };
+                }
+                return Act::Defer;
+            }
+            Act::Die { pgid }
+        }
+
+        /// Record the group once the spawn returns (`None` if it failed),
+        /// and hand back any signal that arrived meanwhile with the group
+        /// to kill for it.
+        pub(super) fn spawned(&self, pid: Option<u32>) -> Option<(libc::c_int, i32)> {
+            let pgid = pid.map_or(0, |p| p as i32);
+            self.pgid.store(pgid, SeqCst);
+            self.spawning.store(false, SeqCst);
+            let sig = self.pending.swap(0, SeqCst);
+            (sig != 0).then_some((sig, pgid))
+        }
+
+        pub(super) fn end(&self) {
+            self.spawning.store(false, SeqCst);
+            self.pgid.store(0, SeqCst);
+        }
+    }
+
+    static STATE: State = State::new();
+
+    /// Kill the group, then stop tak the way `sig` would have. The signal is
+    /// blocked while a handler runs, so from there the raise takes effect —
+    /// with the default action — as soon as the handler returns.
+    fn die(sig: libc::c_int, pgid: i32) {
+        // SAFETY: killpg, signal and raise are async-signal-safe.
         unsafe {
             if pgid > 0 {
                 libc::killpg(pgid, libc::SIGKILL);
@@ -860,14 +933,21 @@ mod forward_signals {
         }
     }
 
+    extern "C" fn forward(sig: libc::c_int) {
+        if let Act::Die { pgid } = STATE.on_signal(sig) {
+            die(sig, pgid);
+        }
+    }
+
     pub struct Guard {
         previous: Vec<(libc::c_int, libc::sigaction)>,
     }
 
     impl Guard {
-        /// Install the handlers. Before spawning, so no signal can arrive
-        /// between the spawn and the handler being in place.
+        /// Install the handlers, before spawning: a signal between here and
+        /// [`Guard::spawned`] is held until the group is known.
         pub fn install() -> Guard {
+            STATE.begin();
             let mut previous = Vec::new();
             for sig in SIGNALS {
                 // SAFETY: plain-data structs, filled in before use; the
@@ -886,15 +966,18 @@ mod forward_signals {
             Guard { previous }
         }
 
-        /// The group to forward to: the child leads it, so its pid.
-        pub fn watch(pid: u32) {
-            PGID.store(pid as i32, Ordering::SeqCst);
+        /// The spawn returned: `pid` leads the new group, or `None` if the
+        /// spawn failed. A signal that arrived during it is acted on now.
+        pub fn spawned(pid: Option<u32>) {
+            if let Some((sig, pgid)) = STATE.spawned(pid) {
+                die(sig, pgid);
+            }
         }
     }
 
     impl Drop for Guard {
         fn drop(&mut self) {
-            PGID.store(0, Ordering::SeqCst);
+            STATE.end();
             for (sig, old) in &self.previous {
                 // SAFETY: restores the action saved by `install`.
                 unsafe {
@@ -946,11 +1029,11 @@ fn version_once(argv: &[String], site: &Site, timeout: Duration) -> Result<Strin
     // passes a fatal signal on to it until the guard drops.
     #[cfg(unix)]
     let _forward = forward_signals::Guard::install();
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("failed to spawn `{bin}`"))?;
+    let spawned = cmd.spawn();
+    // Also when the spawn failed, so a signal held during it still stops tak.
     #[cfg(unix)]
-    forward_signals::Guard::watch(child.id());
+    forward_signals::Guard::spawned(spawned.as_ref().ok().map(std::process::Child::id));
+    let mut child = spawned.with_context(|| format!("failed to spawn `{bin}`"))?;
 
     // One thread per stream, so neither pipe can fill while the other is
     // read. They are never joined: a background process the command started
@@ -1463,6 +1546,41 @@ mod tests {
             let stat = stat.trim();
             out.status.success() && !stat.is_empty() && !stat.starts_with('Z')
         }
+    }
+
+    /// A signal during the spawn is held, not lost: whoever sees it with the
+    /// group known acts on it. Driven on a private `State`, so no real
+    /// signal is sent and the handler's own state is untouched.
+    #[cfg(unix)]
+    #[test]
+    fn a_signal_during_the_spawn_is_acted_on_once_the_group_is_known() {
+        use forward_signals::{Act, State};
+        let s = State::new();
+
+        s.begin();
+        assert_eq!(s.on_signal(libc::SIGTERM), Act::Defer, "no group yet");
+        assert_eq!(s.spawned(Some(42)), Some((libc::SIGTERM, 42)));
+        assert_eq!(s.on_signal(libc::SIGINT), Act::Die { pgid: 42 });
+        s.end();
+
+        s.begin();
+        assert_eq!(s.spawned(Some(7)), None, "nothing arrived");
+        s.end();
+
+        s.begin();
+        assert_eq!(s.on_signal(libc::SIGINT), Act::Defer);
+        assert_eq!(
+            s.spawned(None),
+            Some((libc::SIGINT, 0)),
+            "a failed spawn still stops tak"
+        );
+        s.end();
+
+        assert_eq!(
+            s.on_signal(libc::SIGHUP),
+            Act::Die { pgid: 0 },
+            "outside the window"
+        );
     }
 
     /// A background process that inherits the pipes keeps them open after
