@@ -1075,3 +1075,82 @@ cmd = ["true"]
     assert!(samples[1..].iter().all(|&ok| ok), "{r}");
     assert_eq!(r["checks"]["passed"], times - 1, "{r}");
 }
+
+/// A failed check stops --record: git notes keep timings without verdicts, so
+/// recording would store a failed sample's time as if it had passed. The
+/// export is still written, and without --record the run succeeds.
+#[test]
+fn a_failing_check_stops_record_but_not_the_run() {
+    let p = Project::new(
+        "check-record",
+        r#"
+[bench.cmp]
+warmup = 0
+runs = 2
+
+[bench.cmp.subject.good]
+cmd = ["true"]
+check = ["true"]
+
+[bench.cmp.subject.bad]
+cmd = ["true"]
+check = ["false"]
+"#,
+    );
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&p.dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", stderr(&out));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let ident = [
+        ("GIT_AUTHOR_NAME", "tak-test"),
+        ("GIT_AUTHOR_EMAIL", "t@example.com"),
+        ("GIT_COMMITTER_NAME", "tak-test"),
+        ("GIT_COMMITTER_EMAIL", "t@example.com"),
+    ];
+    git(&["init", "-q"]);
+    git(&[
+        "-c",
+        "user.name=tak-test",
+        "-c",
+        "user.email=t@example.com",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "init",
+    ]);
+
+    let out = p.run_env(
+        &["--no-progress", "--record", "--export-json", "r.json"],
+        &ident,
+    );
+    assert!(!out.status.success(), "a failed check must stop --record");
+    let err = stderr(&out);
+    assert!(err.contains("not recording"), "{err}");
+    assert!(err.contains("cmp (bad) failed 2 of 2"), "{err}");
+    assert!(!err.contains("cmp (good) failed"), "{err}");
+    assert!(
+        git(&["notes", "--ref=tak", "list"]).is_empty(),
+        "nothing recorded"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    assert_eq!(
+        json["results"].as_array().unwrap().len(),
+        2,
+        "export written"
+    );
+
+    let out = p.run(&["--no-progress"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // With every check passing, the same project records.
+    let out = p.run_env(&["--no-progress", "--record", "--subject", "good"], &ident);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!git(&["notes", "--ref=tak", "list"]).is_empty());
+}

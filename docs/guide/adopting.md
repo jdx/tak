@@ -33,8 +33,8 @@ as an empty `node_modules`, declare it as
 [`prepare`](/guide/configuration#resetting-state-before-each-sample), which runs untimed before
 each sample. When a command's result can come out wrong, such as fixers that may
 race on the same files, declare a [`check`](/guide/configuration#checking-every-sample) that
-verifies it after every timed sample. Its verdicts appear in the run's output and export but
-not in recorded history, so record only runs whose checks pass.
+verifies it after every timed sample. `--record` then writes nothing unless every check in
+the run passed.
 
 The comments in mise's [benchmark configuration](https://github.com/jdx/mise/blob/main/tak.toml)
 and aube's [benchmark configuration](https://github.com/jdx/aube/blob/main/tak.toml) explain

@@ -146,10 +146,12 @@ run the concurrent fixers lost an edit every time, and were faster for it:
     serial    min      2.49  p50      2.72  mean      2.78 ± 0.21     max      3.24 ms  n=20  checks 20/20
 ```
 
-- A failing check doesn't drop the subject or fail the run. Every sample is kept, and the pass
-  count is the result: a race that loses one sample in twenty shows up as `checks 19/20`, next
-  to the times it produced. tak warns on stderr, listing the failed samples and the last line
-  the first failing check wrote to stderr.
+- A failing check doesn't drop the subject, and without `--record` it doesn't fail the run.
+  Every sample is kept, and the pass count is the result: a race that loses one sample in
+  twenty shows up as `checks 19/20` on the subject's summary line. tak warns on stderr, listing
+  the failed sample numbers and the last line the first failing check wrote to stderr. The
+  summary doesn't say which time came from which sample, so it can't tell you whether the
+  minimum is from a failed one. The export can.
 - A check that can't be started at all, such as a mistyped program, is a mistake in `tak.toml`
   rather than a result. That drops the subject like a failing `cmd`.
 - Warmups aren't checked, because they aren't kept. The check isn't counted toward a
@@ -161,12 +163,14 @@ run the concurrent fixers lost an edit every time, and were faster for it:
   own `check` replaces the benchmark's.
 - `--export-json` adds `checks` to each result that has one:
   `{"passed": 18, "total": 20, "samples": [true, …]}`, with `samples` in the same order as
-  `times`. The hyperfine fields are unchanged.
-- **Recorded history has no verdicts.** `--record` stores the timings in git notes as usual,
-  but not whether their checks passed, so `tak history` and `tak compare` can show a fast
-  time from a failed sample with nothing marking it. `tak compare` keeps each metric's
-  minimum and treats lower as better, and a pass rate fits neither, so it isn't stored. If
-  you record a benchmark that has a `check`, make sure its checks pass before recording.
+  `times`, so each verdict can be matched to its time. The hyperfine fields are unchanged.
+- **`--record` writes nothing if any check failed.** Git notes keep timings but not
+  verdicts, so the timings of a run with a failed check would be stored as if it had
+  passed. `tak compare` keeps each metric's minimum and treats lower as better, and a pass
+  rate fits neither rule, so it isn't stored alongside them. Instead, tak names each subject
+  whose check failed and how many of its samples failed, writes no notes, and exits
+  non-zero, as it does when a subject is dropped. `--export-json` is still written, with the
+  verdicts.
 
 ## Comparing several programs
 

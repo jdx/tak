@@ -666,6 +666,38 @@ fn finish(
         bail!("{} subject(s) failed: {}", failed.len(), failed.join(", "));
     }
     if opts.record {
+        // Git notes keep the timings but not the check verdicts, which do not
+        // fit how recorded metrics are read: `compare` keeps each metric's
+        // minimum and treats lower as better. So a failed check has to stop
+        // the recording, or history would hold a fast time from a sample
+        // that did the work wrong with nothing marking it. Only this run's
+        // verdicts can vouch for this run's timings, so there is no way to
+        // clear it but a run whose checks all pass. The export above is still
+        // written: it carries the verdicts.
+        let failing: Vec<String> = measured
+            .iter()
+            .filter(|m| m.samples.passed() < m.samples.checks.len())
+            .map(|m| {
+                let label = if m.subject.name == SELF_TOOL {
+                    m.bench.clone()
+                } else {
+                    format!("{} ({})", m.bench, m.subject.name)
+                };
+                format!(
+                    "{label} failed {} of {}",
+                    m.samples.checks.len() - m.samples.passed(),
+                    m.samples.checks.len()
+                )
+            })
+            .collect();
+        if !failing.is_empty() {
+            eprintln!(
+                "
+  not recording: git notes keep timings without check verdicts, so a run \
+                 with a failed check would be stored as if it had passed"
+            );
+            bail!("check failed: {}", failing.join(", "));
+        }
         let records: Vec<Record> = measured.into_iter().map(|m| m.record).collect();
         record_all(&records)?;
     }
