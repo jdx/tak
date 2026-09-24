@@ -1227,18 +1227,47 @@ mod tests {
         assert!(format!("{err:#}").contains("did not finish"), "{err:#}");
         let pid = std::fs::read_to_string(&pidfile).unwrap();
         let pid = pid.trim();
-        let alive = || {
-            Command::new("kill")
-                .args(["-0", pid])
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success())
-        };
         let until = Instant::now() + Duration::from_secs(2);
-        while alive() && Instant::now() < until {
+        while running(pid) && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(!alive(), "the background sleep {pid} outlived the timeout");
+        assert!(
+            !running(pid),
+            "the background sleep {pid} outlived the timeout"
+        );
+    }
+
+    /// Whether `pid` is still running. A zombie is not: once the shell that
+    /// started the process is killed with it, only PID 1 can reap it, and in
+    /// a container whose PID 1 does not reap orphans it stays a zombie —
+    /// which `kill -0` still reports as present.
+    #[cfg(unix)]
+    fn running(pid: &str) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            // The state follows the `)` closing the command name, which may
+            // itself contain spaces or parentheses, so look for the last one.
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                return false;
+            };
+            let state = stat
+                .rfind(')')
+                .and_then(|i| stat[i + 1..].trim_start().chars().next());
+            !matches!(state, None | Some('Z' | 'X' | 'x'))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let Ok(out) = Command::new("ps")
+                .args(["-o", "stat=", "-p", pid])
+                .stderr(Stdio::null())
+                .output()
+            else {
+                return false;
+            };
+            let stat = String::from_utf8_lossy(&out.stdout);
+            let stat = stat.trim();
+            out.status.success() && !stat.is_empty() && !stat.starts_with('Z')
+        }
     }
 
     /// A background process that inherits the pipes keeps them open after
