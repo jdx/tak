@@ -554,6 +554,73 @@ fn the_export_records_version_seed_and_runner() {
     assert_eq!(json["results"].as_array().unwrap().len(), 1);
 }
 
+/// `when` leaves a subject or benchmark out before it is rendered, says so,
+/// and refuses a --subject that its own `when` switches off.
+#[test]
+fn when_skips_subjects_and_benchmarks() {
+    let p = Project::new(
+        "when",
+        r#"
+[defaults]
+warmup = 0
+runs = 1
+
+[subject.here]
+cmd = ["sh", "-c", "echo here >> log"]
+
+[subject.absent]
+when = '(env.TAK_TEST_ABSENT_BIN ?? "") != ""'
+cmd = ["{{ env.TAK_TEST_ABSENT_BIN }}"]
+
+[bench.cmp]
+subjects = ["here", "absent"]
+
+[bench.never]
+when = "false"
+cmd = ["sh", "-c", "echo never >> log"]
+"#,
+    );
+    let out = p.run(&["--no-progress"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(p.log(), ["here"]);
+    let err = stderr(&out);
+    assert!(err.contains("skipping cmp (absent)"), "{err}");
+    assert!(err.contains("skipping never"), "{err}");
+
+    // Set, the same subject runs: the condition really reads the variable.
+    let present = p.run_env(
+        &["--no-progress", "--subject", "absent"],
+        &[("TAK_TEST_ABSENT_BIN", "true")],
+    );
+    assert!(present.status.success(), "{}", stderr(&present));
+
+    let asked = p.run(&["--no-progress", "--subject", "absent"]);
+    assert!(!asked.status.success());
+    assert!(
+        stderr(&asked).contains("`when` is false"),
+        "{}",
+        stderr(&asked)
+    );
+}
+
+/// A spike in a subject's samples is reported on stderr.
+#[test]
+fn an_outlier_is_warned_about() {
+    let p = Project::new(
+        "outlier",
+        r#"
+[bench.spiky]
+warmup = 0
+runs = 7
+# The third sample sleeps; the rest do not.
+cmd = ["sh", "-c", "n=$(cat n 2>/dev/null || echo 0); echo $((n+1)) > n; [ \"$n\" = 2 ] && sleep 0.3; true"]
+"#,
+    );
+    let out = p.run(&["--no-progress", "--no-counters"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("outliers"), "{}", stderr(&out));
+}
+
 /// --dry-run reflects --no-counters the way a real run would.
 #[test]
 fn dry_run_honours_no_counters() {
@@ -562,4 +629,98 @@ fn dry_run_honours_no_counters() {
     assert!(String::from_utf8_lossy(&on.stdout).contains("counters on"));
     let off = p.run(&["--dry-run", "--no-counters"]);
     assert!(!String::from_utf8_lossy(&off.stdout).contains("counters on"));
+}
+
+/// Only the subjects being run have their conditions evaluated, a subject
+/// in a switched-off benchmark is reported as such, and a run where every
+/// selected benchmark is switched off says so.
+#[test]
+fn when_is_decided_only_for_what_runs() {
+    let p = Project::new(
+        "when-scope",
+        r#"
+[defaults]
+warmup = 0
+runs = 1
+
+[bench.cmp.subject.here]
+cmd = ["true"]
+
+[bench.cmp.subject.odd]
+when = '"not a boolean"'
+cmd = ["true"]
+
+[bench.off]
+when = "false"
+[bench.off.subject.hidden]
+cmd = ["true"]
+
+[bench.broken]
+when = '"not a boolean either"'
+[bench.broken.subject.elsewhere]
+cmd = ["true"]
+"#,
+    );
+    let out = p.run(&["--no-progress", "--subject", "here"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("skipping off"),
+        "unrelated benchmark: {}",
+        stderr(&out)
+    );
+
+    let hidden = p.run(&["--no-progress", "--subject", "hidden"]);
+    assert!(!hidden.status.success());
+    assert!(
+        stderr(&hidden).contains("`when` is false for it in benchmark `off`"),
+        "{}",
+        stderr(&hidden)
+    );
+
+    let none = p.run(&["--no-progress", "--bench", "off"]);
+    assert!(none.status.success(), "{}", stderr(&none));
+    // Recording or exporting nothing is a failure, so CI notices.
+    let export = p.run(&["--no-progress", "--bench", "off", "--export-json", "r.json"]);
+    assert!(!export.status.success());
+    assert!(
+        stderr(&export).contains("nothing to export"),
+        "{}",
+        stderr(&export)
+    );
+    // ...but a dry run writes nothing either way, so it does not fail.
+    let dry = p.run(&[
+        "--dry-run",
+        "--bench",
+        "off",
+        "--record",
+        "--export-json",
+        "r.json",
+    ]);
+    assert!(dry.status.success(), "{}", stderr(&dry));
+    assert!(String::from_utf8_lossy(&none.stdout).contains("nothing to run"));
+    assert!(stderr(&none).contains("skipping off"), "{}", stderr(&none));
+}
+
+/// A subject switched off in one benchmark is still measured by another
+/// that runs it; --subject does not abort over the first.
+#[test]
+fn a_subject_off_in_one_benchmark_still_runs_in_another() {
+    let p = Project::new(
+        "when-across",
+        r#"
+[defaults]
+warmup = 0
+runs = 1
+
+[bench.a.subject.x]
+when = "false"
+cmd = ["sh", "-c", "echo a >> log"]
+
+[bench.b.subject.x]
+cmd = ["sh", "-c", "echo b >> log"]
+"#,
+    );
+    let out = p.run(&["--no-progress", "--subject", "x"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(p.log(), ["b"]);
 }

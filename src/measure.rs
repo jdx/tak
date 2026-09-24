@@ -396,6 +396,84 @@ pub fn stats(samples: &[f64]) -> BTreeMap<String, f64> {
     ])
 }
 
+/// Signs a subject's samples should not be taken at face value, as
+/// sentences for stderr. `samples` must be in the order they were taken.
+///
+/// Two, both from hyperfine's experience of what goes wrong:
+///
+/// - **Outliers**, by modified z-score (0.6745 x distance from the median /
+///   median absolute deviation) above 3.5, the usual cut-off. Something else
+///   on the machine ran, or the command's own work varies from run to run.
+/// - **A slow first sample**, over twice the median of the rest: a cache the
+///   warmup did not fill. The first timed sample should look like the others.
+///
+/// Nothing is dropped or corrected; the point is to say when a comparison
+/// deserves a second run. Slow outliers leave the minimum alone, but a fast
+/// one may be the minimum, so the two are reported apart.
+pub fn warnings(samples: &[f64]) -> Vec<String> {
+    let mut out = Vec::new();
+    let n = samples.len();
+    if n < 5 {
+        return out;
+    }
+    let median = |v: &mut Vec<f64>| {
+        v.sort_by(f64::total_cmp);
+        let m = v.len();
+        if m.is_multiple_of(2) {
+            (v[m / 2 - 1] + v[m / 2]) / 2.0
+        } else {
+            v[m / 2]
+        }
+    };
+    let med = median(&mut samples.to_vec());
+    let mad = median(&mut samples.iter().map(|x| (x - med).abs()).collect());
+    // The modified z-score needs a spread to divide by. When over half the
+    // samples equal the median the median deviation is zero, and any
+    // stand-in computed from all the samples would be inflated by the very
+    // spikes it should catch. With a flat majority there is no noise to
+    // measure against, so anything over a quarter away from the median
+    // counts. Identical samples still raise nothing.
+    let outlier = |x: f64| {
+        if mad > 0.0 {
+            0.6745 * (x - med).abs() / mad > 3.5
+        } else {
+            med > 0.0 && (x - med).abs() > 0.25 * med
+        }
+    };
+    {
+        let (fast, slow) = samples
+            .iter()
+            .filter(|&&x| outlier(x))
+            .fold(
+                (0, 0),
+                |(f, s), &x| if x < med { (f + 1, s) } else { (f, s + 1) },
+            );
+        if slow > 0 {
+            out.push(format!(
+                "{slow} of {n} samples are slow outliers; something else was running, or the \
+                 command's work varies. Consider a quieter machine or more runs."
+            ));
+        }
+        // A fast outlier is not harmless the way a slow one is: it is the
+        // minimum tak reports, so the headline number may rest on it.
+        if fast > 0 {
+            out.push(format!(
+                "{fast} of {n} samples are fast outliers, and the reported minimum may be one of \
+                 them; check the command did the same work every time."
+            ));
+        }
+    }
+    let rest = median(&mut samples[1..].to_vec());
+    if rest > 0.0 && samples[0] > 2.0 * rest {
+        out.push(format!(
+            "the first sample took {:.1}x the median of the rest; the warmup did not fill some \
+             cache. Consider more warmup runs.",
+            samples[0] / rest
+        ));
+    }
+    out
+}
+
 /// Wall-clock statistics over `plan.runs` samples of one command.
 pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
     let subject = Subject {
@@ -405,6 +483,7 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
         dir: plan.dir.clone(),
         env: BTreeMap::new(),
         vars: BTreeMap::new(),
+        when: None,
         runs: Runs::Fixed(plan.runs),
         auto: AutoRuns {
             budget: crate::config::DEFAULT_BUDGET,
@@ -783,6 +862,7 @@ mod tests {
             dir: None,
             env: BTreeMap::new(),
             vars: BTreeMap::new(),
+            when: None,
             runs: Runs::Fixed(4),
             auto: AutoRuns {
                 budget: Duration::from_secs(30),
@@ -818,6 +898,7 @@ mod tests {
                 dir: None,
                 env: BTreeMap::new(),
                 vars: BTreeMap::new(),
+                when: None,
                 runs: Runs::Fixed(1),
                 auto: AutoRuns {
                     budget: Duration::from_secs(30),
@@ -863,6 +944,7 @@ mod tests {
             dir: None,
             env: BTreeMap::new(),
             vars: BTreeMap::new(),
+            when: None,
             runs: Runs::Auto,
             auto: AutoRuns {
                 budget: Duration::from_millis(400),
@@ -888,5 +970,70 @@ mod tests {
         assert_eq!(log.plans[0], [1 + 2, 2]);
         assert_eq!(log.plans.len(), 2);
         assert_eq!(log.finished.len(), 1 + fast + slow);
+    }
+
+    #[test]
+    fn steady_samples_raise_no_warning() {
+        assert!(warnings(&[10.0, 10.2, 9.9, 10.1, 10.0, 10.3]).is_empty());
+        assert!(warnings(&[10.0, 50.0]).is_empty(), "too few to judge");
+    }
+
+    #[test]
+    fn a_spike_is_an_outlier() {
+        let w = warnings(&[10.0, 10.2, 9.9, 10.1, 40.0, 10.0, 10.1]);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(
+            w[0].starts_with("1 of 7 samples are slow outliers"),
+            "{w:?}"
+        );
+    }
+
+    #[test]
+    fn a_slow_first_sample_is_called_out() {
+        let w = warnings(&[35.0, 10.0, 10.2, 9.9, 10.1, 10.0]);
+        assert!(
+            w.iter().any(|m| m.contains("first sample took 3.5x")),
+            "{w:?}"
+        );
+    }
+
+    /// With most samples identical the median deviation is zero; a spike
+    /// must still be reported.
+    #[test]
+    fn a_spike_among_identical_samples_is_still_an_outlier() {
+        let w = warnings(&[10.0, 10.0, 10.0, 100.0, 10.0]);
+        assert!(w.iter().any(|m| m.contains("slow outliers")), "{w:?}");
+        assert!(
+            warnings(&[10.0; 6]).is_empty(),
+            "identical samples are fine"
+        );
+    }
+
+    /// A fast outlier is the minimum, so it is reported as such rather than
+    /// reassured away.
+    #[test]
+    fn a_fast_outlier_is_flagged_as_possibly_the_minimum() {
+        let w = warnings(&[100.0, 101.0, 99.0, 102.0, 10.0, 100.0]);
+        assert!(
+            w.iter()
+                .any(|m| m.contains("fast outliers") && m.contains("minimum")),
+            "{w:?}"
+        );
+    }
+
+    /// Several identical spikes over a flat majority are all caught, not
+    /// hidden by a spread they themselves inflate.
+    #[test]
+    fn several_spikes_over_a_flat_majority_are_caught() {
+        let w = warnings(&[10.0, 10.0, 10.0, 10.0, 40.0, 45.0]);
+        assert!(
+            w.iter()
+                .any(|m| m.starts_with("2 of 6 samples are slow outliers")),
+            "{w:?}"
+        );
+        assert!(
+            warnings(&[10.0, 10.0, 10.0, 11.0, 10.0]).is_empty(),
+            "10% is not a spike"
+        );
     }
 }

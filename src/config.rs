@@ -86,6 +86,8 @@ pub struct Bench {
     cmd: Option<Cmd>,
     #[serde(flatten)]
     layer: Layer,
+    /// Run this benchmark only when this expr condition holds.
+    when: Option<String>,
     /// Shared `[subject.NAME]` tables this benchmark measures.
     #[serde(default)]
     subjects: Vec<String>,
@@ -106,6 +108,9 @@ pub struct SubjectDecl {
     cmd: Option<Cmd>,
     #[serde(flatten)]
     layer: Layer,
+    /// Measure this subject only when this expr condition holds. A
+    /// benchmark's own table replaces a shared subject's condition.
+    when: Option<String>,
     /// Opt in to instruction counting. Off by default because a
     /// multi-subject benchmark usually compares against other people's
     /// programs, whose instruction counts are not this project's to gate on:
@@ -286,6 +291,8 @@ pub struct Subject {
     pub env: BTreeMap<String, String>,
     /// Template values from `vars` tables, used by [`crate::template`].
     pub vars: BTreeMap<String, String>,
+    /// Measured only when this holds; see [`crate::condition`].
+    pub when: Option<String>,
     pub runs: Runs,
     /// The limits `Runs::Auto` works within.
     pub auto: AutoRuns,
@@ -322,6 +329,11 @@ impl Subject {
 }
 
 impl Bench {
+    /// This benchmark's own `when` condition.
+    pub fn when(&self) -> Option<&str> {
+        self.when.as_deref()
+    }
+
     /// Whether this benchmark compares several programs rather than measuring
     /// one.
     pub fn is_multi(&self) -> bool {
@@ -349,6 +361,7 @@ impl Config {
                 SELF_TOOL,
                 cmd,
                 true,
+                None,
                 &[&self.defaults, &b.layer],
             )?]);
         }
@@ -371,6 +384,9 @@ impl Config {
                     .and_then(|d| d.cmd.as_ref())
                     .or_else(|| shared.and_then(|d| d.cmd.as_ref()))
                     .with_context(|| format!("subject `{n}` has no command"))?;
+                let when = local
+                    .and_then(|d| d.when.clone())
+                    .or_else(|| shared.and_then(|d| d.when.clone()));
                 let counters = local
                     .and_then(|d| d.counters)
                     .or_else(|| shared.and_then(|d| d.counters))
@@ -378,13 +394,37 @@ impl Config {
                 let mut layers = vec![&self.defaults, &b.layer];
                 layers.extend(shared.map(|d| &d.layer));
                 layers.extend(local.map(|d| &d.layer));
-                resolve(n, cmd, counters, &layers).with_context(|| format!("subject `{n}`"))
+                resolve(n, cmd, counters, when, &layers).with_context(|| format!("subject `{n}`"))
             })
             .collect()
     }
 }
 
 impl Config {
+    /// Every `when` in the file, with where it is.
+    fn conditions(&self) -> Vec<(String, &str)> {
+        let mut out = Vec::new();
+        for (n, d) in &self.subject {
+            out.extend(d.when.as_deref().map(|w| (format!("subject.{n}.when"), w)));
+        }
+        for (b, bench) in &self.bench {
+            out.extend(
+                bench
+                    .when
+                    .as_deref()
+                    .map(|w| (format!("bench.{b}.when"), w)),
+            );
+            for (n, d) in &bench.subject {
+                out.extend(
+                    d.when
+                        .as_deref()
+                        .map(|w| (format!("bench.{b}.subject.{n}.when"), w)),
+                );
+            }
+        }
+        out
+    }
+
     /// Every string that may hold a template, as written, with where it is.
     fn template_strings(&self) -> Vec<(String, &str)> {
         fn layer<'a>(out: &mut Vec<(String, &'a str)>, at: &str, l: &'a Layer) {
@@ -435,7 +475,13 @@ impl Config {
 /// setting replaces an earlier one's — a subject's own prepare replaces the
 /// benchmark's rather than running after it, since the two usually reset the
 /// same state — except `env` and `vars`, which merge key by key.
-fn resolve(name: &str, cmd: &Cmd, counters: bool, layers: &[&Layer]) -> Result<Subject> {
+fn resolve(
+    name: &str,
+    cmd: &Cmd,
+    counters: bool,
+    when: Option<String>,
+    layers: &[&Layer],
+) -> Result<Subject> {
     fn last<'a, T>(layers: &[&'a Layer], f: impl Fn(&'a Layer) -> Option<&'a T>) -> Option<&'a T> {
         layers.iter().rev().find_map(|l| f(l))
     }
@@ -477,6 +523,7 @@ fn resolve(name: &str, cmd: &Cmd, counters: bool, layers: &[&Layer]) -> Result<S
         dir: last(layers, |l| l.dir.as_ref()).cloned(),
         env: merged(|l| &l.env),
         vars: merged(|l| &l.vars),
+        when,
         runs: last(layers, |l| l.runs.as_ref())
             .map_or(Ok(Runs::Fixed(DEFAULT_RUNS)), RunsDecl::resolve)?,
         auto,
@@ -495,6 +542,9 @@ impl Config {
         // still a typo, and should not wait to be found until it is used.
         for (place, value) in cfg.template_strings() {
             crate::template::check_str(value).with_context(|| format!("in {place}"))?;
+        }
+        for (place, when) in cfg.conditions() {
+            crate::condition::check(when).with_context(|| format!("in {place}"))?;
         }
         // Every declared benchmark is validated up front rather than failing
         // partway through a run that has already spent minutes measuring.

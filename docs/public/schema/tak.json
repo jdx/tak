@@ -219,6 +219,10 @@
         },
         "vars": {
           "$ref": "#/definitions/layerProperties/vars"
+        },
+        "when": {
+          "description": "Measure only when this expr condition holds, e.g. '(env.VLT_BIN ?? \"\") != \"\"'. Sees env, os, arch, ci, bench and subject.",
+          "type": "string"
         }
       }
     },
@@ -271,6 +275,10 @@
         },
         "vars": {
           "$ref": "#/definitions/layerProperties/vars"
+        },
+        "when": {
+          "description": "Run this benchmark only when this expr condition holds. Sees env, os, arch, ci and bench.",
+          "type": "string"
         }
       },
       "anyOf": [

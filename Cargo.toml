@@ -47,6 +47,8 @@ serde_json = "1"
 tempfile = "3"
 toml = "1"
 tera = { version = "2", default-features = false }
+expr-lang = { version = "2", default-features = false }
+indexmap = "2"
 
 [profile.release]
 lto = true

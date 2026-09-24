@@ -316,6 +316,7 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         dir: None,
         env: BTreeMap::new(),
         vars: BTreeMap::new(),
+        when: None,
         runs: opts.runs.unwrap_or(Runs::Fixed(DEFAULT_RUNS)),
         auto: AutoRuns {
             budget: DEFAULT_BUDGET,
@@ -391,9 +392,60 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
     let mut plans = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     let env = tak_cli::template::env();
+    let mut skipped = Vec::new();
+    // Subjects a `when` switched off — their own, or their benchmark's — so
+    // a --subject naming one is told why it will not run, rather than that
+    // it does not exist.
+    let mut hidden: std::collections::BTreeMap<String, (String, String)> = Default::default();
     for (name, b) in selected {
-        let mut subjects = cfg.subjects(&name)?;
+        let subjects = cfg.subjects(&name)?;
         seen.extend(subjects.iter().map(|s| s.name.clone()));
+        // A benchmark with none of the requested subjects is not being run:
+        // nothing about it, its own `when` included, is decided or reported.
+        if !opts.subjects.is_empty() && !subjects.iter().any(|s| opts.subjects.contains(&s.name)) {
+            continue;
+        }
+        // `when` is decided before anything is rendered, so a skipped
+        // benchmark or subject never needs the variables it would have used.
+        if let Some(when) = b.when()
+            && !tak_cli::condition::eval(when, &env, &name, None)
+                .with_context(|| format!("benchmark `{name}`"))?
+        {
+            for s in subjects {
+                hidden
+                    .entry(s.name)
+                    .or_insert_with(|| (name.clone(), when.to_string()));
+            }
+            skipped.push((name.clone(), None, when.to_string()));
+            continue;
+        }
+        let mut kept = Vec::with_capacity(subjects.len());
+        for s in subjects {
+            // Only the subjects being run are decided on: one --subject left
+            // out cannot fail the run, whatever its condition evaluates to.
+            if !opts.subjects.is_empty() && !opts.subjects.contains(&s.name) {
+                continue;
+            }
+            match &s.when {
+                Some(when)
+                    if !tak_cli::condition::eval(when, &env, &name, Some(&s.name))
+                        .with_context(|| format!("benchmark `{name}`, subject `{}`", s.name))? =>
+                {
+                    // Remembered rather than fatal: another benchmark may
+                    // still measure a subject this one switches off. Only a
+                    // requested subject no benchmark runs is an error, below.
+                    hidden
+                        .entry(s.name.clone())
+                        .or_insert_with(|| (name.clone(), when.clone()));
+                    skipped.push((name.clone(), Some(s.name.clone()), when.clone()));
+                }
+                _ => kept.push(s),
+            }
+        }
+        let mut subjects = kept;
+        if subjects.is_empty() {
+            continue;
+        }
         // Filter before rendering: a subject that is not being measured must
         // not fail the run over a variable only it needs.
         if !opts.subjects.is_empty() {
@@ -418,6 +470,21 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
         }
         plans.push((name, b.is_multi(), subjects));
     }
+    // A requested subject that no benchmark will measure: say why.
+    let planned: std::collections::BTreeSet<&str> = plans
+        .iter()
+        .flat_map(|(_, _, subjects)| subjects.iter().map(|s| s.name.as_str()))
+        .collect();
+    if let Some(off) = opts
+        .subjects
+        .iter()
+        .find(|s| !planned.contains(s.as_str()) && hidden.contains_key(*s))
+    {
+        let (bench, when) = &hidden[off];
+        bail!(
+            "subject `{off}` was asked for, but `when` is false for it in benchmark `{bench}`: {when}"
+        );
+    }
     if let Some(missing) = opts.subjects.iter().find(|s| !seen.contains(*s)) {
         bail!(
             "no subject `{missing}` in the selected benchmarks (found: {})",
@@ -425,8 +492,29 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
         );
     }
 
+    for (bench, subject, when) in &skipped {
+        let what = subject
+            .as_ref()
+            .map_or(bench.to_string(), |s| format!("{bench} ({s})"));
+        eprintln!("  skipping {what}: `when` is false: {when}");
+    }
+
     if plans.is_empty() {
-        println!("{} declares no benchmarks", path.display());
+        if skipped.is_empty() {
+            println!("{} declares no benchmarks", path.display());
+            return Ok(());
+        }
+        // Asked to leave a result behind and producing none is a failure: a
+        // CI job recording or exporting must not look like it measured
+        // something when every benchmark was switched off.
+        // A dry run writes neither, so there is nothing for it to fail over.
+        if !opts.dry_run && (opts.record || opts.export_json.is_some()) {
+            bail!(
+                "nothing to {}: every selected benchmark or subject has a false `when`",
+                if opts.record { "record" } else { "export" }
+            );
+        }
+        println!("nothing to run: every selected benchmark or subject has a false `when`");
         return Ok(());
     }
 
@@ -624,6 +712,14 @@ fn measure_bench(
             }
         };
         let mut metrics = measure::stats(&samples);
+        let label = if multi {
+            format!("{bench} ({})", s.name)
+        } else {
+            bench.to_string()
+        };
+        for w in measure::warnings(&samples) {
+            eprintln!("  warning: {label}: {w}");
+        }
         if s.counters && !opts.no_counters {
             count_into(&mut metrics, s, settings);
         }
