@@ -18,6 +18,6 @@ Benchmark a command, or everything declared in tak.toml.
 - **`--subject <NAME>`** — Measure only this subject of each multi-subject benchmark. Repeatable. Benchmarks with none of the named subjects are skipped.
 - **`--seed <N>`** — Seed for the order subjects are sampled in. Every multi-subject run prints the seed it used, so an order can be repeated.
 - **`--config <PATH>`** — Read this file instead of searching for tak.toml.
-- **`--dry-run`** — Print what would run — every subject's command, prepare, directory, environment and run count, templates rendered — without running it.
+- **`--dry-run`** — Print what would run — every subject's command, setup, prepare, directory, environment and run count, templates rendered — without running any of it.
 - **`--export-json <PATH>`** — Write every sample and summary to PATH as hyperfine-compatible JSON.
 - **`-h --help`** — Print help

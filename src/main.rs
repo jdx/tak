@@ -103,8 +103,9 @@ enum Cmd {
         /// Read this file instead of searching for tak.toml.
         #[usage(long, value_name = "PATH")]
         config: Option<std::path::PathBuf>,
-        /// Print what would run — every subject's command, prepare, directory,
-        /// environment and run count, templates rendered — without running it.
+        /// Print what would run — every subject's command, setup, prepare,
+        /// directory, environment and run count, templates rendered — without
+        /// running any of it.
         #[usage(long)]
         dry_run: bool,
         /// Write every sample and summary to PATH as hyperfine-compatible JSON.
@@ -313,6 +314,8 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         name: SELF_TOOL.to_string(),
         cmd,
         prepare: None,
+        setup: None,
+        setup_dir: None,
         dir: None,
         env: BTreeMap::new(),
         vars: BTreeMap::new(),
@@ -558,6 +561,13 @@ fn print_plan(bench: &str, multi: bool, subjects: &[Subject], no_counters: bool)
         }
         let pad = if multi { "      " } else { "    " };
         println!("{pad}cmd      {}", shell_words(&s.cmd));
+        if let Some(p) = &s.setup {
+            // Where it runs, since unlike everything else it is not `dir`.
+            match &s.setup_dir {
+                Some(d) => println!("{pad}setup    {}  (in {})", shell_words(p), d.display()),
+                None => println!("{pad}setup    {}", shell_words(p)),
+            }
+        }
         if let Some(p) = &s.prepare {
             println!("{pad}prepare  {}", shell_words(p));
         }

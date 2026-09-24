@@ -182,6 +182,8 @@ fn a_subject_is_prepared_before_every_counted_run() {
                 .map(String::from)
                 .to_vec(),
         ),
+        setup: None,
+        setup_dir: None,
         dir: Some(dir.clone()),
         env: [("MARK".to_string(), "set".to_string())].into(),
         vars: Default::default(),
@@ -224,6 +226,8 @@ fn ok_exit_codes_apply_under_valgrind() {
     let subject = |ok: Vec<i32>| tak_cli::config::Subject {
         name: "x".into(),
         cmd: ["/bin/sh", "-c", "exit 1"].map(String::from).to_vec(),
+        setup: None,
+        setup_dir: None,
         prepare: None,
         dir: None,
         env: Default::default(),

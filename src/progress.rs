@@ -10,6 +10,10 @@
 //! so far, prepare included, times the samples it still has to take. One
 //! average over everything would be badly wrong exactly when it matters —
 //! when a 20-second cold install shares a run with a 300ms one.
+//!
+//! A subject's one-time `setup` is shown while it runs but is not a sample:
+//! it counts toward elapsed time and nothing else, so a minute-long clone
+//! does not make every later sample look a minute long.
 
 use crate::measure::Observer;
 use std::io::{IsTerminal, Write};
@@ -83,6 +87,9 @@ impl Observer for Bar {
     fn planned(&mut self, remaining: &[u64]) {
         lock(&self.state).planned(remaining);
     }
+    fn setting_up(&mut self, subject: usize) {
+        lock(&self.state).setting_up(subject);
+    }
     fn started(&mut self, subject: usize) {
         lock(&self.state).started(subject);
     }
@@ -102,6 +109,8 @@ struct State {
     spent: Vec<(Duration, u32)>,
     done: u64,
     current: Option<usize>,
+    /// Whether `current` is running its setup rather than a sample.
+    in_setup: bool,
     started: Instant,
     tty: bool,
     last_log: Instant,
@@ -120,6 +129,7 @@ impl State {
             spent: vec![(Duration::ZERO, 0); n],
             done: 0,
             current: None,
+            in_setup: false,
             started: now,
             tty: std::io::stderr().is_terminal(),
             last_log: now,
@@ -165,7 +175,11 @@ impl State {
             self.eta()
                 .map_or_else(|| "estimating".to_string(), |d| format!("~{} left", fmt(d)))
         };
-        let who = self.current.map_or("", |i| self.names[i].as_str());
+        let who = match self.current {
+            Some(i) if self.in_setup => format!("setup {}", self.names[i]),
+            Some(i) => self.names[i].clone(),
+            None => String::new(),
+        };
         let tail = format!(
             " {}/{} {pct:>3}%  {} elapsed, {eta}  {who}",
             self.done,
@@ -238,8 +252,17 @@ impl Observer for State {
         self.draw(false);
     }
 
+    fn setting_up(&mut self, subject: usize) {
+        self.current = Some(subject);
+        self.in_setup = true;
+        // Forced in a log too: a setup can take minutes, and the line saying
+        // which one is running is the only sign the run has not hung.
+        self.draw(true);
+    }
+
     fn started(&mut self, subject: usize) {
         self.current = Some(subject);
+        self.in_setup = false;
         if self.tty {
             self.draw(false);
         }
@@ -259,6 +282,7 @@ impl Observer for State {
     fn dropped(&mut self, subject: usize) {
         self.remaining[subject] = 0;
         self.current = None;
+        self.in_setup = false;
         self.draw(false);
     }
 }
@@ -354,6 +378,29 @@ mod tests {
         b.last_log = Instant::now() - LOG_EVERY;
         b.tick();
         assert!(b.last_log > before, "the ticker logged mid-sample");
+    }
+
+    /// A setup is named while it runs but is not a sample: it neither
+    /// advances the count nor enters the estimate.
+    #[test]
+    fn setup_is_shown_but_not_counted() {
+        let mut b = bar(&["aube", "pnpm"]);
+        b.planned(&[2, 2]);
+        b.setting_up(1);
+        assert!(
+            b.line(usize::MAX).ends_with("setup pnpm"),
+            "{}",
+            b.line(usize::MAX)
+        );
+        assert_eq!((b.done, b.eta()), (0, None));
+        b.started(0);
+        assert!(
+            b.line(usize::MAX).ends_with(" aube"),
+            "{}",
+            b.line(usize::MAX)
+        );
+        b.finished(0, Duration::from_secs(1));
+        assert_eq!(b.eta(), Some(Duration::from_secs(3)));
     }
 
     /// The ticker thread starts and stops cleanly, and finishing twice (the
