@@ -654,10 +654,20 @@ cmd = ["true"]
 when = "false"
 [bench.off.subject.hidden]
 cmd = ["true"]
+
+[bench.broken]
+when = '"not a boolean either"'
+[bench.broken.subject.elsewhere]
+cmd = ["true"]
 "#,
     );
     let out = p.run(&["--no-progress", "--subject", "here"]);
     assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("skipping off"),
+        "unrelated benchmark: {}",
+        stderr(&out)
+    );
 
     let hidden = p.run(&["--no-progress", "--subject", "hidden"]);
     assert!(!hidden.status.success());

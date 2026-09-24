@@ -398,13 +398,20 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
     // it does not exist.
     let mut hidden: std::collections::BTreeMap<String, (String, String)> = Default::default();
     for (name, b) in selected {
+        let subjects = cfg.subjects(&name)?;
+        seen.extend(subjects.iter().map(|s| s.name.clone()));
+        // A benchmark with none of the requested subjects is not being run:
+        // nothing about it, its own `when` included, is decided or reported.
+        if !opts.subjects.is_empty() && !subjects.iter().any(|s| opts.subjects.contains(&s.name)) {
+            continue;
+        }
         // `when` is decided before anything is rendered, so a skipped
         // benchmark or subject never needs the variables it would have used.
         if let Some(when) = b.when()
             && !tak_cli::condition::eval(when, &env, &name, None)
                 .with_context(|| format!("benchmark `{name}`"))?
         {
-            for s in cfg.subjects(&name)? {
+            for s in subjects {
                 hidden
                     .entry(s.name)
                     .or_insert_with(|| (name.clone(), when.to_string()));
@@ -412,8 +419,6 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
             skipped.push((name.clone(), None, when.to_string()));
             continue;
         }
-        let subjects = cfg.subjects(&name)?;
-        seen.extend(subjects.iter().map(|s| s.name.clone()));
         let mut kept = Vec::with_capacity(subjects.len());
         for s in subjects {
             // Only the subjects being run are decided on: one --subject left
