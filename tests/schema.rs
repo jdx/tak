@@ -31,6 +31,7 @@ max_runs = 50
 ok_exit_codes = [0]
 prepare = ["true"]
 setup = ["true"]
+check = ["true"]
 dir = "."
 env = { A = "1" }
 vars = { v = "x" }
@@ -47,6 +48,7 @@ max_runs = 2
 ok_exit_codes = [0, 1]
 prepare = "true"
 setup = "true"
+check = "true"
 dir = "."
 env = { B = "2" }
 vars = { w = "y" }
@@ -62,6 +64,7 @@ max_runs = 3
 ok_exit_codes = [1]
 prepare = ["true"]
 setup = "true"
+check = ["true"]
 dir = "."
 env = { C = "3" }
 vars = { u = "z" }

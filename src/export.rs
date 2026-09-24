@@ -6,9 +6,9 @@
 //! rewriting what consumes it. `bench` and `subject` are extra keys, which
 //! hyperfine consumers ignore; they are what tell entries apart once one file
 //! holds several benchmarks. `user` and `system` are omitted because tak does
-//! not measure CPU time.
+//! not measure CPU time. `checks` is present only for a subject with a
+//! `check`, and leaves every hyperfine field as it would otherwise be.
 
-use crate::measure::Sample;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::path::Path;
@@ -53,15 +53,40 @@ pub struct ExportResult {
     pub max: f64,
     /// Every timed sample in seconds, in the order taken.
     pub times: Vec<f64>,
-    /// What each sample exited with, alongside `times`. Always one of the
+    /// What each sample exited with, aligned with `times`. Always one of the
     /// subject's `ok_exit_codes` (0 unless it says otherwise): a sample that
-    /// exits with anything else drops its subject rather than being kept.
+    /// exits with anything else drops its subject rather than being kept. A
+    /// failed `check` is not a failed run, and is reported in `checks`.
     pub exit_codes: Vec<i32>,
+    /// The outcome of the subject's `check`, when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checks: Option<Checks>,
+}
+
+/// How a subject's timed samples fared against its `check`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Checks {
+    pub passed: usize,
+    pub total: usize,
+    /// Whether each sample passed, aligned with `times`, so a failure can be
+    /// matched to the time it produced.
+    pub samples: Vec<bool>,
+}
+
+impl Checks {
+    pub fn new(samples: &[bool]) -> Self {
+        Checks {
+            passed: samples.iter().filter(|&&ok| ok).count(),
+            total: samples.len(),
+            samples: samples.to_vec(),
+        }
+    }
 }
 
 impl ExportResult {
-    pub fn new(bench: &str, subject: &str, command: &str, samples: &[Sample]) -> Self {
-        let times: Vec<f64> = samples.iter().map(|s| s.ms / 1000.0).collect();
+    /// A result whose samples all exited 0; see [`Self::with_exit_codes`].
+    pub fn new(bench: &str, subject: &str, command: &str, samples_ms: &[f64]) -> Self {
+        let times: Vec<f64> = samples_ms.iter().map(|ms| ms / 1000.0).collect();
         let mut sorted = times.clone();
         sorted.sort_by(f64::total_cmp);
         let n = sorted.len();
@@ -85,9 +110,24 @@ impl ExportResult {
             median,
             min: sorted[0],
             max: sorted[n - 1],
-            exit_codes: samples.iter().map(|s| s.exit_code).collect(),
+            exit_codes: vec![0; n],
             times,
+            checks: None,
         }
+    }
+
+    /// Record what each sample actually exited with, one per sample.
+    pub fn with_exit_codes(mut self, codes: &[i32]) -> Self {
+        debug_assert_eq!(codes.len(), self.times.len());
+        self.exit_codes = codes.to_vec();
+        self
+    }
+
+    /// Attach a subject's check outcomes, one per sample.
+    pub fn with_checks(mut self, samples: &[bool]) -> Self {
+        debug_assert_eq!(samples.len(), self.times.len());
+        self.checks = Some(Checks::new(samples));
+        self
     }
 }
 
@@ -104,22 +144,36 @@ pub fn write(path: &Path, meta: Meta, results: Vec<ExportResult>) -> Result<()> 
 mod tests {
     use super::*;
 
-    fn ok(ms: &[f64]) -> Vec<Sample> {
-        ms.iter().map(|&ms| Sample { ms, exit_code: 0 }).collect()
-    }
-
     #[test]
     fn times_are_seconds_and_the_median_is_the_true_median() {
-        let r = ExportResult::new("b", "s", "s", &ok(&[4000.0, 1000.0, 3000.0, 2000.0]));
+        let r = ExportResult::new("b", "s", "s", &[4000.0, 1000.0, 3000.0, 2000.0]);
         assert_eq!(r.times, [4.0, 1.0, 3.0, 2.0], "kept in the order taken");
         assert_eq!((r.min, r.max, r.mean, r.median), (1.0, 4.0, 2.5, 2.5));
         assert_eq!(r.exit_codes, [0; 4]);
         assert!(r.stddev.unwrap() > 0.0);
     }
 
+    /// `checks` is absent without a check, so a subject that has none
+    /// exports exactly the hyperfine shape it did before.
+    #[test]
+    fn checks_are_exported_only_when_there_are_some() {
+        let plain = serde_json::to_value(ExportResult::new("b", "s", "s", &[1.0, 2.0])).unwrap();
+        assert!(plain.get("checks").is_none(), "{plain}");
+
+        let checked = serde_json::to_value(
+            ExportResult::new("b", "s", "s", &[1.0, 2.0, 3.0]).with_checks(&[true, false, true]),
+        )
+        .unwrap();
+        assert_eq!(
+            checked["checks"],
+            serde_json::json!({"passed": 2, "total": 3, "samples": [true, false, true]})
+        );
+        assert_eq!(checked["exit_codes"], serde_json::json!([0, 0, 0]));
+    }
+
     #[test]
     fn a_single_sample_has_no_stddev() {
-        let r = ExportResult::new("b", "s", "s", &ok(&[5.0]));
+        let r = ExportResult::new("b", "s", "s", &[5.0]);
         assert_eq!(r.stddev, None);
         let json = serde_json::to_value(&r).unwrap();
         assert!(json["stddev"].is_null());
@@ -129,19 +183,7 @@ mod tests {
     /// assumed to be 0.
     #[test]
     fn exit_codes_are_what_each_sample_exited_with() {
-        let samples = [
-            Sample {
-                ms: 1.0,
-                exit_code: 1,
-            },
-            Sample {
-                ms: 2.0,
-                exit_code: 0,
-            },
-        ];
-        assert_eq!(
-            ExportResult::new("b", "s", "s", &samples).exit_codes,
-            [1, 0]
-        );
+        let r = ExportResult::new("b", "s", "s", &[1.0, 2.0]).with_exit_codes(&[1, 0]);
+        assert_eq!(r.exit_codes, [1, 0]);
     }
 }

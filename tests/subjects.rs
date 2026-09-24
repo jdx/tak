@@ -894,6 +894,267 @@ setup = ["sh", "-c", "echo setup:{{ subject }} >> log"]
     assert!(p.log().is_empty(), "nothing ran");
 }
 
+/// A check that fails on some samples is counted, reported and exported, and
+/// the subject keeps every sample: how often a subject gets the work wrong is
+/// the result, not a reason to drop it.
+#[test]
+fn a_failing_check_is_counted_not_fatal() {
+    let p = Project::new(
+        "check",
+        r#"
+[bench.cmp]
+warmup = 1
+runs = 6
+# Passes when the subject's counter file has an even number of lines. The
+# warmup is run 1 and is never checked.
+check = ["sh", "-c", "echo {{ subject }} >> checked; test $(( $(wc -l < n-{{ subject }}) % 2 )) = 1 || { echo even >&2; exit 1; }"]
+
+# Two lines per run: every count is even, so every check fails.
+[bench.cmp.subject.broken]
+cmd = ["sh", "-c", "echo x >> n-broken; echo x >> n-broken"]
+
+# One line per run: odd on runs 3, 5 and 7.
+[bench.cmp.subject.flaky]
+cmd = ["sh", "-c", "echo x >> n-flaky"]
+
+[bench.cmp.subject.fine]
+cmd = ["sh", "-c", "echo x >> n-fine"]
+check = ["true"]
+"#,
+    );
+    let out = p.run(&["--no-progress", "--export-json", "r.json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = |name: &str| {
+        stdout
+            .lines()
+            .find(|l| l.trim_start().starts_with(name))
+            .unwrap_or_else(|| panic!("no line for {name}: {stdout}"))
+            .to_string()
+    };
+    assert!(line("flaky").contains("n=6  checks 3/6"), "{stdout}");
+    assert!(line("broken").contains("checks 0/6"), "{stdout}");
+    assert!(line("fine").contains("checks 6/6"), "{stdout}");
+    let err = stderr(&out);
+    assert!(
+        err.contains("cmp (flaky): check failed after 3 of 6 samples (sample 1, 3, 5)"),
+        "{err}"
+    );
+    assert!(err.contains("check `sh` exited with"), "{err}");
+    assert!(!err.contains("cmp (fine): check"), "{err}");
+    assert!(!err.contains("dropped"), "{err}");
+
+    // Checked after each timed sample, never after the warmup.
+    let checked = std::fs::read_to_string(p.path("checked")).unwrap();
+    assert_eq!(checked.lines().filter(|l| *l == "flaky").count(), 6);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    let by = |name: &str| {
+        json["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["subject"] == name)
+            .unwrap()
+            .clone()
+    };
+    let flaky = by("flaky");
+    assert_eq!(flaky["times"].as_array().unwrap().len(), 6);
+    assert_eq!(
+        flaky["checks"],
+        serde_json::json!({
+            "passed": 3,
+            "total": 6,
+            "samples": [false, true, false, true, false, true]
+        })
+    );
+    assert_eq!(by("broken")["checks"]["passed"], 0);
+    assert_eq!(by("fine")["checks"]["passed"], 6);
+}
+
+/// A single-command benchmark reports its checks with its other numbers, and
+/// a benchmark without a check exports no `checks` at all.
+#[test]
+fn a_single_command_reports_its_checks() {
+    let p = Project::new(
+        "check-single",
+        r#"
+[bench.one]
+cmd = ["sh", "-c", "echo x >> n"]
+check = "true"
+warmup = 0
+runs = 2
+
+[bench.two]
+cmd = ["true"]
+warmup = 0
+runs = 1
+"#,
+    );
+    let out = p.run(&["--no-progress", "--export-json", "r.json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.split_whitespace().collect::<Vec<_>>() == ["checks", "2/2"]),
+        "{stdout}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    let results = json["results"].as_array().unwrap();
+    assert_eq!(results[0]["checks"]["total"], 2);
+    assert!(results[1].get("checks").is_none(), "{}", results[1]);
+}
+
+/// --dry-run shows the check each subject would run, rendered and anchored.
+#[test]
+fn dry_run_shows_the_check() {
+    let p = Project::new(
+        "check-dry",
+        r#"
+[defaults]
+check = ["./bin/verify", "{{ subject }}"]
+
+[bench.cmp.subject.a]
+cmd = ["sh", "-c", "echo ran >> log"]
+"#,
+    );
+    let out = p.run(&["--dry-run"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // tak anchors paths at the directory it found tak.toml in, which it
+    // reaches through the resolved working directory: on macOS the temp dir
+    // under /var is really /private/var, so compare against the canonical path.
+    let verify = p.dir.canonicalize().unwrap().join("./bin/verify");
+    assert!(
+        stdout.contains(&format!("check    {} a", verify.display())),
+        "{stdout}"
+    );
+    assert!(p.log().is_empty(), "nothing ran");
+}
+
+/// With `runs = "auto"` and no warmups, the first timed sample is the pilot
+/// that sizes the run, taken before the others. Its check verdict is still
+/// the first one exported, next to the first time.
+#[test]
+fn the_auto_pilot_sample_is_checked_in_order() {
+    let p = Project::new(
+        "check-pilot",
+        r#"
+[bench.cmp]
+runs = "auto"
+warmup = 0
+budget = "1s"
+min_runs = 3
+max_runs = 4
+# Fails only on its first invocation, which is the pilot's.
+check = ["sh", "-c", "echo x >> checks; test $(( $(wc -l < checks) )) != 1"]
+
+[bench.cmp.subject.a]
+cmd = ["true"]
+"#,
+    );
+    let out = p.run(&["--no-progress", "--export-json", "r.json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    let r = &json["results"][0];
+    let times = r["times"].as_array().unwrap().len();
+    assert!((3..=4).contains(&times), "{r}");
+    assert_eq!(r["checks"]["total"], times, "{r}");
+    let samples: Vec<bool> = r["checks"]["samples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_bool().unwrap())
+        .collect();
+    assert_eq!(samples.len(), times, "{r}");
+    assert!(!samples[0], "the pilot's failure comes first: {r}");
+    assert!(samples[1..].iter().all(|&ok| ok), "{r}");
+    assert_eq!(r["checks"]["passed"], times - 1, "{r}");
+}
+
+/// A failed check stops --record: git notes keep timings without verdicts, so
+/// recording would store a failed sample's time as if it had passed. The
+/// export is still written, and without --record the run succeeds.
+#[test]
+fn a_failing_check_stops_record_but_not_the_run() {
+    let p = Project::new(
+        "check-record",
+        r#"
+[bench.cmp]
+warmup = 0
+runs = 2
+
+[bench.cmp.subject.good]
+cmd = ["true"]
+check = ["true"]
+
+[bench.cmp.subject.bad]
+cmd = ["true"]
+check = ["false"]
+"#,
+    );
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&p.dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", stderr(&out));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let ident = [
+        ("GIT_AUTHOR_NAME", "tak-test"),
+        ("GIT_AUTHOR_EMAIL", "t@example.com"),
+        ("GIT_COMMITTER_NAME", "tak-test"),
+        ("GIT_COMMITTER_EMAIL", "t@example.com"),
+    ];
+    git(&["init", "-q"]);
+    git(&[
+        "-c",
+        "user.name=tak-test",
+        "-c",
+        "user.email=t@example.com",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "init",
+    ]);
+
+    let out = p.run_env(
+        &["--no-progress", "--record", "--export-json", "r.json"],
+        &ident,
+    );
+    assert!(!out.status.success(), "a failed check must stop --record");
+    let err = stderr(&out);
+    assert!(err.contains("not recording"), "{err}");
+    assert!(err.contains("cmp (bad) failed 2 of 2"), "{err}");
+    assert!(!err.contains("cmp (good) failed"), "{err}");
+    assert!(
+        git(&["notes", "--ref=tak", "list"]).is_empty(),
+        "nothing recorded"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    assert_eq!(
+        json["results"].as_array().unwrap().len(),
+        2,
+        "export written"
+    );
+
+    let out = p.run(&["--no-progress"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // With every check passing, the same project records.
+    let out = p.run_env(&["--no-progress", "--record", "--subject", "good"], &ident);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!git(&["notes", "--ref=tak", "list"]).is_empty());
+}
+
 /// A subject that exits 1 by design, like pre-commit after a hook modified
 /// files, is kept when `ok_exit_codes` allows it, warmups included, and its
 /// real exit codes are exported. Without the setting the same command is
@@ -1119,4 +1380,40 @@ cmd = ["sh", "-c", "echo ran:ok >> log"]
     let out = p.run(&["--bench", "cmp", "--subject", "ok", "--no-progress"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(p.log(), ["ran:unix", "ran:ok"]);
+}
+
+/// `ok_exit_codes` keep a command that exits 1, but its `check` still has
+/// to exit 0 to pass: the export shows the kept exit codes and the failed
+/// checks side by side.
+#[test]
+fn ok_exit_codes_do_not_pass_a_failing_check() {
+    let p = Project::new(
+        "ok-exit-check",
+        r#"
+[bench.cmp]
+runs = 2
+warmup = 0
+
+[bench.cmp.subject.lint]
+cmd = ["sh", "-c", "exit 1"]
+check = ["sh", "-c", "exit 1"]
+ok_exit_codes = [0, 1]
+"#,
+    );
+    let out = p.run(&["--no-progress", "--export-json", "r.json"]);
+    assert!(
+        out.status.success(),
+        "a failed check alone doesn't fail the run: {}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("check failed after 2 of 2"),
+        "{}",
+        stderr(&out)
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    let r = &json["results"][0];
+    assert_eq!(r["exit_codes"], serde_json::json!([1, 1]));
+    assert_eq!(r["checks"]["passed"], 0);
 }

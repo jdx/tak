@@ -160,7 +160,7 @@ fn wall_clock_works_without_counters() {
 
 /// A declared subject's prepare step runs before every cachegrind run, and its
 /// env reaches the subject under valgrind — each counted run has to start from
-/// the same state the timed samples did.
+/// the same state the timed samples did. Its check does not run.
 #[cfg(unix)]
 #[test]
 fn a_subject_is_prepared_before_every_counted_run() {
@@ -184,6 +184,13 @@ fn a_subject_is_prepared_before_every_counted_run() {
         ),
         setup: None,
         setup_dir: None,
+        // Never run under cachegrind: those runs are not samples anyone
+        // reports, so the log below has no `check` line.
+        check: Some(
+            ["/bin/sh", "-c", "echo check >> log"]
+                .map(String::from)
+                .to_vec(),
+        ),
         dir: Some(dir.clone()),
         env: [("MARK".to_string(), "set".to_string())].into(),
         vars: Default::default(),
@@ -229,6 +236,7 @@ fn ok_exit_codes_apply_under_valgrind() {
         setup: None,
         setup_dir: None,
         prepare: None,
+        check: None,
         dir: None,
         env: Default::default(),
         vars: Default::default(),
