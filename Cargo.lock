@@ -324,7 +324,6 @@ dependencies = [
  "expr-lang",
  "fastrand",
  "indexmap",
- "libc",
  "serde",
  "serde_json",
  "tempfile",

@@ -1493,10 +1493,9 @@ ok_exit_codes = [0, 1]
 }
 
 /// A passing prepare and check that leave a process holding stderr cost a
-/// sample nothing extra: the grace for reading stderr after exit is only
-/// waited out when a failure needs the message.
+/// sample nothing extra: tak moves on as soon as each step exits.
 #[test]
-fn passing_steps_leaving_stderr_open_do_not_wait_out_the_grace() {
+fn passing_steps_leaving_stderr_open_add_no_delay() {
     let p = Project::new(
         "bg-many",
         &format!(
@@ -1506,7 +1505,8 @@ fn passing_steps_leaving_stderr_open_do_not_wait_out_the_grace() {
     let start = std::time::Instant::now();
     let out = p.run(&["--no-progress"]);
     let took = start.elapsed();
-    // 10 prepares and 10 checks at 500 ms each would be 10 s.
+    // 10 prepares and 10 checks, each with a background sleep; waiting even
+    // 500 ms after each would take 10 s.
     assert!(
         took < std::time::Duration::from_secs(2),
         "took {took:?}: {}",
@@ -1515,4 +1515,29 @@ fn passing_steps_leaving_stderr_open_do_not_wait_out_the_grace() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(String::from_utf8_lossy(&out.stdout).contains("checks 10/10"));
     assert_eq!(p.log().len(), 10);
+}
+
+/// A failing step's message comes from the end of its stderr, however much
+/// it wrote first.
+#[test]
+fn a_failing_step_with_long_stderr_reports_its_last_line() {
+    let p = Project::new(
+        "long-stderr",
+        &format!(
+            "[bench.cmp]\nwarmup = 0\n{}\n[bench.cmp.subject.broken]\ncmd = [\"sh\", \"-c\", \"echo run:broken >> log\"]\nsetup = [\"sh\", \"-c\", \"{{ yes filler | head -c 10000; echo; echo final line; }} >&2; exit 1\"]\n",
+            logging_subject("a", 1)
+        ),
+    );
+    let out = p.run(&["--no-progress"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(
+        err.contains("cmp (broken) dropped") && err.contains("setup `sh` exited with"),
+        "{err}"
+    );
+    let line = err
+        .lines()
+        .find(|l| l.contains("setup `sh` exited with"))
+        .unwrap();
+    assert!(line.trim_end().ends_with(": final line"), "{line}");
 }

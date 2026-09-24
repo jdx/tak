@@ -50,12 +50,6 @@ tera = { version = "2", default-features = false }
 expr-lang = { version = "2", default-features = false }
 indexmap = "2"
 
-# poll(2), so an untimed step's stderr reader can stop and close the pipe when
-# a process the step left behind keeps it open (src/measure.rs). Already in the
-# dependency tree through tempfile, so it adds no crate.
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 [profile.release]
 lto = true
 codegen-units = 1

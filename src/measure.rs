@@ -163,19 +163,6 @@ fn check_once(cmd: &[String], site: &Site) -> Result<Option<String>> {
     untimed("check", cmd, site)
 }
 
-/// How long to keep reading a failed untimed step's stderr after it has
-/// exited. Normally the pipe closes with the process and this is never waited
-/// out; it only runs down when something the step left behind still holds the
-/// pipe open, and then it is enough for what the step wrote before exiting to
-/// be read. A step that passed has no message to build, so it is not waited
-/// for at all — prepare and check run once per sample.
-const UNTIMED_STDERR_GRACE: Duration = Duration::from_millis(500);
-
-/// How often a stderr reader checks whether it has been told to stop. Bounds
-/// how long a pipe held open by a leftover process outlives its step.
-#[cfg(unix)]
-const UNTIMED_READER_POLL_MS: libc::c_int = 50;
-
 /// Run an untimed step — `prepare`, `setup` or `check`, named by `step` in
 /// messages. `Ok(Some(why))` when it exits non-zero, naming the step and the
 /// last line of its stderr.
@@ -189,61 +176,45 @@ const UNTIMED_READER_POLL_MS: libc::c_int = 50;
 /// every later sample starting from the wrong state, and a check passes only
 /// by exiting 0.
 ///
-/// The step is done when its process exits, not when its stderr closes. A
-/// step that starts something in the background — `sleep 600 &`, a daemon, a
-/// build server — leaves that process holding the pipe, and waiting for EOF
-/// hung the whole run. tak neither waits for nor kills such processes: a
-/// fixture server started by `setup` may be exactly the point. One still
-/// running while samples are timed competes with them, and the timings show
-/// it. Once the step's stderr is no longer needed, tak closes its end of the
-/// pipe, so such a process that later writes to stderr gets `EPIPE` or
-/// `SIGPIPE`.
+/// stderr goes to an anonymous temporary file, not a pipe, and the step is
+/// done when its process exits. With a pipe, a step that starts something in
+/// the background — a fixture server, a daemon, a build server, `sleep 600 &`
+/// — leaves that process holding the write end: waiting for EOF hung the
+/// whole run, and closing the read end instead would kill the process with
+/// SIGPIPE the next time it logged. A file has neither problem. tak neither
+/// waits for nor kills such processes, since a server started by `setup` may
+/// be exactly the point; one still running while samples are timed competes
+/// with them, and the timings show it.
+///
+/// The cost is disk: whatever a leftover process writes to stderr lands in
+/// the file, in the temp directory, for as long as it runs. The file has no
+/// name on Unix and is deleted when its last handle closes on Windows, so the
+/// space comes back once tak has dropped its handle and the process exits. A
+/// step whose background process logs heavily should redirect that output.
 ///
 /// There is deliberately no overall deadline: a setup that builds or clones a
 /// fixture can legitimately take minutes.
 fn untimed(step: &str, cmd: &[String], site: &Site) -> Result<Option<String>> {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex, mpsc};
-
     let mut c = command(cmd, site)?;
     let bin = &cmd[0];
-    let mut child = c
+    let err = tempfile::tempfile()
+        .with_context(|| format!("failed to create a file for {step} `{bin}`'s stderr"))?;
+    let reader = err
+        .try_clone()
+        .with_context(|| format!("failed to create a file for {step} `{bin}`'s stderr"))?;
+    let status = c
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::from(err))
+        .status()
         .with_context(|| format!("failed to spawn {step} `{bin}`"))?;
-    // The reader runs on its own thread so that a pipe held open after the
-    // step exits cannot keep us from noticing that it did.
-    let tail: Arc<Mutex<Vec<u8>>> = Arc::default();
-    let stop = Arc::new(AtomicBool::new(false));
-    let (done_tx, done) = mpsc::channel::<()>();
-    if let Some(err) = child.stderr.take() {
-        let tail = Arc::clone(&tail);
-        let stop = Arc::clone(&stop);
-        std::thread::spawn(move || {
-            read_tail(err, &tail, &stop);
-            // The receiver is gone if the grace ran out first; nothing to tell.
-            let _ = done_tx.send(());
-        });
-    } else {
-        drop(done_tx);
-    }
-    let status = child.wait();
-    // A pass needs no stderr, so stop reading at once rather than after the
-    // grace. Not joined either way: the reader notices within one poll and
-    // closes the pipe as it returns.
-    if matches!(&status, Ok(s) if !s.success()) {
-        let _ = done.recv_timeout(UNTIMED_STDERR_GRACE);
-    }
-    stop.store(true, Ordering::Relaxed);
-    let status = status.with_context(|| format!("failed to wait for {step} `{bin}`"))?;
     if status.success() {
         return Ok(None);
     }
     // A check like `git diff --quiet` says nothing on failure by design, so
-    // silence is reported as the status alone.
-    let tail = tail.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    // silence is reported as the status alone. An unreadable file is treated
+    // the same way: the status is the finding, the stderr only decoration.
+    let tail = stderr_tail(&reader).unwrap_or_default();
     let stderr = String::from_utf8_lossy(&tail);
     Ok(Some(match stderr.lines().rfind(|l| !l.trim().is_empty()) {
         Some(last) => format!("{step} `{bin}` exited with {status}: {}", last.trim()),
@@ -251,79 +222,37 @@ fn untimed(step: &str, cmd: &[String], site: &Site) -> Result<Option<String>> {
     }))
 }
 
-/// Append what arrives on `err` to `tail`, keeping only the last
-/// [`UNTIMED_STDERR_TAIL`] bytes, until EOF or until `stop` is set. Returning
-/// drops `err`, closing tak's end of the pipe.
+/// The last [`UNTIMED_STDERR_TAIL`] bytes of a step's stderr file.
 ///
-/// Waits with `poll` rather than a blocking read so `stop` is seen even while
-/// a leftover process holds the pipe open without writing. The fd is only
-/// ever touched by this thread, so it is never closed under a blocked read.
-#[cfg(unix)]
-fn read_tail(
-    mut err: std::process::ChildStderr,
-    tail: &std::sync::Mutex<Vec<u8>>,
-    stop: &std::sync::atomic::AtomicBool,
-) {
-    use std::io::Read;
-    use std::os::fd::AsRawFd;
-    use std::sync::atomic::Ordering;
-
-    let mut buf = [0u8; 8192];
-    while !stop.load(Ordering::Relaxed) {
-        let mut fd = libc::pollfd {
-            fd: err.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: one valid pollfd, owned by `err` for the whole call.
-        match unsafe { libc::poll(&mut fd, 1, UNTIMED_READER_POLL_MS) } {
-            0 => continue,
-            n if n < 0 => {
-                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                return;
-            }
-            // Readable or hung up: either way a read now returns without
-            // blocking, with data or with EOF.
-            _ => {}
-        }
-        match err.read(&mut buf) {
-            Ok(0) => return,
-            Ok(n) => push_tail(tail, &buf[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => return,
-        }
-    }
-}
-
-/// Without `poll`, a blocking read that ignores `stop`: the reader and its end
-/// of the pipe live until whatever holds the pipe open closes it. The run
-/// still continues once the step exits.
-#[cfg(not(unix))]
-fn read_tail(
-    mut err: std::process::ChildStderr,
-    tail: &std::sync::Mutex<Vec<u8>>,
-    _stop: &std::sync::atomic::AtomicBool,
-) {
-    use std::io::Read;
-
-    let mut buf = [0u8; 8192];
-    while let Ok(n) = err.read(&mut buf) {
+/// Read by position, not through the file cursor: the handle is a duplicate
+/// of the one a leftover process may still be writing through, and on Unix
+/// they share the cursor, so seeking would move where that process writes.
+/// Windows has no positional read that leaves the cursor alone; there a
+/// leftover writer may overwrite part of a file nobody reads again.
+fn stderr_tail(f: &std::fs::File) -> std::io::Result<Vec<u8>> {
+    let len = f.metadata()?.len();
+    let start = len.saturating_sub(UNTIMED_STDERR_TAIL as u64);
+    let mut buf = vec![0u8; (len - start) as usize];
+    let mut filled = 0;
+    while filled < buf.len() {
+        let n = read_at(f, &mut buf[filled..], start + filled as u64)?;
         if n == 0 {
-            return;
+            break;
         }
-        push_tail(tail, &buf[..n]);
+        filled += n;
     }
+    buf.truncate(filled);
+    Ok(buf)
 }
 
-fn push_tail(tail: &std::sync::Mutex<Vec<u8>>, bytes: &[u8]) {
-    let mut tail = tail.lock().unwrap_or_else(|e| e.into_inner());
-    tail.extend_from_slice(bytes);
-    if tail.len() > UNTIMED_STDERR_TAIL {
-        let excess = tail.len() - UNTIMED_STDERR_TAIL;
-        tail.drain(..excess);
-    }
+#[cfg(unix)]
+fn read_at(f: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    std::os::unix::fs::FileExt::read_at(f, buf, offset)
+}
+
+#[cfg(windows)]
+fn read_at(f: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    std::os::windows::fs::FileExt::seek_read(f, buf, offset)
 }
 
 /// One entry in a run's sample order.
@@ -1271,15 +1200,13 @@ mod tests {
         assert!(msg.contains("failed to spawn check"), "{msg}");
     }
 
-    /// A passing step that leaves a process holding its stderr returns at
-    /// once, and tak's end of the pipe is closed soon after rather than
-    /// living as long as that process: over many samples, readers and
-    /// descriptors must not pile up. The proof is that the leftover process's
-    /// later write to stderr dies of SIGPIPE (exit 141), which only happens
-    /// once no reader is left.
+    /// A passing step that leaves a process writing to stderr returns at
+    /// once, and that process is left alone: a fixture server started by
+    /// `setup` must survive logging after the step is done, so its later
+    /// write to stderr must succeed rather than die of SIGPIPE (exit 141).
     #[cfg(unix)]
     #[test]
-    fn a_passing_step_leaving_stderr_open_releases_the_pipe() {
+    fn a_process_left_by_a_passing_step_can_still_write_to_stderr() {
         let dir = tempfile::tempdir().unwrap();
         let env = BTreeMap::new();
         let settings = Settings::default();
@@ -1295,10 +1222,9 @@ mod tests {
                 "{{ sh -c 'sleep 1; echo late >&2'; echo $? > s{i}.tmp && mv s{i}.tmp s{i}; }} & exit 0"
             );
             let step = ["/bin/sh".to_string(), "-c".into(), script];
-            assert_eq!(untimed("prepare", &step, &site).unwrap(), None);
+            assert_eq!(untimed("setup", &step, &site).unwrap(), None);
         }
         let took = start.elapsed();
-        // Waiting out the grace on every pass would take N × 500 ms.
         assert!(took < Duration::from_secs(2), "{N} passes took {took:?}");
 
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -1308,12 +1234,12 @@ mod tests {
                     if let Ok(s) = std::fs::read_to_string(dir.path().join(format!("s{i}"))) {
                         break s.trim().to_string();
                     }
-                    assert!(Instant::now() < deadline, "leftover {i} never wrote");
+                    assert!(Instant::now() < deadline, "leftover {i} never finished");
                     std::thread::sleep(Duration::from_millis(50));
                 }
             })
             .collect();
-        assert!(statuses.iter().all(|s| s == "141"), "{statuses:?}");
+        assert!(statuses.iter().all(|s| s == "0"), "{statuses:?}");
     }
 
     /// An observer that records what it was told.
