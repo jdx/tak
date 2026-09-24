@@ -67,6 +67,9 @@ struct Layer {
     max_runs: Option<u32>,
     /// Untimed command run before every sample.
     prepare: Option<Cmd>,
+    /// Untimed command run after every timed sample; its exit status says
+    /// whether that sample did the right work.
+    check: Option<Cmd>,
     /// Directory to run in, relative to `tak.toml`.
     dir: Option<PathBuf>,
     /// Variables set for the command.
@@ -286,6 +289,8 @@ pub struct Subject {
     pub name: String,
     pub cmd: Vec<String>,
     pub prepare: Option<Vec<String>>,
+    /// Run after every timed sample, untimed. Exit 0 means the sample passed.
+    pub check: Option<Vec<String>>,
     /// Relative to `tak.toml`; the caller resolves it.
     pub dir: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
@@ -320,6 +325,9 @@ impl Subject {
         program(&mut self.cmd);
         if let Some(prepare) = &mut self.prepare {
             program(prepare);
+        }
+        if let Some(check) = &mut self.check {
+            program(check);
         }
         self.dir = Some(match &self.dir {
             Some(d) => root.join(d),
@@ -431,6 +439,9 @@ impl Config {
             if let Some(p) = &l.prepare {
                 cmd(out, &format!("{at}.prepare"), p);
             }
+            if let Some(c) = &l.check {
+                cmd(out, &format!("{at}.check"), c);
+            }
             if let Some(d) = l.dir.as_ref().and_then(|d| d.to_str()) {
                 out.push((format!("{at}.dir"), d));
             }
@@ -474,7 +485,8 @@ impl Config {
 /// Stack `layers`, least specific first, into one subject. A later layer's
 /// setting replaces an earlier one's — a subject's own prepare replaces the
 /// benchmark's rather than running after it, since the two usually reset the
-/// same state — except `env` and `vars`, which merge key by key.
+/// same state, and a subject's check replaces the benchmark's for the same
+/// reason — except `env` and `vars`, which merge key by key.
 fn resolve(
     name: &str,
     cmd: &Cmd,
@@ -520,6 +532,10 @@ fn resolve(
         prepare: last(layers, |l| l.prepare.as_ref())
             .map(Cmd::argv)
             .transpose()?,
+        check: last(layers, |l| l.check.as_ref())
+            .map(Cmd::argv)
+            .transpose()
+            .context("check")?,
         dir: last(layers, |l| l.dir.as_ref()).cloned(),
         env: merged(|l| &l.env),
         vars: merged(|l| &l.vars),
@@ -779,6 +795,85 @@ cmd = "mycli 'two words'""#,
     }
 
     #[test]
+    fn an_empty_check_is_rejected() {
+        let err = Config::parse("[bench.a]\ncmd = \"x\"\ncheck = []").unwrap_err();
+        assert!(format!("{err:#}").contains("check"), "{err:#}");
+    }
+
+    /// `check` stacks like `prepare`: the most specific layer that sets one
+    /// wins, and one that says nothing inherits.
+    #[test]
+    fn check_stacks_like_prepare() {
+        let c = Config::parse(
+            r#"
+            [defaults]
+            check = "git diff --quiet"
+
+            [subject.a]
+            cmd = ["a"]
+
+            [subject.b]
+            cmd = ["b"]
+            check = ["./verify", "b"]
+
+            [bench.plain]
+            cmd = "x"
+
+            [bench.cmp]
+            subjects = ["a", "b"]
+            [bench.cmp.subject.c]
+            cmd = ["c"]
+            check = ["./verify", "{{ subject }}"]
+
+            [bench.own]
+            subjects = ["a", "b"]
+            check = ["./bench-check"]
+            [bench.own.subject.b]
+            check = "./local-check"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(only(&c, "plain").check.unwrap(), ["git", "diff", "--quiet"]);
+        let cmp = c.subjects("cmp").unwrap();
+        assert_eq!(
+            cmp[0].check.as_deref().unwrap(),
+            ["git", "diff", "--quiet"],
+            "inherited from defaults"
+        );
+        assert_eq!(cmp[1].check.as_deref().unwrap(), ["./verify", "b"]);
+        assert_eq!(
+            cmp[2].check.as_deref().unwrap(),
+            ["./verify", "{{ subject }}"],
+            "rendered later"
+        );
+        let own = c.subjects("own").unwrap();
+        assert_eq!(
+            own[0].check.as_deref().unwrap(),
+            ["./bench-check"],
+            "bench over defaults"
+        );
+        assert_eq!(
+            own[1].check.as_deref().unwrap(),
+            ["./local-check"],
+            "bench's own subject table over the shared subject"
+        );
+        assert!(
+            Config::parse("[bench.a]\ncmd = \"x\"")
+                .unwrap()
+                .subjects("a")
+                .unwrap()[0]
+                .check
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_broken_check_template_is_rejected_at_parse_time() {
+        let err = Config::parse("[bench.a]\ncmd = \"x\"\ncheck = [\"{{ env.X \"]").unwrap_err();
+        assert!(format!("{err:#}").contains("check"), "{err:#}");
+    }
+
+    #[test]
     fn zero_runs_is_rejected_at_parse_time() {
         assert!(Config::parse("[bench.a.subject.b]\ncmd = \"x\"\nruns = 0").is_err());
     }
@@ -795,7 +890,7 @@ cmd = "mycli 'two words'""#,
     fn a_relative_program_path_is_anchored_at_the_config() {
         let root = Path::new("/repo");
         let mut s = Config::parse(
-            "[bench.a]\ncmd = [\"./target/x\", \"./arg\"]\nprepare = \"bin/reset\"\ndir = \"fix\"",
+            "[bench.a]\ncmd = [\"./target/x\", \"./arg\"]\nprepare = \"bin/reset\"\ncheck = \"./bin/verify ./out\"\ndir = \"fix\"",
         )
         .unwrap()
         .subjects("a")
@@ -808,6 +903,7 @@ cmd = "mycli 'two words'""#,
             "arguments are left alone"
         );
         assert_eq!(s.prepare.unwrap(), ["/repo/bin/reset"]);
+        assert_eq!(s.check.unwrap(), ["/repo/./bin/verify", "./out"]);
         assert_eq!(s.dir.unwrap(), Path::new("/repo/fix"));
 
         let mut bare = Config::parse("[bench.a]\ncmd = \"mycli --version\"")

@@ -103,8 +103,9 @@ enum Cmd {
         /// Read this file instead of searching for tak.toml.
         #[usage(long, value_name = "PATH")]
         config: Option<std::path::PathBuf>,
-        /// Print what would run — every subject's command, prepare, directory,
-        /// environment and run count, templates rendered — without running it.
+        /// Print what would run — every subject's command, prepare, check,
+        /// directory, environment and run count, templates rendered — without
+        /// running it.
         #[usage(long)]
         dry_run: bool,
         /// Write every sample and summary to PATH as hyperfine-compatible JSON.
@@ -293,7 +294,7 @@ struct RunOpts {
 struct Measured {
     bench: String,
     subject: Subject,
-    samples: Vec<f64>,
+    samples: measure::Samples,
     record: Record,
 }
 
@@ -313,6 +314,7 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         name: SELF_TOOL.to_string(),
         cmd,
         prepare: None,
+        check: None,
         dir: None,
         env: BTreeMap::new(),
         vars: BTreeMap::new(),
@@ -560,6 +562,9 @@ fn print_plan(bench: &str, multi: bool, subjects: &[Subject], no_counters: bool)
         if let Some(p) = &s.prepare {
             println!("{pad}prepare  {}", shell_words(p));
         }
+        if let Some(c) = &s.check {
+            println!("{pad}check    {}", shell_words(c));
+        }
         if let Some(d) = &s.dir {
             println!("{pad}dir      {}", d.display());
         }
@@ -621,7 +626,12 @@ fn finish(
                 } else {
                     &m.subject.name
                 };
-                ExportResult::new(&m.bench, &m.subject.name, command, &m.samples)
+                let r = ExportResult::new(&m.bench, &m.subject.name, command, &m.samples.times);
+                if m.subject.check.is_some() {
+                    r.with_checks(&m.samples.checks)
+                } else {
+                    r
+                }
             })
             .collect();
         let meta = export::Meta {
@@ -711,14 +721,48 @@ fn measure_bench(
                 continue;
             }
         };
-        let mut metrics = measure::stats(&samples);
+        let mut metrics = measure::stats(&samples.times);
         let label = if multi {
             format!("{bench} ({})", s.name)
         } else {
             bench.to_string()
         };
-        for w in measure::warnings(&samples) {
+        for w in measure::warnings(&samples.times) {
             eprintln!("  warning: {label}: {w}");
+        }
+        // A failed check is reported, not fatal: how often a subject gets
+        // the work wrong is exactly what the check is there to find out.
+        let checks = s
+            .check
+            .as_ref()
+            .map(|_| (samples.passed(), samples.checks.len()));
+        if let Some((passed, total)) = checks
+            && passed < total
+        {
+            // Which samples, so a failure can be matched to its time in the
+            // export; the first few are enough when nearly all of them fail.
+            const LISTED: usize = 8;
+            let failed: Vec<usize> = samples
+                .checks
+                .iter()
+                .enumerate()
+                .filter(|(_, ok)| !**ok)
+                .map(|(i, _)| i + 1)
+                .collect();
+            let mut which = failed
+                .iter()
+                .take(LISTED)
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            if failed.len() > LISTED {
+                which.push_str(", …");
+            }
+            eprintln!(
+                "  warning: {label}: check failed after {} of {total} samples (sample {which}); first: {}",
+                failed.len(),
+                samples.first_failure.as_deref().unwrap_or("(no detail)")
+            );
         }
         if s.counters && !opts.no_counters {
             count_into(&mut metrics, s, settings);
@@ -732,15 +776,16 @@ fn measure_bench(
             let count = metrics
                 .get("instructions")
                 .map_or(String::new(), |i| format!("  instructions {i:.0}"));
+            let checked = checks.map_or(String::new(), |(p, t)| format!("  checks {p}/{t}"));
             println!(
-                "    {:<width$}  min {:>9.2}  p50 {:>9.2}  mean {:>9.2} ± {:<8.2} max {:>9.2} ms  n={}{count}",
+                "    {:<width$}  min {:>9.2}  p50 {:>9.2}  mean {:>9.2} ± {:<8.2} max {:>9.2} ms  n={}{checked}{count}",
                 s.name,
                 metrics["wall_min_ms"],
                 metrics["wall_p50_ms"],
                 metrics["wall_mean_ms"],
                 metrics["wall_stddev_ms"],
                 metrics["wall_max_ms"],
-                samples.len(),
+                samples.times.len(),
                 width = subjects.iter().map(|s| s.name.len()).max().unwrap_or(0),
             );
         } else {
@@ -755,6 +800,9 @@ fn measure_bench(
             } else {
                 println!("  {k:<16} {v:>14.2}");
             }
+        }
+        if let Some((passed, total)) = checks.filter(|_| !multi) {
+            println!("  {:<16} {:>14}", "checks", format!("{passed}/{total}"));
         }
 
         // TAK_TOOL only ever renames the single-command series. Keyed on the

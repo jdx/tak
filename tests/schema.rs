@@ -29,6 +29,7 @@ budget = "30s"
 min_runs = 5
 max_runs = 50
 prepare = ["true"]
+check = ["true"]
 dir = "."
 env = { A = "1" }
 vars = { v = "x" }
@@ -43,6 +44,7 @@ budget = "1s"
 min_runs = 1
 max_runs = 2
 prepare = "true"
+check = "true"
 dir = "."
 env = { B = "2" }
 vars = { w = "y" }
@@ -56,6 +58,7 @@ budget = "5s"
 min_runs = 1
 max_runs = 3
 prepare = ["true"]
+check = ["true"]
 dir = "."
 env = { C = "3" }
 vars = { u = "z" }

@@ -29,7 +29,9 @@ dead port, run the benchmark, and confirm that it still succeeds with identical 
 offline mode when the subject provides one. Prepare caches and stores before `tak run`, outside
 the measured command. When every sample needs a reset, such as an empty `node_modules`, declare it
 as [`prepare`](/guide/configuration#resetting-state-before-each-sample), which runs untimed
-before each sample.
+before each sample. When a command's result can come out wrong, such as fixers that may race on
+the same files, declare a [`check`](/guide/configuration#checking-every-sample) that verifies
+it after every timed sample.
 
 The comments in mise's [benchmark configuration](https://github.com/jdx/mise/blob/main/tak.toml)
 and aube's [benchmark configuration](https://github.com/jdx/aube/blob/main/tak.toml) explain

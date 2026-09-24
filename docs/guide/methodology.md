@@ -61,6 +61,12 @@ spaced rounds rather than only the early ones.
 A `prepare` step can reset state before each sample without being timed. It runs directly
 before its sample, so the reset is as fresh for the last round as for the first.
 
+A `check` step verifies each timed sample's result, also untimed, directly after it. The
+verdict belongs to the same sample as the time, so a program that is fast because it
+sometimes does the work wrong can't post that time without also posting its failures. A
+failure that only happens under the timing conditions, such as a race, is seen in the
+samples that were timed rather than in separate verification runs.
+
 The seed makes an order repeatable. It does not make the timings repeatable: wall-clock
 comparisons between programs are still subject to the noise described above, and are never
 gated.

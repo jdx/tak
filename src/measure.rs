@@ -106,14 +106,31 @@ fn time_once(cmd: &[String], site: &Site) -> Result<f64> {
     Ok(elapsed)
 }
 
-/// How much of a failing prepare step's stderr to keep for the error message.
-/// Enough for the last few lines; a verbose reset command's full output would
-/// otherwise sit in memory before every sample.
-const PREPARE_STDERR_TAIL: usize = 4096;
+/// How much of a failing prepare or check step's stderr to keep for the
+/// message. Enough for the last few lines; a verbose reset command's full
+/// output would otherwise sit in memory before every sample.
+const UNTIMED_STDERR_TAIL: usize = 4096;
 
 /// Run a subject's prepare step. Untimed, so reading its stderr for the error
 /// message costs the measurement nothing.
 fn prepare_once(cmd: &[String], site: &Site) -> Result<()> {
+    match untimed("prepare", cmd, site)? {
+        None => Ok(()),
+        Some(failure) => bail!("{failure}"),
+    }
+}
+
+/// Run a subject's check step after a timed sample. `Ok(None)` is a pass and
+/// `Ok(Some(why))` a failed sample. Only a check that cannot be started at
+/// all is an error: that is a mistake in `tak.toml`, not a finding about the
+/// subject, and would otherwise read as every sample having failed.
+fn check_once(cmd: &[String], site: &Site) -> Result<Option<String>> {
+    untimed("check", cmd, site)
+}
+
+/// Run an untimed step to completion. `Ok(Some(why))` when it exits
+/// non-zero, naming the step and the last line of its stderr.
+fn untimed(step: &str, cmd: &[String], site: &Site) -> Result<Option<String>> {
     use std::io::Read;
 
     let mut c = command(cmd, site)?;
@@ -123,7 +140,7 @@ fn prepare_once(cmd: &[String], site: &Site) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("failed to spawn prepare `{bin}`"))?;
+        .with_context(|| format!("failed to spawn {step} `{bin}`"))?;
     // Keep only the tail, reading as it arrives so the child never blocks on a
     // full pipe.
     let mut tail: Vec<u8> = Vec::new();
@@ -135,22 +152,24 @@ fn prepare_once(cmd: &[String], site: &Site) -> Result<()> {
                 break;
             }
             tail.extend_from_slice(&buf[..n]);
-            if tail.len() > PREPARE_STDERR_TAIL {
-                tail.drain(..tail.len() - PREPARE_STDERR_TAIL);
+            if tail.len() > UNTIMED_STDERR_TAIL {
+                tail.drain(..tail.len() - UNTIMED_STDERR_TAIL);
             }
         }
     }
     let status = child
         .wait()
-        .with_context(|| format!("failed to wait for prepare `{bin}`"))?;
-    if !status.success() {
-        let stderr = String::from_utf8_lossy(&tail);
-        bail!(
-            "prepare `{bin}` exited with {status}: {}",
-            stderr.lines().last().unwrap_or("(no output)").trim()
-        );
+        .with_context(|| format!("failed to wait for {step} `{bin}`"))?;
+    if status.success() {
+        return Ok(None);
     }
-    Ok(())
+    // A check like `git diff --quiet` says nothing on failure by design, so
+    // silence is reported as the status alone.
+    let stderr = String::from_utf8_lossy(&tail);
+    Ok(Some(match stderr.lines().rfind(|l| !l.trim().is_empty()) {
+        Some(last) => format!("{step} `{bin}` exited with {status}: {}", last.trim()),
+        None => format!("{step} `{bin}` exited with {status}"),
+    }))
 }
 
 /// One entry in a run's sample order.
@@ -231,10 +250,29 @@ pub trait Observer {
 pub struct Quiet;
 impl Observer for Quiet {}
 
+/// What one subject's run produced.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Samples {
+    /// Timed samples in milliseconds, in the order taken.
+    pub times: Vec<f64>,
+    /// Whether the subject's `check` passed after each timed sample, aligned
+    /// with `times`. Empty when the subject has no check.
+    pub checks: Vec<bool>,
+    /// Why the first failing check failed, for the warning that reports it.
+    pub first_failure: Option<String>,
+}
+
+impl Samples {
+    /// Checks that passed.
+    pub fn passed(&self) -> usize {
+        self.checks.iter().filter(|&&ok| ok).count()
+    }
+}
+
 /// Measure several subjects against each other, interleaved.
 ///
-/// Returns each subject's timed samples in the order they were taken, or the
-/// error that stopped it. A failing subject is dropped from the remaining
+/// Returns each subject's timed samples in the order they were taken, with
+/// the outcome of its check after each one, or the error that stopped it. A failing subject is dropped from the remaining
 /// rounds and the others carry on: one competitor breaking should not throw
 /// away a long run's worth of everyone else's samples. Subject directories
 /// are used as given, so the caller resolves them first.
@@ -243,21 +281,27 @@ impl Observer for Quiet {}
 /// `runs = "auto"` subject that has no warmups, so each auto subject has been
 /// timed at least once. Its run count is then fixed from the fastest of those
 /// samples, and every remaining timed sample is taken in shuffled rounds.
+///
+/// A subject's `check` runs after each of its timed samples, pilots included,
+/// and never after a warmup: a warmup is discarded, so whether it did the
+/// right work says nothing about any result. A failing check is recorded
+/// against its sample and the subject carries on — how often it fails is the
+/// finding — so only a check that cannot be started drops the subject.
 pub fn interleaved(
     subjects: &[Subject],
     seed: u64,
     settings: &Settings,
     observer: &mut dyn Observer,
-) -> Vec<Result<Vec<f64>>> {
+) -> Vec<Result<Samples>> {
     let mut rng = fastrand::Rng::with_seed(seed);
-    let mut results: Vec<Result<Vec<f64>>> = subjects
+    let mut results: Vec<Result<Samples>> = subjects
         .iter()
         .map(|s| {
             // Zero runs would leave nothing to report on.
             if s.runs == Runs::Fixed(0) {
                 bail!("runs must be at least 1");
             }
-            Ok(Vec::new())
+            Ok(Samples::default())
         })
         .collect();
     // The fastest whole sample of each subject so far, prepare included —
@@ -302,7 +346,7 @@ pub fn interleaved(
             (Ok(_), Runs::Fixed(n)) => u64::from(n),
             (Ok(taken), Runs::Auto) => {
                 let n = auto_runs(&s.auto, fastest[i]);
-                u64::from(n).saturating_sub(taken.len() as u64)
+                u64::from(n).saturating_sub(taken.times.len() as u64)
             }
         })
         .collect();
@@ -326,11 +370,16 @@ fn auto_runs(auto: &AutoRuns, fastest: Option<Duration>) -> u32 {
 }
 
 /// Take the given samples, recording timed ones and the fastest slot seen.
+///
+/// `fastest` covers prepare and the command but not the check, so an auto
+/// count is sized from the same kind of sample whether it was a warmup (which
+/// runs no check) or a pilot. The observer is told the whole slot, check
+/// included, because that is what its time estimate has to cover.
 fn run_slots(
     slots: &[Slot],
     subjects: &[Subject],
     settings: &Settings,
-    results: &mut [Result<Vec<f64>>],
+    results: &mut [Result<Samples>],
     fastest: &mut [Option<Duration>],
     observer: &mut dyn Observer,
 ) {
@@ -352,14 +401,26 @@ fn run_slots(
             .map_or(Ok(()), |p| prepare_once(p, &site))
             .and_then(|()| time_once(&s.cmd, &site));
         let elapsed = began.elapsed();
-        match taken {
-            Ok(ms) => {
+        // Only after the clock has stopped: the check is outside the
+        // measurement, however long it takes.
+        let checked = match (&taken, &s.check) {
+            (Ok(_), Some(check)) if slot.timed => check_once(check, &site).map(Some),
+            _ => Ok(None),
+        };
+        match taken.and_then(|ms| checked.map(|c| (ms, c))) {
+            Ok((ms, check)) => {
                 if slot.timed {
-                    samples.push(ms);
+                    samples.times.push(ms);
+                }
+                if let Some(failure) = check {
+                    samples.checks.push(failure.is_none());
+                    if samples.first_failure.is_none() {
+                        samples.first_failure = failure;
+                    }
                 }
                 let f = &mut fastest[slot.subject];
                 *f = Some(f.map_or(elapsed, |f| f.min(elapsed)));
-                observer.finished(slot.subject, elapsed);
+                observer.finished(slot.subject, began.elapsed());
             }
             Err(e) => {
                 results[slot.subject] = Err(e);
@@ -480,6 +541,7 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
         name: SELF_TOOL.to_string(),
         cmd: plan.cmd.clone(),
         prepare: None,
+        check: None,
         dir: plan.dir.clone(),
         env: BTreeMap::new(),
         vars: BTreeMap::new(),
@@ -502,7 +564,7 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
     )
     .pop()
     .expect("one result per subject")?;
-    Ok(stats(&samples))
+    Ok(stats(&samples.times))
 }
 
 /// Is cachegrind usable on this machine?
@@ -859,6 +921,7 @@ mod tests {
             name: name.into(),
             cmd: cmd.iter().map(|s| s.to_string()).collect(),
             prepare: None,
+            check: None,
             dir: None,
             env: BTreeMap::new(),
             vars: BTreeMap::new(),
@@ -878,7 +941,7 @@ mod tests {
             &Settings::default(),
             &mut Quiet,
         );
-        assert_eq!(res[0].as_ref().unwrap().len(), 4);
+        assert_eq!(res[0].as_ref().unwrap().times.len(), 4);
         assert!(format!("{:#}", res[1].as_ref().unwrap_err()).contains("exited with"));
     }
 
@@ -895,6 +958,7 @@ mod tests {
                     "-c".into(),
                     "echo nope >&2; exit 3".into(),
                 ]),
+                check: None,
                 dir: None,
                 env: BTreeMap::new(),
                 vars: BTreeMap::new(),
@@ -914,6 +978,79 @@ mod tests {
         );
         let msg = format!("{:#}", res[0].as_ref().unwrap_err());
         assert!(msg.contains("prepare") && msg.contains("nope"), "{msg}");
+    }
+
+    /// A subject whose command bumps a counter file and whose check fails on
+    /// every even-numbered run, warmups included in the count.
+    #[cfg(unix)]
+    fn alternating(dir: &Path, warmup: u32, runs: u32) -> Subject {
+        Subject {
+            name: "alt".into(),
+            cmd: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "echo x >> n".into(),
+            ],
+            prepare: None,
+            check: Some(vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "echo check >> checked; test $(( $(wc -l < n) % 2 )) = 1 || { echo \"run $(wc -l < n) is even\" >&2; exit 1; }".into(),
+            ]),
+            dir: Some(dir.to_path_buf()),
+            env: BTreeMap::new(),
+            vars: BTreeMap::new(),
+            when: None,
+            runs: Runs::Fixed(runs),
+            auto: AutoRuns {
+                budget: Duration::from_secs(30),
+                min: 5,
+                max: 50,
+            },
+            warmup,
+            counters: false,
+        }
+    }
+
+    /// A failing check marks its sample and the subject keeps every one;
+    /// warmups are never checked.
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_check_marks_the_sample_without_dropping_the_subject() {
+        let dir = tempfile::tempdir().unwrap();
+        let res = interleaved(
+            &[alternating(dir.path(), 1, 6)],
+            0,
+            &Settings::default(),
+            &mut Quiet,
+        );
+        let s = res[0].as_ref().unwrap();
+        assert_eq!(s.times.len(), 6);
+        // Run 1 is the warmup; timed runs 2..=7 fail on the even ones.
+        assert_eq!(s.checks, [false, true, false, true, false, true]);
+        assert_eq!(s.passed(), 3);
+        assert!(
+            s.first_failure
+                .as_deref()
+                .unwrap()
+                .contains("run 2 is even"),
+            "{s:?}"
+        );
+        let checked = std::fs::read_to_string(dir.path().join("checked")).unwrap();
+        assert_eq!(checked.lines().count(), 6, "no check after the warmup");
+    }
+
+    /// A check that cannot be started is a configuration mistake, not six
+    /// failed samples.
+    #[cfg(unix)]
+    #[test]
+    fn a_check_that_cannot_start_drops_the_subject() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = alternating(dir.path(), 0, 2);
+        s.check = Some(vec!["/nonexistent/tak-check".into()]);
+        let res = interleaved(&[s], 0, &Settings::default(), &mut Quiet);
+        let msg = format!("{:#}", res[0].as_ref().unwrap_err());
+        assert!(msg.contains("failed to spawn check"), "{msg}");
     }
 
     /// An observer that records what it was told.
@@ -941,6 +1078,7 @@ mod tests {
             name: name.into(),
             cmd: vec!["sleep".into(), secs.into()],
             prepare: None,
+            check: None,
             dir: None,
             env: BTreeMap::new(),
             vars: BTreeMap::new(),
@@ -962,8 +1100,8 @@ mod tests {
             &Settings::default(),
             &mut log,
         );
-        let fast = res[0].as_ref().unwrap().len();
-        let slow = res[1].as_ref().unwrap().len();
+        let fast = res[0].as_ref().unwrap().times.len();
+        let slow = res[1].as_ref().unwrap().times.len();
         assert_eq!(slow, 2, "0.4s budget / 0.3s sample is below the floor");
         assert!(fast > slow && fast <= 6, "fast got {fast}");
         // Planned on the floors first, then on the settled counts.

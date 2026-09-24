@@ -46,7 +46,7 @@ cmd run help="Benchmark a command, or everything declared in tak.toml." {
     flag --config help="Read this file instead of searching for tak.toml." {
         arg <PATH>
     }
-    flag --dry-run help="Print what would run — every subject's command, prepare, directory, environment and run count, templates rendered — without running it."
+    flag --dry-run help="Print what would run — every subject's command, prepare, check, directory, environment and run count, templates rendered — without running it."
     flag --export-json help="Write every sample and summary to PATH as hyperfine-compatible JSON." {
         arg <PATH>
     }

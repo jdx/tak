@@ -724,3 +724,141 @@ cmd = ["sh", "-c", "echo b >> log"]
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(p.log(), ["b"]);
 }
+
+/// A check that fails on some samples is counted, reported and exported, and
+/// the subject keeps every sample: how often a subject gets the work wrong is
+/// the result, not a reason to drop it.
+#[test]
+fn a_failing_check_is_counted_not_fatal() {
+    let p = Project::new(
+        "check",
+        r#"
+[bench.cmp]
+warmup = 1
+runs = 6
+# Passes when the subject's counter file has an even number of lines. The
+# warmup is run 1 and is never checked.
+check = ["sh", "-c", "echo {{ subject }} >> checked; test $(( $(wc -l < n-{{ subject }}) % 2 )) = 1 || { echo even >&2; exit 1; }"]
+
+# Two lines per run: every count is even, so every check fails.
+[bench.cmp.subject.broken]
+cmd = ["sh", "-c", "echo x >> n-broken; echo x >> n-broken"]
+
+# One line per run: odd on runs 3, 5 and 7.
+[bench.cmp.subject.flaky]
+cmd = ["sh", "-c", "echo x >> n-flaky"]
+
+[bench.cmp.subject.fine]
+cmd = ["sh", "-c", "echo x >> n-fine"]
+check = ["true"]
+"#,
+    );
+    let out = p.run(&["--no-progress", "--export-json", "r.json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = |name: &str| {
+        stdout
+            .lines()
+            .find(|l| l.trim_start().starts_with(name))
+            .unwrap_or_else(|| panic!("no line for {name}: {stdout}"))
+            .to_string()
+    };
+    assert!(line("flaky").contains("n=6  checks 3/6"), "{stdout}");
+    assert!(line("broken").contains("checks 0/6"), "{stdout}");
+    assert!(line("fine").contains("checks 6/6"), "{stdout}");
+    let err = stderr(&out);
+    assert!(
+        err.contains("cmp (flaky): check failed after 3 of 6 samples (sample 1, 3, 5)"),
+        "{err}"
+    );
+    assert!(err.contains("check `sh` exited with"), "{err}");
+    assert!(!err.contains("cmp (fine): check"), "{err}");
+    assert!(!err.contains("dropped"), "{err}");
+
+    // Checked after each timed sample, never after the warmup.
+    let checked = std::fs::read_to_string(p.path("checked")).unwrap();
+    assert_eq!(checked.lines().filter(|l| *l == "flaky").count(), 6);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    let by = |name: &str| {
+        json["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["subject"] == name)
+            .unwrap()
+            .clone()
+    };
+    let flaky = by("flaky");
+    assert_eq!(flaky["times"].as_array().unwrap().len(), 6);
+    assert_eq!(
+        flaky["checks"],
+        serde_json::json!({
+            "passed": 3,
+            "total": 6,
+            "samples": [false, true, false, true, false, true]
+        })
+    );
+    assert_eq!(by("broken")["checks"]["passed"], 0);
+    assert_eq!(by("fine")["checks"]["passed"], 6);
+}
+
+/// A single-command benchmark reports its checks with its other numbers, and
+/// a benchmark without a check exports no `checks` at all.
+#[test]
+fn a_single_command_reports_its_checks() {
+    let p = Project::new(
+        "check-single",
+        r#"
+[bench.one]
+cmd = ["sh", "-c", "echo x >> n"]
+check = "true"
+warmup = 0
+runs = 2
+
+[bench.two]
+cmd = ["true"]
+warmup = 0
+runs = 1
+"#,
+    );
+    let out = p.run(&["--no-progress", "--export-json", "r.json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.split_whitespace().collect::<Vec<_>>() == ["checks", "2/2"]),
+        "{stdout}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    let results = json["results"].as_array().unwrap();
+    assert_eq!(results[0]["checks"]["total"], 2);
+    assert!(results[1].get("checks").is_none(), "{}", results[1]);
+}
+
+/// --dry-run shows the check each subject would run, rendered and anchored.
+#[test]
+fn dry_run_shows_the_check() {
+    let p = Project::new(
+        "check-dry",
+        r#"
+[defaults]
+check = ["./bin/verify", "{{ subject }}"]
+
+[bench.cmp.subject.a]
+cmd = ["sh", "-c", "echo ran >> log"]
+"#,
+    );
+    let out = p.run(&["--dry-run"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let verify = p.path("./bin/verify");
+    assert!(
+        stdout.contains(&format!("check    {} a", verify.display())),
+        "{stdout}"
+    );
+    assert!(p.log().is_empty(), "nothing ran");
+}
