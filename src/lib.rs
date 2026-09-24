@@ -10,6 +10,7 @@ pub mod artifact;
 pub mod backfill;
 pub mod compare;
 pub mod config;
+pub mod export;
 pub mod measure;
 pub mod notes;
 pub mod record;

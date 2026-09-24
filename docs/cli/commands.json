@@ -164,6 +164,64 @@
             "global": false
           },
           {
+            "name": "subject",
+            "usage": "--subject <NAME>",
+            "help": "Measure only this subject of each multi-subject benchmark. Repeatable. Benchmarks with none of the named subjects are skipped.",
+            "help_first_line": "Measure only this subject of each multi-subject benchmark. Repeatable. Benchmarks with none of the named subjects are skipped.",
+            "short": [],
+            "long": [
+              "subject"
+            ],
+            "var": true,
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "NAME",
+              "usage": "<NAME>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "seed",
+            "usage": "--seed <N>",
+            "help": "Seed for the order subjects are sampled in. Every run prints the seed it used, so an order can be repeated.",
+            "help_first_line": "Seed for the order subjects are sampled in. Every run prints the seed it used, so an order can be repeated.",
+            "short": [],
+            "long": [
+              "seed"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "N",
+              "usage": "<N>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "export-json",
+            "usage": "--export-json <PATH>",
+            "help": "Write every sample and summary to PATH as hyperfine-compatible JSON.",
+            "help_first_line": "Write every sample and summary to PATH as hyperfine-compatible JSON.",
+            "short": [],
+            "long": [
+              "export-json"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "PATH",
+              "usage": "<PATH>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
             "name": "help",
             "usage": "-h --help",
             "help": "Print help",

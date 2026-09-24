@@ -27,7 +27,9 @@ The measured command must not depend on the network, the clock, a floating versi
 machine state. Verify that claim rather than assuming it: point network configuration at a
 dead port, run the benchmark, and confirm that it still succeeds with identical output. Use an
 offline mode when the subject provides one. Prepare caches and stores before `tak run`, outside
-the measured command.
+the measured command. When every sample needs a reset, such as an empty `node_modules`, declare it
+as [`prepare`](/guide/configuration#resetting-state-before-each-sample), which runs untimed
+before each sample.
 
 The comments in mise's [benchmark configuration](https://github.com/jdx/mise/blob/main/tak.toml)
 and aube's [benchmark configuration](https://github.com/jdx/aube/blob/main/tak.toml) explain
@@ -277,7 +279,7 @@ Before treating the comparison as a required check:
 
 - `tak doctor` reports Valgrind and the runner class you intended;
 - every measured command succeeds with its network pointed at a dead port;
-- setup and cache warming happen before `tak run`;
+- setup and cache warming happen before `tak run` or in an untimed `prepare`;
 - only main push tips are pushed into `refs/notes/tak`;
 - main and pull requests use the same build inputs and runner class; and
 - only instruction counts gate CI; timing remains report-only.
