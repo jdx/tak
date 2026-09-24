@@ -89,8 +89,8 @@ enum Cmd {
         /// Repeatable. Benchmarks with none of the named subjects are skipped.
         #[usage(long, value_name = "NAME")]
         subject: Vec<String>,
-        /// Seed for the order subjects are sampled in. Every run prints the
-        /// seed it used, so an order can be repeated.
+        /// Seed for the order subjects are sampled in. Every multi-subject
+        /// run prints the seed it used, so an order can be repeated.
         #[usage(long, value_name = "N")]
         seed: Option<u64>,
         /// Write every sample and summary to PATH as hyperfine-compatible JSON.
@@ -350,10 +350,7 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
         let mut subjects = b.subjects()?;
         for s in &mut subjects {
             seen.insert(s.name.clone());
-            s.dir = Some(match &s.dir {
-                Some(d) => root.join(d),
-                None => root.clone(),
-            });
+            s.anchor(&root);
             // An explicit flag beats the file; the file beats the default.
             s.runs = opts.runs.unwrap_or(s.runs);
             s.warmup = opts.warmup.unwrap_or(s.warmup);
@@ -483,10 +480,10 @@ fn measure_bench(
             count_into(&mut metrics, s, settings);
         }
 
-        if s.name == SELF_TOOL {
-            println!("  {bench}  {}", s.cmd.join(" "));
-        } else {
+        if multi {
             println!("  {bench} ({})  {}", s.name, s.cmd.join(" "));
+        } else {
+            println!("  {bench}  {}", s.cmd.join(" "));
         }
         for (k, v) in &metrics {
             if k == "wall_n" {
@@ -499,10 +496,13 @@ fn measure_bench(
             }
         }
 
-        let tool = if s.name == SELF_TOOL {
-            std::env::var("TAK_TOOL").unwrap_or_else(|_| SELF_TOOL.into())
-        } else {
+        // TAK_TOOL only ever renames the single-command series. Keyed on the
+        // benchmark's shape rather than the subject's name, so a declared
+        // subject can never be recorded as anything but itself.
+        let tool = if multi {
             s.name.clone()
+        } else {
+            std::env::var("TAK_TOOL").unwrap_or_else(|_| SELF_TOOL.into())
         };
         measured.push(Measured {
             bench: bench.to_string(),

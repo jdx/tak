@@ -39,7 +39,7 @@ env = { MYCLI_OFFLINE = "1" }
 
 `prepare` uses the same syntax as `cmd`, and there is still no implicit shell: write
 `["sh", "-c", "…"]` when you need one. A shell costs nothing here because `prepare` is outside
-the measurement. `dir` is relative to `tak.toml`. Variables in `env` are set after tak removes
+the measurement. `dir` is relative to `tak.toml` and only sets the working directory. A program path containing a `/`, such as `./target/release/mycli`, is still found relative to `tak.toml`; a bare name like `mycli` is looked up on `PATH`. Variables in `env` are set after tak removes
 the ones in `env.deny`, so a variable written here reaches the command even when it is denied
 by default.
 

@@ -127,6 +127,34 @@ pub struct Subject {
     pub counters: bool,
 }
 
+impl Subject {
+    /// Resolve paths against `root`, the directory holding `tak.toml`.
+    ///
+    /// `dir` becomes the working directory, but a relative program path — one
+    /// containing a `/`, like `./target/release/mycli` — is resolved against
+    /// `root`, not `dir`. Otherwise giving a subject a fixture directory would
+    /// make the project's own binary unfindable. A bare name is left for PATH
+    /// lookup, and arguments are never touched.
+    pub fn anchor(&mut self, root: &Path) {
+        let program = |argv: &mut Vec<String>| {
+            if let Some(p) = argv.first_mut()
+                && p.contains('/')
+                && Path::new(p.as_str()).is_relative()
+            {
+                *p = root.join(p.as_str()).to_string_lossy().into_owned();
+            }
+        };
+        program(&mut self.cmd);
+        if let Some(prepare) = &mut self.prepare {
+            program(prepare);
+        }
+        self.dir = Some(match &self.dir {
+            Some(d) => root.join(d),
+            None => root.to_path_buf(),
+        });
+    }
+}
+
 impl Bench {
     /// Whether this benchmark compares several programs rather than measuring
     /// one.
@@ -206,6 +234,14 @@ impl Config {
                 }
                 if s.name.trim().is_empty() {
                     bail!("benchmark `{name}`: a subject needs a name");
+                }
+                // `self` is the series a single-command benchmark records
+                // under. A subject taking it would be recorded, printed and
+                // exported as that series instead of as itself.
+                if b.is_multi() && s.name == SELF_TOOL {
+                    bail!(
+                        "benchmark `{name}`: `{SELF_TOOL}` is reserved and cannot name a subject"
+                    );
                 }
             }
         }
@@ -412,5 +448,47 @@ cmd = "mycli 'two words'""#,
     #[test]
     fn zero_runs_is_rejected_at_parse_time() {
         assert!(Config::parse("[bench.a.subject.b]\ncmd = \"x\"\nruns = 0").is_err());
+    }
+
+    #[test]
+    fn self_is_reserved_for_single_command_benchmarks() {
+        let err = Config::parse("[bench.a.subject.self]\ncmd = \"x\"").unwrap_err();
+        assert!(format!("{err:#}").contains("reserved"), "{err:#}");
+    }
+
+    /// `dir` sets where a command runs, not where a relative program path is
+    /// found: `./target/release/x` still means the one next to `tak.toml`.
+    #[test]
+    fn a_relative_program_path_is_anchored_at_the_config() {
+        let root = Path::new("/repo");
+        let mut s = Config::parse(
+            "[bench.a]\ncmd = [\"./target/x\", \"./arg\"]\nprepare = \"bin/reset\"\ndir = \"fix\"",
+        )
+        .unwrap()
+        .bench["a"]
+            .subjects()
+            .unwrap()
+            .remove(0);
+        s.anchor(root);
+        assert_eq!(
+            s.cmd,
+            ["/repo/./target/x", "./arg"],
+            "arguments are left alone"
+        );
+        assert_eq!(s.prepare.unwrap(), ["/repo/bin/reset"]);
+        assert_eq!(s.dir.unwrap(), Path::new("/repo/fix"));
+
+        let mut bare = Config::parse("[bench.a]\ncmd = \"mycli --version\"")
+            .unwrap()
+            .bench["a"]
+            .subjects()
+            .unwrap()
+            .remove(0);
+        bare.anchor(root);
+        assert_eq!(
+            bare.cmd[0], "mycli",
+            "a bare name is still looked up on PATH"
+        );
+        assert_eq!(bare.dir.unwrap(), Path::new("/repo"));
     }
 }

@@ -39,7 +39,7 @@ cmd run help="Benchmark a command, or everything declared in tak.toml." {
     flag --subject help="Measure only this subject of each multi-subject benchmark. Repeatable. Benchmarks with none of the named subjects are skipped." var=#true {
         arg <NAME>
     }
-    flag --seed help="Seed for the order subjects are sampled in. Every run prints the seed it used, so an order can be repeated." {
+    flag --seed help="Seed for the order subjects are sampled in. Every multi-subject run prints the seed it used, so an order can be repeated." {
         arg <N>
     }
     flag --export-json help="Write every sample and summary to PATH as hyperfine-compatible JSON." {

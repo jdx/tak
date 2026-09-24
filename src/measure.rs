@@ -105,20 +105,47 @@ fn time_once(cmd: &[String], site: &Site) -> Result<f64> {
     Ok(elapsed)
 }
 
-/// Run a subject's prepare step. Untimed, so its output can be kept for the
-/// error message without costing the measurement anything.
+/// How much of a failing prepare step's stderr to keep for the error message.
+/// Enough for the last few lines; a verbose reset command's full output would
+/// otherwise sit in memory before every sample.
+const PREPARE_STDERR_TAIL: usize = 4096;
+
+/// Run a subject's prepare step. Untimed, so reading its stderr for the error
+/// message costs the measurement nothing.
 fn prepare_once(cmd: &[String], site: &Site) -> Result<()> {
+    use std::io::Read;
+
     let mut c = command(cmd, site)?;
     let bin = &cmd[0];
-    let out = c
+    let mut child = c
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("failed to spawn prepare `{bin}`"))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
+    // Keep only the tail, reading as it arrives so the child never blocks on a
+    // full pipe.
+    let mut tail: Vec<u8> = Vec::new();
+    if let Some(mut err) = child.stderr.take() {
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = err.read(&mut buf).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            tail.extend_from_slice(&buf[..n]);
+            if tail.len() > PREPARE_STDERR_TAIL {
+                tail.drain(..tail.len() - PREPARE_STDERR_TAIL);
+            }
+        }
+    }
+    let status = child
+        .wait()
+        .with_context(|| format!("failed to wait for prepare `{bin}`"))?;
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&tail);
         bail!(
-            "prepare `{bin}` exited with {}: {}",
-            out.status,
+            "prepare `{bin}` exited with {status}: {}",
             stderr.lines().last().unwrap_or("(no output)").trim()
         );
     }

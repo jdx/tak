@@ -242,3 +242,37 @@ fn a_single_command_benchmark_is_unchanged() {
     assert_eq!(json["results"][0]["command"], "one");
     assert_eq!(json["results"][0]["subject"], "self");
 }
+
+/// `dir` moves where the subject runs, not where `./bin/...` is found — the
+/// project's own binary stays reachable from a fixture directory.
+#[test]
+fn a_relative_program_is_found_from_the_config_not_from_dir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let p = Project::new(
+        "anchor",
+        r#"
+[bench.cmp]
+warmup = 0
+runs = 1
+
+[bench.cmp.subject.x]
+cmd = ["./bin/probe"]
+prepare = ["./bin/probe"]
+dir = "fixture"
+"#,
+    );
+    std::fs::create_dir(p.path("bin")).unwrap();
+    std::fs::create_dir(p.path("fixture")).unwrap();
+    let probe = p.path("bin/probe");
+    std::fs::write(&probe, "#!/bin/sh\nbasename \"$PWD\" >> ../ran\n").unwrap();
+    std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out = p.run(&[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        std::fs::read_to_string(p.path("ran")).unwrap(),
+        "fixture\nfixture\n",
+        "prepare and cmd both ran, in `dir`"
+    );
+}

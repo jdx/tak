@@ -186,8 +186,8 @@
           {
             "name": "seed",
             "usage": "--seed <N>",
-            "help": "Seed for the order subjects are sampled in. Every run prints the seed it used, so an order can be repeated.",
-            "help_first_line": "Seed for the order subjects are sampled in. Every run prints the seed it used, so an order can be repeated.",
+            "help": "Seed for the order subjects are sampled in. Every multi-subject run prints the seed it used, so an order can be repeated.",
+            "help_first_line": "Seed for the order subjects are sampled in. Every multi-subject run prints the seed it used, so an order can be repeated.",
             "short": [],
             "long": [
               "seed"
