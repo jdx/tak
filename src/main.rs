@@ -502,7 +502,8 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
         // Asked to leave a result behind and producing none is a failure: a
         // CI job recording or exporting must not look like it measured
         // something when every benchmark was switched off.
-        if opts.record || opts.export_json.is_some() {
+        // A dry run writes neither, so there is nothing for it to fail over.
+        if !opts.dry_run && (opts.record || opts.export_json.is_some()) {
             bail!(
                 "nothing to {}: every selected benchmark or subject has a false `when`",
                 if opts.record { "record" } else { "export" }
