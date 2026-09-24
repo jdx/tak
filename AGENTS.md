@@ -72,7 +72,8 @@ src/export.rs      hyperfine-compatible `tak run --export-json`
 src/progress.rs    the stderr progress bar and its per-subject time estimate
 src/notes.rs       refs/notes/tak storage; shells out to git for all network I/O
 src/record.rs      the on-disk line format and its schema version
-src/config.rs      tak.toml — declared benchmarks
+src/config.rs      tak.toml — declared benchmarks, [defaults], shared [subject.NAME] tables
+src/template.rs    tera templates in tak.toml values, rendered before measuring
 src/backfill.rs    benchmark published release binaries to bootstrap history
 crates/asset-picker/   release-asset selection, extracted from mise; published separately
 tests/counters.rs  exercises the real cachegrind subprocess

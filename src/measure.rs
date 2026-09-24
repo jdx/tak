@@ -404,6 +404,7 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
         prepare: None,
         dir: plan.dir.clone(),
         env: BTreeMap::new(),
+        vars: BTreeMap::new(),
         runs: Runs::Fixed(plan.runs),
         auto: AutoRuns {
             budget: crate::config::DEFAULT_BUDGET,
@@ -781,6 +782,7 @@ mod tests {
             prepare: None,
             dir: None,
             env: BTreeMap::new(),
+            vars: BTreeMap::new(),
             runs: Runs::Fixed(4),
             auto: AutoRuns {
                 budget: Duration::from_secs(30),
@@ -815,6 +817,7 @@ mod tests {
                 ]),
                 dir: None,
                 env: BTreeMap::new(),
+                vars: BTreeMap::new(),
                 runs: Runs::Fixed(1),
                 auto: AutoRuns {
                     budget: Duration::from_secs(30),
@@ -859,6 +862,7 @@ mod tests {
             prepare: None,
             dir: None,
             env: BTreeMap::new(),
+            vars: BTreeMap::new(),
             runs: Runs::Auto,
             auto: AutoRuns {
                 budget: Duration::from_millis(400),

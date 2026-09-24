@@ -127,6 +127,80 @@ in hyperfine's `--export-json` shape, with `bench` and `subject` fields added:
 tak run --bench install --seed 1234 --export-json results.json
 ```
 
+## Sharing settings between benchmarks
+
+A comparison usually runs the same programs in several scenarios, such as a warm install
+and a cold one. Declare each program once as a top-level subject and list it from each
+benchmark:
+
+```toml
+[defaults]
+runs = "auto"
+min_runs = 5
+
+[subject.mycli]
+cmd = ["./target/release/mycli", "install"]
+
+[subject.othertool]
+cmd = ["othertool", "install"]
+env = { OTHERTOOL_CACHE = "/tmp/othertool" }
+
+[bench.warm]
+subjects = ["mycli", "othertool"]
+prepare = ["sh", "-c", "rm -rf node_modules"]
+
+[bench.cold]
+subjects = ["mycli", "othertool"]
+prepare = ["sh", "-c", "rm -rf node_modules ~/.cache/mycli /tmp/othertool"]
+
+# A benchmark can override a shared subject, or add one of its own.
+[bench.cold.subject.mycli]
+cmd = ["./target/release/mycli", "install", "--no-cache"]
+```
+
+Settings stack from least to most specific: `[defaults]`, then the benchmark, then the
+shared `[subject.NAME]`, then the benchmark's own `[bench.B.subject.NAME]`. Each layer's
+setting replaces the one before, except `env` and `vars`, which merge key by key. `[defaults]`
+takes every benchmark setting (`runs`, `warmup`, `budget`, `min_runs`, `max_runs`,
+`prepare`, `dir`, `env`, `vars`). It is a separate table because `[env]` already holds
+`env.deny` and `env.allow`.
+
+## Templates
+
+<!-- tera syntax looks like Vue interpolation; v-pre stops VitePress evaluating it. -->
+::: v-pre
+Values in `cmd`, `prepare`, `dir`, `env` and `vars` are [tera](https://keats.github.io/tera/)
+templates, the same syntax mise uses. tak renders them itself before anything runs, so a
+command can use a path that only exists at run time and still be a plain argument list,
+without a shell:
+
+```toml
+[defaults]
+dir = "{{ env.BENCH_DIR }}/project-{{ subject }}"
+env = { HOME = "{{ env.BENCH_DIR }}/home-{{ subject }}" }
+
+[subject.mycli]
+cmd = ["{{ env.MYCLI_BIN }}", "install", "--lockfile", "{{ vars.lockfile }}"]
+vars = { lockfile = "mycli.lock" }
+```
+
+A template can use:
+
+| name | value |
+|---|---|
+| `env` | tak's own environment, such as `{{ env.HOME }}` |
+| `bench` | the benchmark's name |
+| `subject` | the subject's name (`self` for a single-command benchmark) |
+| `vars` | the subject's `vars` tables, merged like `env`; not passed to the command |
+
+`vars` values are rendered first, so they can build on `env`. Filters work as in mise, for
+example `{{ env.MYCLI_BIN | default(value="mycli") }}`. Using a variable that isn't set is
+an error when the benchmark is loaded, before any sample runs, rather than an empty string
+that sends a command to the wrong path. Template syntax is checked for the whole file up
+front; values are rendered only for the benchmarks being run, so a variable needed by one
+benchmark doesn't have to be set to run another.
+:::
+
 ## Environment and runner settings
 
 tak removes known sources of non-determinism from measured commands. Inspect every resolved
