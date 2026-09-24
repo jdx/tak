@@ -467,6 +467,19 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
             })
             .collect::<Result<Vec<_>>>()?;
         for s in &mut subjects {
+            // Only for what runs: a portable tak.toml may list Windows codes
+            // next to Unix ones. A list with none possible failed at load.
+            let impossible = config::impossible_exit_codes(&s.ok_exit_codes, cfg!(unix));
+            if !impossible.is_empty() {
+                let range = config::exit_code_range(cfg!(unix)).expect("narrowed");
+                eprintln!(
+                    "  warning: {name} ({}): ok_exit_codes {} can never match here: exit codes on this platform are {} to {}",
+                    s.name,
+                    config::join_codes(&impossible),
+                    range.start(),
+                    range.end()
+                );
+            }
             s.anchor(&root);
             // An explicit flag beats the file; the file beats the default.
             s.runs = opts.runs.unwrap_or(s.runs);

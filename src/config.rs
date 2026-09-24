@@ -602,6 +602,54 @@ fn resolve(
 /// (-1073741819); limiting the list to 0–255 would make those unlistable.
 /// An empty list would fail every sample, so it is an error here rather than
 /// a confusing run.
+/// The range of exit codes a platform can report, when narrower than `i32`:
+/// Unix keeps only the low 8 bits of a process's status. `None` where the
+/// whole `i32` range is possible, as on Windows.
+pub fn exit_code_range(unix: bool) -> Option<std::ops::RangeInclusive<i32>> {
+    unix.then_some(0..=255)
+}
+
+/// The codes in `codes` that a platform can never report, so can never match.
+///
+/// A `tak.toml` shared between platforms may list a Windows code next to
+/// Unix ones, such as `[0, 1, -1073741819]`, so some impossible codes are
+/// only worth a warning. A list with *no* possible code would drop the
+/// subject at its first sample, which is a mistake to catch at load.
+pub fn impossible_exit_codes(codes: &[i32], unix: bool) -> Vec<i32> {
+    match exit_code_range(unix) {
+        Some(range) => codes
+            .iter()
+            .copied()
+            .filter(|c| !range.contains(c))
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Fail when no code in `codes` is possible on this platform.
+fn check_possible_exit_codes(codes: &[i32], unix: bool) -> Result<()> {
+    let impossible = impossible_exit_codes(codes, unix);
+    if !impossible.is_empty() && impossible.len() == codes.len() {
+        let range = exit_code_range(unix).expect("only a narrowed range rules codes out");
+        bail!(
+            "ok_exit_codes {} can never match: exit codes on this platform are {} to {}",
+            join_codes(&impossible),
+            range.start(),
+            range.end()
+        );
+    }
+    Ok(())
+}
+
+/// Exit codes for a message: `0, 1`.
+pub fn join_codes(codes: &[i32]) -> String {
+    codes
+        .iter()
+        .map(i32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn ok_exit_codes(codes: &[i64]) -> Result<Vec<i32>> {
     if codes.is_empty() {
         bail!("ok_exit_codes must list at least one exit code");
@@ -648,6 +696,10 @@ impl Config {
                 .subjects(name)
                 .with_context(|| format!("benchmark `{name}`"))?;
             for s in &subjects {
+                // Checked on the resolved list, since that is what a sample
+                // is held to: a layer's impossible code may be overridden.
+                check_possible_exit_codes(&s.ok_exit_codes, cfg!(unix))
+                    .with_context(|| format!("benchmark `{name}`, subject `{}`", s.name))?;
                 // Zero runs leaves nothing to report; catching it here names
                 // the benchmark instead of failing after the others ran.
                 if s.runs == Runs::Fixed(0) {
@@ -1245,6 +1297,48 @@ cmd = "mycli 'two words'""#,
             only(&c, "a").ok_exit_codes,
             [-1073741819, 0, 256, 2147483647]
         );
+    }
+
+    /// On Unix only 0–255 can be reported. A list with no such code is an
+    /// error naming the subject; one with some is kept, and the rest are
+    /// reported for a warning. Elsewhere the whole `i32` range is possible.
+    #[test]
+    fn ok_exit_codes_impossible_on_this_platform() {
+        assert_eq!(
+            impossible_exit_codes(&[0, 1, -1073741819, 256], true),
+            [-1073741819, 256]
+        );
+        assert!(impossible_exit_codes(&[0, 1, -1073741819, 256], false).is_empty());
+
+        assert!(
+            check_possible_exit_codes(&[0, 256], true).is_ok(),
+            "some possible"
+        );
+        let err = check_possible_exit_codes(&[256, -1], true).unwrap_err();
+        assert!(format!("{err:#}").contains("0 to 255"), "{err:#}");
+        assert!(
+            check_possible_exit_codes(&[256, -1], false).is_ok(),
+            "fine on Windows"
+        );
+        assert!(check_possible_exit_codes(&[i32::MIN, i32::MAX], false).is_ok());
+    }
+
+    /// Checked on the resolved list at load, naming the subject.
+    #[cfg(unix)]
+    #[test]
+    fn a_list_with_no_possible_code_is_rejected_at_load_on_unix() {
+        let err =
+            Config::parse("[bench.b.subject.win]\ncmd = \"x\"\nok_exit_codes = [-1073741819]")
+                .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("`win`") && msg.contains("0 to 255"), "{msg}");
+        // A portable list with a Unix code in it loads.
+        Config::parse("[bench.b]\ncmd = \"x\"\nok_exit_codes = [0, 1, -1073741819]").unwrap();
+        // An impossible layer that a more specific one replaces is fine.
+        Config::parse(
+            "[defaults]\nok_exit_codes = [256]\n[bench.b.subject.x]\ncmd = \"x\"\nok_exit_codes = [1]",
+        )
+        .unwrap();
     }
 
     /// A list that could never match a real exit status would fail every

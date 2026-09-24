@@ -137,6 +137,10 @@ ok_exit_codes = [0, 1]   # 1: a hook modified files, which is the case being mea
 - The list can't be empty, and duplicates are ignored. Unix only ever reports codes 0 to 255.
   Windows passes a program's 32-bit exit code through as a signed number, so write an NTSTATUS
   such as `0xC0000005` as its negative decimal value, `-1073741819`.
+- A `tak.toml` shared between platforms can list both, such as `[0, 1, -1073741819]`. On Unix,
+  tak warns about the codes that can never match there and runs with the rest. If none of a
+  subject's codes can match on the current platform, loading `tak.toml` fails and names the
+  subject.
 
 ## Comparing several programs
 

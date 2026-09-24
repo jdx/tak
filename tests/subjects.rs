@@ -1031,3 +1031,26 @@ warmup = 0
     assert!(stderr(&out).contains("setup"), "{}", stderr(&out));
     assert!(p.log().is_empty(), "no sample ran");
 }
+
+/// A portable list may name a Windows code next to Unix ones: on Unix it is
+/// warned about, and the run goes on with the codes that can match.
+#[test]
+fn an_ok_exit_code_impossible_here_is_warned_about() {
+    let p = Project::new(
+        "ok-exit-portable",
+        r#"
+[bench.one]
+cmd = ["sh", "-c", "exit 1"]
+ok_exit_codes = [0, 1, -1073741819]
+runs = 1
+warmup = 0
+"#,
+    );
+    let out = p.run(&["--no-progress"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("ok_exit_codes -1073741819 can never match here"),
+        "{}",
+        stderr(&out)
+    );
+}
