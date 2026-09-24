@@ -149,13 +149,69 @@ and `min_runs = 3`:
 ```
 
 Every multi-subject run prints its seed. Pass it back with `--seed` to repeat an order.
-`--subject NAME` limits a run to the named subjects, and `--export-json PATH` writes every sample
-in hyperfine's `--export-json` shape, with `bench` and `subject` fields added to each result.
-The file also records how the run was made: `tak_version`, `seed`, `runner` and `time`.
+`--subject NAME` limits a run to the named subjects.
+
+### Exported results
+
+`--export-json PATH` writes every sample in hyperfine's `--export-json` shape, so scripts that
+read hyperfine's file can read tak's. tak only adds keys; none of hyperfine's change meaning.
 
 ```sh
 tak run --bench install --seed 1234 --export-json results.json
 ```
+
+```json
+{
+  "tak_version": "0.0.12",
+  "seed": "1234",
+  "runner": "local-linux-x86_64",
+  "time": "2026-09-24T19:40:38Z",
+  "machine": {
+    "os": "linux",
+    "os_version": "Ubuntu 24.04.4 LTS",
+    "kernel": "6.8.0-45-generic",
+    "arch": "x86_64",
+    "cpu": "AMD Ryzen 9 7950X3D 16-Core Processor",
+    "cpus": 2,
+    "memory_bytes": 100294041600
+  },
+  "results": [
+    {
+      "command": "mycli",
+      "bench": "install",
+      "subject": "mycli",
+      "version": "mycli 2.4.0",
+      "mean": 0.412,
+      "stddev": 0.006,
+      "median": 0.411,
+      "min": 0.404,
+      "max": 0.425,
+      "times": [0.411, 0.404, 0.425],
+      "exit_codes": [0, 0, 0]
+    }
+  ]
+}
+```
+
+The top-level keys record how the run was made. `seed` is a string so large seeds survive
+JavaScript and jq, and `runner` is the class `--record` would store the run under.
+
+`machine` describes what the run was measured on, so a results page can state it:
+
+| key | value |
+|---|---|
+| `os`, `arch` | as Rust names them: `linux`, `macos`, `windows`; `x86_64`, `aarch64` |
+| `os_version` | `PRETTY_NAME` from `/etc/os-release` on Linux, the product version on macOS; `null` on Windows |
+| `kernel` | the kernel release on Linux, the Darwin release on macOS, `10.0.<build>` on Windows |
+| `cpu` | the CPU model name; `null` where the OS does not report one, as on most arm64 Linux kernels |
+| `cpus` | logical CPUs tak could run on, which is what the subjects could use. On Linux it honours the affinity mask (`taskset`, a container cpuset) and cgroup CPU quotas, so it can be fewer than the machine has |
+| `memory_bytes` | total physical memory |
+
+A value tak can't read is `null` rather than an error. None of this is stored by `--record`:
+series are partitioned by `runner`, and a kernel update shouldn't split one.
+
+Each result has `bench` and `subject`, and `version` when the subject declares a
+`version_cmd` (see [below](#recording-each-program-s-version)). `user` and `system` are absent because tak doesn't measure CPU time.
 
 ## Sharing settings between benchmarks
 
@@ -192,14 +248,14 @@ Settings stack from least to most specific: `[defaults]`, then the benchmark, th
 shared `[subject.NAME]`, then the benchmark's own `[bench.B.subject.NAME]`. Each layer's
 setting replaces the one before, except `env` and `vars`, which merge key by key. `[defaults]`
 takes every benchmark setting (`runs`, `warmup`, `budget`, `min_runs`, `max_runs`,
-`prepare`, `dir`, `env`, `vars`). It is a separate table because `[env]` already holds
+`prepare`, `version_cmd`, `dir`, `env`, `vars`). It is a separate table because `[env]` already holds
 `env.deny` and `env.allow`.
 
 ## Templates
 
 <!-- tera syntax looks like Vue interpolation; v-pre stops VitePress evaluating it. -->
 ::: v-pre
-Values in `cmd`, `prepare`, `dir`, `env` and `vars` are [tera](https://keats.github.io/tera/)
+Values in `cmd`, `prepare`, `version_cmd`, `dir`, `env` and `vars` are [tera](https://keats.github.io/tera/)
 templates, the same syntax mise uses. tak renders them itself before anything runs, so a
 command can use a path that only exists at run time and still be a plain argument list,
 without a shell:
@@ -230,6 +286,47 @@ that sends a command to the wrong path. Template syntax is checked for the whole
 front; values are rendered only for the benchmarks being run, so a variable needed by one
 benchmark doesn't have to be set to run another.
 :::
+
+## Recording each program's version
+
+A comparison has to say which version of each program it measured. `version_cmd` names a
+command that prints a subject's version:
+
+```toml
+[defaults]
+runs = "auto"
+
+[subject.mycli]
+cmd = ["./target/release/mycli", "run", "pre-commit"]
+version_cmd = ["./target/release/mycli", "--version"]
+
+[subject.othertool]
+cmd = ["othertool", "run", "pre-commit"]
+version_cmd = "othertool version"
+
+[bench.hooks]
+subjects = ["mycli", "othertool"]
+```
+
+Before sampling, tak runs each subject's `version_cmd` once, untimed, in the subject's `dir`
+and `env`, with the same variables removed, so it sees what the measured command sees. The first
+non-empty line it prints becomes that subject's `version` in `--export-json`. tak reads
+stdout, or stderr when stdout is empty, as with `java -version`. `--record` stores the same
+string as the measurement's `version`.
+
+::: v-pre
+`version_cmd` layers like `prepare`, and it's a template, so one line in `[defaults]` can cover
+subjects that answer the same flag:
+
+```toml
+[defaults]
+version_cmd = ["{{ env.BIN_DIR }}/{{ subject }}", "--version"]
+```
+:::
+
+A `version_cmd` that fails or prints nothing doesn't drop the subject. tak prints a warning,
+measures the subject as usual, and exports its `version` as `null`. A subject without
+`version_cmd` has no `version` key. `--dry-run` lists each subject's `version_cmd`.
 
 ## Conditions
 

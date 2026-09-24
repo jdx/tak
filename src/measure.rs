@@ -481,6 +481,7 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
         cmd: plan.cmd.clone(),
         prepare: None,
         dir: plan.dir.clone(),
+        version_cmd: None,
         env: BTreeMap::new(),
         vars: BTreeMap::new(),
         when: None,
@@ -598,6 +599,55 @@ pub fn subject_instructions(s: &Subject, settings: &Settings) -> Result<Option<C
             settings,
         },
     )
+}
+
+/// Run a subject's `version_cmd` once and return the version it reports, or
+/// `None` when the subject declares none.
+///
+/// It runs where the subject does — its directory, its environment, the same
+/// scrub — because that decides which binary a bare name resolves to, and the
+/// point is to name the program that was measured. The result is the first
+/// non-empty line of stdout, or of stderr when stdout has none: `java
+/// -version` and some older tools print only there. Only one line, because a
+/// version is a label on a results page, and several tools follow it with a
+/// licence or build banner.
+pub fn subject_version(s: &Subject, settings: &Settings) -> Option<Result<String>> {
+    let argv = s.version_cmd.as_ref()?;
+    let site = Site {
+        dir: s.dir.as_deref(),
+        env: &s.env,
+        settings,
+    };
+    Some(version_once(argv, &site))
+}
+
+fn version_once(argv: &[String], site: &Site) -> Result<String> {
+    let bin = argv
+        .first()
+        .map(String::as_str)
+        .unwrap_or("(empty command)");
+    let out = command(argv, site)?
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("failed to spawn `{bin}`"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!(
+            "`{bin}` exited with {}: {}",
+            out.status,
+            stderr.lines().last().unwrap_or("(no output)").trim()
+        );
+    }
+    let first = |bytes: &[u8]| {
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(str::to_string)
+    };
+    first(&out.stdout)
+        .or_else(|| first(&out.stderr))
+        .with_context(|| format!("`{bin}` printed nothing"))
 }
 
 fn count(cmd: &[String], prepare: Option<&[String]>, site: &Site) -> Result<Option<Counted>> {
@@ -860,6 +910,7 @@ mod tests {
             cmd: cmd.iter().map(|s| s.to_string()).collect(),
             prepare: None,
             dir: None,
+            version_cmd: None,
             env: BTreeMap::new(),
             vars: BTreeMap::new(),
             when: None,
@@ -882,6 +933,30 @@ mod tests {
         assert!(format!("{:#}", res[1].as_ref().unwrap_err()).contains("exited with"));
     }
 
+    /// The first non-empty line, from stdout or else stderr; a failure is an
+    /// error naming the command, which the caller turns into a warning.
+    #[cfg(unix)]
+    #[test]
+    fn a_version_is_the_first_line_printed() {
+        let settings = Settings::default();
+        let env = BTreeMap::from([("V".to_string(), "9.9".to_string())]);
+        let site = Site {
+            dir: None,
+            env: &env,
+            settings: &settings,
+        };
+        let sh = |script: &str| version_once(&["sh".into(), "-c".into(), script.into()], &site);
+        assert_eq!(
+            sh("printf '\\n  tool %s  \\nbuilt today\\n' \"$V\"").unwrap(),
+            "tool 9.9",
+            "first non-empty line, trimmed, in the subject's env"
+        );
+        assert_eq!(sh("echo 'java 21' >&2").unwrap(), "java 21");
+        let err = format!("{:#}", sh("echo nope >&2; exit 2").unwrap_err());
+        assert!(err.contains("`sh`") && err.contains("nope"), "{err}");
+        assert!(sh("true").is_err(), "no output is no version");
+    }
+
     /// A prepare step that fails stops its subject, and says it was prepare.
     #[cfg(unix)]
     #[test]
@@ -896,6 +971,7 @@ mod tests {
                     "echo nope >&2; exit 3".into(),
                 ]),
                 dir: None,
+                version_cmd: None,
                 env: BTreeMap::new(),
                 vars: BTreeMap::new(),
                 when: None,
@@ -942,6 +1018,7 @@ mod tests {
             cmd: vec!["sleep".into(), secs.into()],
             prepare: None,
             dir: None,
+            version_cmd: None,
             env: BTreeMap::new(),
             vars: BTreeMap::new(),
             when: None,

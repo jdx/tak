@@ -554,6 +554,99 @@ fn the_export_records_version_seed_and_runner() {
     assert_eq!(json["results"].as_array().unwrap().len(), 1);
 }
 
+/// The export says what the run was measured on, and which version of each
+/// subject: a failing `version_cmd` costs the label, not the measurement.
+#[test]
+fn the_export_records_the_machine_and_subject_versions() {
+    let p = Project::new(
+        "export-versions",
+        r#"
+[defaults]
+runs = 1
+warmup = 0
+version_cmd = ["sh", "-c", "echo {{ subject }} $TOOL_VERSION; echo licence banner"]
+env = { TOOL_VERSION = "1.2.3" }
+
+[subject.good]
+cmd = ["true"]
+
+[subject.broken]
+cmd = ["true"]
+version_cmd = ["sh", "-c", "echo no such flag >&2; exit 2"]
+
+[bench.cmp]
+subjects = ["good", "broken"]
+
+"#,
+    );
+    let out = p.run(&["--no-progress", "--export-json", "r.json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("cmp (broken): version_cmd failed")
+            && stderr(&out).contains("no such flag"),
+        "{}",
+        stderr(&out)
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    let results = json["results"].as_array().unwrap();
+    let by = |n: &str| results.iter().find(|r| r["subject"] == n).unwrap();
+    assert_eq!(
+        by("good")["version"],
+        "good 1.2.3",
+        "first line, subject env"
+    );
+    assert!(by("broken")["version"].is_null(), "failed, still measured");
+
+    let m = &json["machine"];
+    assert_eq!(m["os"], std::env::consts::OS);
+    assert_eq!(m["arch"], std::env::consts::ARCH);
+    assert!(m["cpus"].as_u64().unwrap() >= 1, "{m}");
+    for key in ["os_version", "kernel", "cpu", "memory_bytes"] {
+        assert!(m.get(key).is_some(), "{key} present, even if null: {m}");
+    }
+}
+
+/// A subject without `version_cmd` has no `version` key at all, so a
+/// hyperfine consumer sees nothing new.
+#[test]
+fn a_subject_without_version_cmd_exports_no_version() {
+    let p = Project::new(
+        "export-no-version",
+        "[bench.one]\ncmd = [\"true\"]\nruns = 1\nwarmup = 0\n",
+    );
+    let out = p.run(&["--no-progress", "--no-counters", "--export-json", "r.json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    assert!(json["results"][0].get("version").is_none(), "{json}");
+}
+
+/// `cpus` is what the run could use, not what the machine has: a benchmark
+/// pinned with taskset says so.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_exported_cpu_count_follows_the_affinity_mask() {
+    if Command::new("taskset").arg("-V").output().is_err() {
+        eprintln!("taskset not found; skipping");
+        return;
+    }
+    let p = Project::new(
+        "export-affinity",
+        "[bench.one]\ncmd = [\"true\"]\nruns = 1\nwarmup = 0\n",
+    );
+    let out = Command::new("taskset")
+        .args(["-c", "0", env!("CARGO_BIN_EXE_tak"), "run"])
+        .args(["--no-progress", "--no-counters", "--export-json", "r.json"])
+        .current_dir(&p.dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    assert_eq!(json["machine"]["cpus"], 1);
+}
+
 /// `when` leaves a subject or benchmark out before it is rendered, says so,
 /// and refuses a --subject that its own `when` switches off.
 #[test]

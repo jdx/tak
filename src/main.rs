@@ -293,6 +293,9 @@ struct RunOpts {
 struct Measured {
     bench: String,
     subject: Subject,
+    /// What `version_cmd` printed: `None` when the subject has none,
+    /// `Some(None)` when it failed.
+    version: Option<Option<String>>,
     samples: Vec<f64>,
     record: Record,
 }
@@ -314,6 +317,7 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         cmd,
         prepare: None,
         dir: None,
+        version_cmd: None,
         env: BTreeMap::new(),
         vars: BTreeMap::new(),
         when: None,
@@ -560,6 +564,9 @@ fn print_plan(bench: &str, multi: bool, subjects: &[Subject], no_counters: bool)
         if let Some(p) = &s.prepare {
             println!("{pad}prepare  {}", shell_words(p));
         }
+        if let Some(v) = &s.version_cmd {
+            println!("{pad}version  {}", shell_words(v));
+        }
         if let Some(d) = &s.dir {
             println!("{pad}dir      {}", d.display());
         }
@@ -621,7 +628,9 @@ fn finish(
                 } else {
                     &m.subject.name
                 };
-                ExportResult::new(&m.bench, &m.subject.name, command, &m.samples)
+                let mut r = ExportResult::new(&m.bench, &m.subject.name, command, &m.samples);
+                r.version = m.version.clone();
+                r
             })
             .collect();
         let meta = export::Meta {
@@ -629,6 +638,9 @@ fn finish(
             seed,
             runner: runner_class(settings),
             time: now_rfc3339(),
+            // Read after measuring, so describing the machine is never part
+            // of what was measured.
+            machine: tak_cli::machine::detect(),
         };
         export::write(path, meta, results)?;
         println!(
@@ -689,6 +701,26 @@ fn measure_bench(
             subjects.len()
         );
     }
+    // Versions first, once each and untimed: a tool that updates itself or
+    // warms a cache on `--version` does so before the warmups, not between
+    // samples. A failure costs only the label.
+    let versions: Vec<Option<Option<String>>> = subjects
+        .iter()
+        .map(|s| {
+            measure::subject_version(s, settings).map(|r| match r {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    let label = if multi {
+                        format!("{bench} ({})", s.name)
+                    } else {
+                        bench.to_string()
+                    };
+                    eprintln!("  warning: {label}: version_cmd failed, version unknown: {e:#}");
+                    None
+                }
+            })
+        })
+        .collect();
     let bench_seed = measure::seed_for(seed, bench);
     let results = if opts.no_progress {
         measure::interleaved(subjects, bench_seed, settings, &mut measure::Quiet)
@@ -701,7 +733,7 @@ fn measure_bench(
     };
     let mut measured = Vec::new();
     let mut failed = Vec::new();
-    for (s, result) in subjects.iter().zip(results) {
+    for ((s, result), version) in subjects.iter().zip(results).zip(versions) {
         let samples = match result {
             Ok(samples) => samples,
             Err(e) if !multi => return Err(e),
@@ -768,12 +800,15 @@ fn measure_bench(
         measured.push(Measured {
             bench: bench.to_string(),
             subject: s.clone(),
+            version: version.clone(),
             samples,
             record: Record {
                 v: SCHEMA_VERSION,
                 bench: bench.to_string(),
                 tool,
-                version: None,
+                // The field backfill fills from a release tag, and meant for
+                // competitors: which of their releases a point measured.
+                version: version.flatten(),
                 runner: runner_class(settings),
                 ts: now_rfc3339(),
                 metrics,

@@ -183,6 +183,7 @@ fn a_subject_is_prepared_before_every_counted_run() {
                 .to_vec(),
         ),
         dir: Some(dir.clone()),
+        version_cmd: None,
         env: [("MARK".to_string(), "set".to_string())].into(),
         vars: Default::default(),
         when: None,
