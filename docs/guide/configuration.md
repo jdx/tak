@@ -380,8 +380,14 @@ version_cmd = ["{{ env.BIN_DIR }}/{{ subject }}", "--version"]
 ```
 :::
 
-A `version_cmd` that fails or prints nothing doesn't drop the subject. tak prints a warning,
-measures the subject as usual, and exports its `version` as `null`. A subject without
+A `version_cmd` that exits non-zero, prints nothing, or takes longer than 10 seconds doesn't
+drop the subject. tak stops one that runs too long, prints a warning, measures the subject as
+usual, and exports its `version` as `null`. A non-zero exit always means `null`, even when the
+command printed something that looks like a version: a failing command's output is an error or
+a usage message. Only the first 8 KiB of each output stream is kept; the rest is read and
+discarded, so a long banner doesn't stop the command from finishing. If the command leaves a
+background process holding its output open, tak uses what arrived before the command exited
+instead of waiting for that process. A subject without
 `version_cmd` has no `version` key. `--dry-run` lists each subject's `version_cmd`.
 
 ## Conditions

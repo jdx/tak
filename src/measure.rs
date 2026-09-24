@@ -19,6 +19,7 @@ use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::Instant;
 
@@ -680,36 +681,46 @@ pub fn subject_version(s: &Subject, settings: &Settings) -> Option<Result<String
         env: &s.env,
         settings,
     };
-    Some(version_once(argv, &site))
+    Some(version_once(argv, &site, VERSION_TIMEOUT))
 }
 
-/// How much of each stream a `version_cmd` gets read. A version is its first
-/// non-empty line; a tool that follows it with a banner, or never stops
-/// printing, must not be held in memory or waited on for the rest.
+/// How much of each stream a `version_cmd` keeps. A version is its first
+/// non-empty line; a tool that follows it with a banner, or a help dump,
+/// must not be held in memory for the rest.
 const VERSION_OUTPUT_CAP: usize = 8192;
 
-/// Read up to `cap` bytes, then stop. Returns what was read and whether the
-/// cap cut it short. The reader is dropped on return, so a child still
-/// writing gets a closed pipe rather than blocking on a full one.
-fn read_prefix(mut r: impl std::io::Read, cap: usize) -> (Vec<u8>, bool) {
-    let mut out = Vec::new();
-    let mut buf = [0u8; 4096];
-    while out.len() < cap {
+/// How long a `version_cmd` may take. Asking a tool its version should be
+/// instant; one that stalls on a network or licence check must cost a
+/// warning, not hang the run before its first sample with nothing on
+/// screen. Fixed rather than a setting until a real tool needs longer.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// After the command exits, how long to wait for its output to finish
+/// arriving. Anything it wrote is already in the pipe by then, so this only
+/// ends up mattering when a process it started in the background still
+/// holds the pipe open — and that must not hold up the run.
+const VERSION_OUTPUT_GRACE: Duration = Duration::from_millis(500);
+
+/// Read `r` to the end, keeping the first `cap` bytes in `kept` and
+/// discarding the rest. Draining it all means the writer never blocks on a
+/// full pipe, so the command can finish and report its real exit status.
+fn keep_prefix(mut r: impl std::io::Read, cap: usize, kept: &Mutex<Vec<u8>>) {
+    let mut buf = [0u8; 8192];
+    loop {
         match r.read(&mut buf) {
-            Ok(0) | Err(_) => return (out, false),
-            Ok(n) if n > cap - out.len() => {
-                out.extend_from_slice(&buf[..cap - out.len()]);
-                return (out, true);
+            Ok(0) => return,
+            Ok(n) => {
+                let Ok(mut k) = kept.lock() else { return };
+                let room = cap.saturating_sub(k.len());
+                k.extend_from_slice(&buf[..n.min(room)]);
             }
-            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return,
         }
     }
-    // Full: cut short only if there was more to come.
-    let more = matches!(r.read(&mut buf[..1]), Ok(n) if n > 0);
-    (out, more)
 }
 
-fn version_once(argv: &[String], site: &Site) -> Result<String> {
+fn version_once(argv: &[String], site: &Site, timeout: Duration) -> Result<String> {
     let bin = argv
         .first()
         .map(String::as_str)
@@ -720,34 +731,71 @@ fn version_once(argv: &[String], site: &Site) -> Result<String> {
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("failed to spawn `{bin}`"))?;
-    // stderr on its own thread, so neither pipe can fill while the other is
-    // being read.
-    let err = child
-        .stderr
-        .take()
-        .map(|e| std::thread::spawn(move || read_prefix(e, VERSION_OUTPUT_CAP)));
-    let (stdout, out_cut) = child
-        .stdout
-        .take()
-        .map_or((Vec::new(), false), |o| read_prefix(o, VERSION_OUTPUT_CAP));
-    if out_cut {
-        // It has already said everything used; one that would print forever
-        // is stopped rather than waited on.
-        let _ = child.kill();
+
+    // One thread per stream, so neither pipe can fill while the other is
+    // read. They are never joined: a background process the command started
+    // may hold a pipe open long after it exits, and the run must not wait on
+    // that. Each thread ends when its pipe finally closes.
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let spawn_reader = |r: Option<Box<dyn std::io::Read + Send>>| {
+        let kept = Arc::new(Mutex::new(Vec::new()));
+        if let Some(r) = r {
+            let (kept, tx) = (Arc::clone(&kept), done_tx.clone());
+            std::thread::spawn(move || {
+                keep_prefix(r, VERSION_OUTPUT_CAP, &kept);
+                let _ = tx.send(());
+            });
+        } else {
+            let _ = done_tx.send(());
+        }
+        kept
+    };
+    let stdout = spawn_reader(child.stdout.take().map(|o| Box::new(o) as _));
+    let stderr = spawn_reader(child.stderr.take().map(|e| Box::new(e) as _));
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!(
+                    "`{bin}` did not finish within {}, so it was stopped",
+                    crate::progress::fmt(timeout)
+                );
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e).with_context(|| format!("failed to wait for `{bin}`"));
+            }
+        }
+    };
+    let grace = Instant::now() + VERSION_OUTPUT_GRACE;
+    for _ in 0..2 {
+        let left = grace.saturating_duration_since(Instant::now());
+        if done_rx.recv_timeout(left).is_err() {
+            break;
+        }
     }
-    let (stderr, err_cut) = err
-        .and_then(|t| t.join().ok())
-        .unwrap_or((Vec::new(), false));
-    let status = child
-        .wait()
-        .with_context(|| format!("failed to wait for `{bin}`"))?;
-    // Output cut short ends however the cut made it end — killed, or by a
-    // closed pipe — so its status says nothing about the version it printed.
-    if !(status.success() || out_cut || err_cut) {
+    let take = |kept: &Mutex<Vec<u8>>| kept.lock().map(|k| k.clone()).unwrap_or_default();
+    let (stdout, stderr) = (take(&stdout), take(&stderr));
+
+    // A failing command's output is an error message or a usage dump, not a
+    // version, however much of it there is.
+    if !status.success() {
         let stderr = String::from_utf8_lossy(&stderr);
         bail!(
             "`{bin}` exited with {status}: {}",
-            stderr.lines().last().unwrap_or("(no output)").trim()
+            stderr
+                .lines()
+                .map(str::trim)
+                .rfind(|l| !l.is_empty())
+                .unwrap_or("(no output)")
         );
     }
     let first = |bytes: &[u8]| {
@@ -1047,19 +1095,28 @@ mod tests {
         assert!(format!("{:#}", res[1].as_ref().unwrap_err()).contains("exited with"));
     }
 
-    /// The first non-empty line, from stdout or else stderr; a failure is an
-    /// error naming the command, which the caller turns into a warning.
+    /// Runs `sh -c script` as a `version_cmd` with the given deadline.
     #[cfg(unix)]
-    #[test]
-    fn a_version_is_the_first_line_printed() {
+    fn version_sh(script: &str, env: &[(&str, &str)], timeout: Duration) -> Result<String> {
         let settings = Settings::default();
-        let env = BTreeMap::from([("V".to_string(), "9.9".to_string())]);
+        let env: BTreeMap<String, String> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         let site = Site {
             dir: None,
             env: &env,
             settings: &settings,
         };
-        let sh = |script: &str| version_once(&["sh".into(), "-c".into(), script.into()], &site);
+        version_once(&["sh".into(), "-c".into(), script.into()], &site, timeout)
+    }
+
+    /// The first non-empty line, from stdout or else stderr; a failure is an
+    /// error naming the command, which the caller turns into a warning.
+    #[cfg(unix)]
+    #[test]
+    fn a_version_is_the_first_line_printed() {
+        let sh = |script: &str| version_sh(script, &[("V", "9.9")], VERSION_TIMEOUT);
         assert_eq!(
             sh("printf '\\n  tool %s  \\nbuilt today\\n' \"$V\"").unwrap(),
             "tool 9.9",
@@ -1071,30 +1128,79 @@ mod tests {
         assert!(sh("true").is_err(), "no output is no version");
     }
 
-    /// Only a prefix of each stream is read: a tool that prints megabytes,
-    /// or never stops, still yields its first line and is not waited on.
+    /// Output past the cap is read and dropped, so a command that prints a
+    /// lot still finishes, and its first line is what counts.
     #[cfg(unix)]
     #[test]
     fn a_version_is_read_from_a_capped_prefix() {
-        let settings = Settings::default();
-        let env = BTreeMap::new();
-        let site = Site {
-            dir: None,
-            env: &env,
-            settings: &settings,
-        };
-        let sh = |script: &str| version_once(&["sh".into(), "-c".into(), script.into()], &site);
+        let sh = |script: &str| version_sh(script, &[], VERSION_TIMEOUT);
         assert_eq!(sh("yes 'tool 1.0' | head -c 10000000").unwrap(), "tool 1.0");
-        assert_eq!(sh("yes 'tool 2.0'").unwrap(), "tool 2.0", "never exits");
         assert_eq!(
             sh("yes 'java 21' | head -c 10000000 >&2").unwrap(),
             "java 21",
             "a flood on stderr"
         );
-        let (got, cut) = read_prefix(&[7u8; 100][..], 10);
-        assert_eq!((got.len(), cut), (10, true));
-        let (got, cut) = read_prefix(&[7u8; 10][..], 10);
-        assert_eq!((got.len(), cut), (10, false), "exactly the cap is not cut");
+        let kept = Mutex::new(Vec::new());
+        let mut src = std::io::Cursor::new(vec![7u8; 100]);
+        keep_prefix(&mut src, 10, &kept);
+        assert_eq!(kept.lock().unwrap().len(), 10, "only the cap is kept");
+        assert_eq!(
+            src.position(),
+            100,
+            "the rest is read, not left in the pipe"
+        );
+    }
+
+    /// A failing command that prints a lot — a usage dump after an unknown
+    /// flag — is a failure, not a version, however long its output.
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_version_cmd_is_an_error_even_past_the_cap() {
+        let err = version_sh(
+            "yes 'usage: tool [flags]' | head -c 100000; echo 'unknown flag' >&2; exit 1",
+            &[],
+            VERSION_TIMEOUT,
+        )
+        .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("exited with") && err.contains("unknown flag"),
+            "{err}"
+        );
+    }
+
+    /// One that never finishes, even one that only floods stderr, is stopped
+    /// at the deadline and says so.
+    #[cfg(unix)]
+    #[test]
+    fn a_version_cmd_that_never_finishes_is_stopped() {
+        let t = Duration::from_millis(300);
+        let began = Instant::now();
+        // `exec`, so the process stopped at the deadline is the flood itself.
+        for script in ["exec yes 'tool 2.0' >&2", "exec sleep 30"] {
+            let err = format!("{:#}", version_sh(script, &[], t).unwrap_err());
+            assert!(err.contains("did not finish"), "{script}: {err}");
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            began.elapsed()
+        );
+    }
+
+    /// A background process that inherits the pipes keeps them open after
+    /// the command exits; the version it printed still comes back promptly.
+    #[cfg(unix)]
+    #[test]
+    fn a_background_process_holding_the_pipe_does_not_hold_up_the_version() {
+        let began = Instant::now();
+        let v = version_sh("sleep 5 & echo 'tool 3.0'", &[], VERSION_TIMEOUT).unwrap();
+        assert_eq!(v, "tool 3.0");
+        assert!(
+            began.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            began.elapsed()
+        );
     }
 
     /// A prepare step that fails stops its subject, and says it was prepare.
