@@ -783,6 +783,86 @@ fn keep_prefix(mut r: impl std::io::Read, cap: usize, kept: &Mutex<Vec<u8>>) {
     }
 }
 
+/// Passing a fatal signal on to a running `version_cmd`'s process group.
+///
+/// The group is what lets a timeout stop everything the command started,
+/// but it also takes the command out of the terminal's foreground group, so
+/// a Ctrl-C — or a SIGTERM from CI cancelling the job — would stop tak and
+/// leave the command running, however long it would otherwise have hung.
+/// While a guard is alive, SIGINT, SIGTERM and SIGHUP kill that group and
+/// then stop tak exactly as they would have without the handler. The
+/// previous handlers come back when the guard drops, so the rest of a run
+/// behaves as before: the measured commands share tak's group and get the
+/// terminal's signals directly.
+#[cfg(unix)]
+mod forward_signals {
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    const SIGNALS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+
+    /// The group to kill, or 0 when there is none yet. An atomic, because
+    /// a signal handler may read nothing else safely.
+    static PGID: AtomicI32 = AtomicI32::new(0);
+
+    extern "C" fn forward(sig: libc::c_int) {
+        let pgid = PGID.load(Ordering::SeqCst);
+        // SAFETY: killpg, signal and raise are async-signal-safe. The signal
+        // is blocked while this runs, so the raise takes effect — with the
+        // default action, stopping tak — as soon as the handler returns.
+        unsafe {
+            if pgid > 0 {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+
+    pub struct Guard {
+        previous: Vec<(libc::c_int, libc::sigaction)>,
+    }
+
+    impl Guard {
+        /// Install the handlers. Before spawning, so no signal can arrive
+        /// between the spawn and the handler being in place.
+        pub fn install() -> Guard {
+            let mut previous = Vec::new();
+            for sig in SIGNALS {
+                // SAFETY: plain-data structs, filled in before use; the
+                // handler is an `extern "C" fn(c_int)`, as sa_sigaction
+                // expects without SA_SIGINFO.
+                unsafe {
+                    let mut new: libc::sigaction = std::mem::zeroed();
+                    new.sa_sigaction = forward as extern "C" fn(libc::c_int) as libc::sighandler_t;
+                    libc::sigemptyset(&mut new.sa_mask);
+                    let mut old: libc::sigaction = std::mem::zeroed();
+                    if libc::sigaction(sig, &new, &mut old) == 0 {
+                        previous.push((sig, old));
+                    }
+                }
+            }
+            Guard { previous }
+        }
+
+        /// The group to forward to: the child leads it, so its pid.
+        pub fn watch(pid: u32) {
+            PGID.store(pid as i32, Ordering::SeqCst);
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            PGID.store(0, Ordering::SeqCst);
+            for (sig, old) in &self.previous {
+                // SAFETY: restores the action saved by `install`.
+                unsafe {
+                    libc::sigaction(*sig, old, std::ptr::null_mut());
+                }
+            }
+        }
+    }
+}
+
 /// Stop a timed-out `version_cmd` and everything it started, then reap it.
 ///
 /// On Unix that is its whole process group, so a helper it spawned cannot go
@@ -820,9 +900,15 @@ fn version_once(argv: &[String], site: &Site, timeout: Duration) -> Result<Strin
     // a helper left running would compete with the samples that follow.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    // Being in its own group, it no longer gets the terminal's Ctrl-C; this
+    // passes a fatal signal on to it until the guard drops.
+    #[cfg(unix)]
+    let _forward = forward_signals::Guard::install();
     let mut child = cmd
         .spawn()
         .with_context(|| format!("failed to spawn `{bin}`"))?;
+    #[cfg(unix)]
+    forward_signals::Guard::watch(child.id());
 
     // One thread per stream, so neither pipe can fill while the other is
     // read. They are never joined: a background process the command started

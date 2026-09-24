@@ -630,6 +630,88 @@ warmup = 1
     assert_eq!(json["results"][0]["version"], "built 4.5.6");
 }
 
+/// Ctrl-C while a `version_cmd` hangs stops what it started, not just tak:
+/// the command runs in its own process group, which the terminal's signal
+/// would otherwise never reach.
+#[test]
+fn an_interrupt_during_version_cmd_stops_its_process_group() {
+    use std::os::unix::process::ExitStatusExt;
+    let p = Project::new(
+        "version-sigint",
+        r#"
+[bench.one]
+cmd = ["true"]
+version_cmd = ["sh", "-c", "sleep 30 & echo $! > sleep.pid; wait"]
+runs = 1
+warmup = 0
+"#,
+    );
+    let mut tak = Command::new(env!("CARGO_BIN_EXE_tak"))
+        .args(["run", "--no-progress", "--no-counters"])
+        .current_dir(&p.dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pidfile = p.path("sleep.pid");
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let pid = loop {
+        if let Some(pid) = std::fs::read_to_string(&pidfile)
+            .ok()
+            .filter(|t| t.ends_with('\n'))
+        {
+            break pid.trim().to_string();
+        }
+        assert!(
+            std::time::Instant::now() < until,
+            "version_cmd never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    // SAFETY: sends a signal to the tak we spawned.
+    unsafe { libc::kill(tak.id() as libc::pid_t, libc::SIGINT) };
+    let status = tak.wait().unwrap();
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGINT),
+        "tak still stops as it would"
+    );
+
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while running(&pid) && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(!running(&pid), "the version_cmd's sleep {pid} outlived tak");
+}
+
+/// Whether `pid` is still running. A zombie is not: its parent was killed
+/// with it, and where PID 1 does not reap orphans it stays one.
+fn running(pid: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        let state = stat
+            .rfind(')')
+            .and_then(|i| stat[i + 1..].trim_start().chars().next());
+        !matches!(state, None | Some('Z' | 'X' | 'x'))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let Ok(out) = Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .stderr(std::process::Stdio::null())
+            .output()
+        else {
+            return false;
+        };
+        let stat = String::from_utf8_lossy(&out.stdout);
+        let stat = stat.trim();
+        out.status.success() && !stat.is_empty() && !stat.starts_with('Z')
+    }
+}
+
 /// A subject without `version_cmd` has no `version` key at all, so a
 /// hyperfine consumer sees nothing new.
 #[test]

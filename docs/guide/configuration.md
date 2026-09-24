@@ -157,8 +157,9 @@ version_cmd = ["{{ env.BIN_DIR }}/{{ subject }}", "--version"]
 A `version_cmd` that exits non-zero, prints nothing, or takes longer than 10 seconds doesn't
 drop the subject. tak stops one that runs too long, prints a warning, measures the subject as
 usual, and exports its `version` as `null`. On Linux and macOS, stopping it also stops any
-processes it started, so nothing it left behind runs during the samples. On Windows only the
-command itself is stopped. A non-zero exit always means `null`, even when the
+processes it started, so nothing it left behind runs during the samples. The same happens if
+tak is interrupted (Ctrl-C, or SIGTERM or SIGHUP) while a `version_cmd` runs. On Windows only
+the command itself is stopped. A non-zero exit always means `null`, even when the
 command printed something that looks like a version: a failing command's output is an error or
 a usage message. Only the first 8 KiB of each output stream is kept; the rest is read and
 discarded, so a long banner doesn't stop the command from finishing. If the command leaves a
