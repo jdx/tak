@@ -1491,3 +1491,28 @@ ok_exit_codes = [0, 1]
     assert_eq!(r["exit_codes"], serde_json::json!([1, 1]));
     assert_eq!(r["checks"]["passed"], 0);
 }
+
+/// A passing prepare and check that leave a process holding stderr cost a
+/// sample nothing extra: the grace for reading stderr after exit is only
+/// waited out when a failure needs the message.
+#[test]
+fn passing_steps_leaving_stderr_open_do_not_wait_out_the_grace() {
+    let p = Project::new(
+        "bg-many",
+        &format!(
+            "[bench.cmp]\nwarmup = 0\nruns = 10\n[bench.cmp.subject.a]\ncmd = [\"sh\", \"-c\", \"echo run:a >> log\"]\nprepare = {LEAVES_STDERR_OPEN}\ncheck = {LEAVES_STDERR_OPEN}\n"
+        ),
+    );
+    let start = std::time::Instant::now();
+    let out = p.run(&["--no-progress"]);
+    let took = start.elapsed();
+    // 10 prepares and 10 checks at 500 ms each would be 10 s.
+    assert!(
+        took < std::time::Duration::from_secs(2),
+        "took {took:?}: {}",
+        stderr(&out)
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("checks 10/10"));
+    assert_eq!(p.log().len(), 10);
+}

@@ -163,12 +163,18 @@ fn check_once(cmd: &[String], site: &Site) -> Result<Option<String>> {
     untimed("check", cmd, site)
 }
 
-/// How long to keep reading an untimed step's stderr after the step has
+/// How long to keep reading a failed untimed step's stderr after it has
 /// exited. Normally the pipe closes with the process and this is never waited
 /// out; it only runs down when something the step left behind still holds the
 /// pipe open, and then it is enough for what the step wrote before exiting to
-/// be read.
+/// be read. A step that passed has no message to build, so it is not waited
+/// for at all — prepare and check run once per sample.
 const UNTIMED_STDERR_GRACE: Duration = Duration::from_millis(500);
+
+/// How often a stderr reader checks whether it has been told to stop. Bounds
+/// how long a pipe held open by a leftover process outlives its step.
+#[cfg(unix)]
+const UNTIMED_READER_POLL_MS: libc::c_int = 50;
 
 /// Run an untimed step — `prepare`, `setup` or `check`, named by `step` in
 /// messages. `Ok(Some(why))` when it exits non-zero, naming the step and the
@@ -189,12 +195,14 @@ const UNTIMED_STDERR_GRACE: Duration = Duration::from_millis(500);
 /// hung the whole run. tak neither waits for nor kills such processes: a
 /// fixture server started by `setup` may be exactly the point. One still
 /// running while samples are timed competes with them, and the timings show
-/// it.
+/// it. Once the step's stderr is no longer needed, tak closes its end of the
+/// pipe, so such a process that later writes to stderr gets `EPIPE` or
+/// `SIGPIPE`.
 ///
 /// There is deliberately no overall deadline: a setup that builds or clones a
 /// fixture can legitimately take minutes.
 fn untimed(step: &str, cmd: &[String], site: &Site) -> Result<Option<String>> {
-    use std::io::Read;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
 
     let mut c = command(cmd, site)?;
@@ -205,40 +213,31 @@ fn untimed(step: &str, cmd: &[String], site: &Site) -> Result<Option<String>> {
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("failed to spawn {step} `{bin}`"))?;
-    // Keep only the tail, reading as it arrives so the child never blocks on a
-    // full pipe. The reader runs on its own thread so that a pipe held open
-    // after the step exits cannot keep us from noticing that it did.
+    // The reader runs on its own thread so that a pipe held open after the
+    // step exits cannot keep us from noticing that it did.
     let tail: Arc<Mutex<Vec<u8>>> = Arc::default();
+    let stop = Arc::new(AtomicBool::new(false));
     let (done_tx, done) = mpsc::channel::<()>();
-    if let Some(mut err) = child.stderr.take() {
+    if let Some(err) = child.stderr.take() {
         let tail = Arc::clone(&tail);
+        let stop = Arc::clone(&stop);
         std::thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            loop {
-                let n = err.read(&mut buf).unwrap_or(0);
-                if n == 0 {
-                    break;
-                }
-                let mut tail = tail.lock().unwrap_or_else(|e| e.into_inner());
-                tail.extend_from_slice(&buf[..n]);
-                if tail.len() > UNTIMED_STDERR_TAIL {
-                    let excess = tail.len() - UNTIMED_STDERR_TAIL;
-                    tail.drain(..excess);
-                }
-            }
+            read_tail(err, &tail, &stop);
             // The receiver is gone if the grace ran out first; nothing to tell.
             let _ = done_tx.send(());
         });
     } else {
         drop(done_tx);
     }
-    let status = child
-        .wait()
-        .with_context(|| format!("failed to wait for {step} `{bin}`"))?;
-    // Not joined: if a leftover process still holds the pipe, the thread
-    // ends whenever that process closes it, and until then it only reads
-    // into a tail nobody looks at again.
-    let _ = done.recv_timeout(UNTIMED_STDERR_GRACE);
+    let status = child.wait();
+    // A pass needs no stderr, so stop reading at once rather than after the
+    // grace. Not joined either way: the reader notices within one poll and
+    // closes the pipe as it returns.
+    if matches!(&status, Ok(s) if !s.success()) {
+        let _ = done.recv_timeout(UNTIMED_STDERR_GRACE);
+    }
+    stop.store(true, Ordering::Relaxed);
+    let status = status.with_context(|| format!("failed to wait for {step} `{bin}`"))?;
     if status.success() {
         return Ok(None);
     }
@@ -250,6 +249,81 @@ fn untimed(step: &str, cmd: &[String], site: &Site) -> Result<Option<String>> {
         Some(last) => format!("{step} `{bin}` exited with {status}: {}", last.trim()),
         None => format!("{step} `{bin}` exited with {status}"),
     }))
+}
+
+/// Append what arrives on `err` to `tail`, keeping only the last
+/// [`UNTIMED_STDERR_TAIL`] bytes, until EOF or until `stop` is set. Returning
+/// drops `err`, closing tak's end of the pipe.
+///
+/// Waits with `poll` rather than a blocking read so `stop` is seen even while
+/// a leftover process holds the pipe open without writing. The fd is only
+/// ever touched by this thread, so it is never closed under a blocked read.
+#[cfg(unix)]
+fn read_tail(
+    mut err: std::process::ChildStderr,
+    tail: &std::sync::Mutex<Vec<u8>>,
+    stop: &std::sync::atomic::AtomicBool,
+) {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::sync::atomic::Ordering;
+
+    let mut buf = [0u8; 8192];
+    while !stop.load(Ordering::Relaxed) {
+        let mut fd = libc::pollfd {
+            fd: err.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd, owned by `err` for the whole call.
+        match unsafe { libc::poll(&mut fd, 1, UNTIMED_READER_POLL_MS) } {
+            0 => continue,
+            n if n < 0 => {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return;
+            }
+            // Readable or hung up: either way a read now returns without
+            // blocking, with data or with EOF.
+            _ => {}
+        }
+        match err.read(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => push_tail(tail, &buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
+}
+
+/// Without `poll`, a blocking read that ignores `stop`: the reader and its end
+/// of the pipe live until whatever holds the pipe open closes it. The run
+/// still continues once the step exits.
+#[cfg(not(unix))]
+fn read_tail(
+    mut err: std::process::ChildStderr,
+    tail: &std::sync::Mutex<Vec<u8>>,
+    _stop: &std::sync::atomic::AtomicBool,
+) {
+    use std::io::Read;
+
+    let mut buf = [0u8; 8192];
+    while let Ok(n) = err.read(&mut buf) {
+        if n == 0 {
+            return;
+        }
+        push_tail(tail, &buf[..n]);
+    }
+}
+
+fn push_tail(tail: &std::sync::Mutex<Vec<u8>>, bytes: &[u8]) {
+    let mut tail = tail.lock().unwrap_or_else(|e| e.into_inner());
+    tail.extend_from_slice(bytes);
+    if tail.len() > UNTIMED_STDERR_TAIL {
+        let excess = tail.len() - UNTIMED_STDERR_TAIL;
+        tail.drain(..excess);
+    }
 }
 
 /// One entry in a run's sample order.
@@ -1195,6 +1269,51 @@ mod tests {
         let res = interleaved(&[s], 0, &Settings::default(), &mut Quiet);
         let msg = format!("{:#}", res[0].as_ref().unwrap_err());
         assert!(msg.contains("failed to spawn check"), "{msg}");
+    }
+
+    /// A passing step that leaves a process holding its stderr returns at
+    /// once, and tak's end of the pipe is closed soon after rather than
+    /// living as long as that process: over many samples, readers and
+    /// descriptors must not pile up. The proof is that the leftover process's
+    /// later write to stderr dies of SIGPIPE (exit 141), which only happens
+    /// once no reader is left.
+    #[cfg(unix)]
+    #[test]
+    fn a_passing_step_leaving_stderr_open_releases_the_pipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = BTreeMap::new();
+        let settings = Settings::default();
+        let site = Site {
+            dir: Some(dir.path()),
+            env: &env,
+            settings: &settings,
+        };
+        const N: usize = 10;
+        let start = Instant::now();
+        for i in 0..N {
+            let script = format!(
+                "{{ sh -c 'sleep 1; echo late >&2'; echo $? > s{i}.tmp && mv s{i}.tmp s{i}; }} & exit 0"
+            );
+            let step = ["/bin/sh".to_string(), "-c".into(), script];
+            assert_eq!(untimed("prepare", &step, &site).unwrap(), None);
+        }
+        let took = start.elapsed();
+        // Waiting out the grace on every pass would take N × 500 ms.
+        assert!(took < Duration::from_secs(2), "{N} passes took {took:?}");
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let statuses: Vec<String> = (0..N)
+            .map(|i| {
+                loop {
+                    if let Ok(s) = std::fs::read_to_string(dir.path().join(format!("s{i}"))) {
+                        break s.trim().to_string();
+                    }
+                    assert!(Instant::now() < deadline, "leftover {i} never wrote");
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            })
+            .collect();
+        assert!(statuses.iter().all(|s| s == "141"), "{statuses:?}");
     }
 
     /// An observer that records what it was told.
