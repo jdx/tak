@@ -617,3 +617,13 @@ cmd = ["sh", "-c", "n=$(cat n 2>/dev/null || echo 0); echo $((n+1)) > n; [ \"$n\
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stderr(&out).contains("outliers"), "{}", stderr(&out));
 }
+
+/// --dry-run reflects --no-counters the way a real run would.
+#[test]
+fn dry_run_honours_no_counters() {
+    let p = Project::new("dry-counters", "[bench.one]\ncmd = [\"true\"]\n");
+    let on = p.run(&["--dry-run"]);
+    assert!(String::from_utf8_lossy(&on.stdout).contains("counters on"));
+    let off = p.run(&["--dry-run", "--no-counters"]);
+    assert!(!String::from_utf8_lossy(&off.stdout).contains("counters on"));
+}

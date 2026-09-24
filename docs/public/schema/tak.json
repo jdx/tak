@@ -114,7 +114,7 @@
       "budget": {
         "description": "runs = \"auto\": wall time per subject, prepare included, such as \"30s\", \"2m\" or \"500ms\".",
         "type": "string",
-        "pattern": "^\\s*[0-9.]+\\s*(ms|s|m|h)?\\s*$"
+        "pattern": "^\\s*(0*[1-9][0-9]*(\\.[0-9]+)?|0*\\.[0-9]*[1-9][0-9]*)\\s*(ms|s|m|h)?\\s*$"
       },
       "min_runs": {
         "description": "runs = \"auto\": fewest runs a subject gets.",
@@ -280,7 +280,41 @@
           "description": "Run this benchmark only when this expr condition holds. Sees env, os, arch, ci and bench.",
           "type": "string"
         }
-      }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "cmd"
+          ]
+        },
+        {
+          "required": [
+            "subjects"
+          ]
+        },
+        {
+          "required": [
+            "subject"
+          ]
+        }
+      ],
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "cmd",
+              "subjects"
+            ]
+          },
+          {
+            "required": [
+              "cmd",
+              "subject"
+            ]
+          }
+        ]
+      },
+      "description": "A benchmark: either one `cmd`, or `subjects` and/or `subject` tables, not both."
     }
   }
 }
