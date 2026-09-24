@@ -201,17 +201,28 @@ jobs:
           echo "comparing against $base on $BASE_REF"
 
       # Deliberately not `continue-on-error`. That would hide a compare that
-      # died for an unrelated reason behind a green check. The exit code is
-      # captured, the comment is posted either way, and a later step re-raises
-      # it — so a regression always arrives with the table that explains it.
+      # died for an unrelated reason behind a green check.
+      #
+      # `--no-gate`, so the exit code means only "did the comparison run": a
+      # plain `tak compare` exits 1 for a regression and for an error alike,
+      # and here a rise is reported while an error must still fail. Whether
+      # counts rose comes from the report's own gate line instead. Status:
+      # 0 clean, 1 rose beyond the gate (reported), 2 the comparison failed.
       - name: Compare against the base
         env:
           BASE_SHA: ${{ steps.base.outputs.sha }}
         run: |
           set +e
-          ./target/release/tak compare "$BASE_SHA" > /tmp/tak-report.md
-          echo $? > /tmp/tak-gate-status
+          ./target/release/tak compare --no-gate "$BASE_SHA" > /tmp/tak-report.md
+          ran=$?
           set -e
+          if [ "$ran" -ne 0 ]; then
+            echo 2 > /tmp/tak-gate-status
+          elif grep -q 'benchmark(s) above the .*% gate' /tmp/tak-report.md; then
+            echo 1 > /tmp/tak-gate-status
+          else
+            echo 0 > /tmp/tak-gate-status
+          fi
           cat /tmp/tak-report.md
           cat /tmp/tak-report.md >> "$GITHUB_STEP_SUMMARY"
 
@@ -320,7 +331,7 @@ jobs:
               ;;
             2)
               conclusion=failure
-              title='The comparison did not run'
+              title='The comparison did not run or failed'
               ;;
             *)
               # Reported, not failed: see the note at the top of this file.
@@ -342,7 +353,7 @@ jobs:
           case "$status" in
             0) ;;
             2)
-              echo "::error::the comparison never ran — an earlier step failed, so nothing was compared"
+              echo "::error::the comparison never ran or failed, so nothing was compared — see the job log"
               exit 1
               ;;
             *)
