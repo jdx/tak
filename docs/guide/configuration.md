@@ -112,6 +112,26 @@ which replaces the one in `[defaults]`. There is no matching `teardown`. The nex
 can clean up whatever the last one left, and keeping it around lets you inspect a subject's
 directory after a run.
 
+## Processes left running by setup, prepare or check
+
+A step is finished when its own process exits. tak doesn't wait for anything the step started
+in the background, and doesn't kill it either, so a `setup` can start a fixture server that
+stays up while samples are taken:
+
+```toml
+setup = ["sh", "-c", "./bench/serve-fixture & exit 0"]
+```
+
+- A process still running while samples are timed competes with them for the machine, and the
+  wall-clock timings will show it. Instruction counts cover only the measured command.
+- If the process keeps the step's stderr open, tak keeps reading it until the process closes
+  it or exits. That costs one idle thread and one pipe descriptor per process, with at most
+  4 KiB buffered. Nothing else it writes is kept or reaches disk, and tak never sends it a
+  signal.
+- A `prepare` or `check` runs for every sample, so one that starts a new long-lived process
+  each time is leaking processes. Redirect or daemonize them, for example
+  `["sh", "-c", "server 2>/dev/null & exit 0"]`, or start the server once from `setup`.
+
 ## Accepting other exit codes
 
 tak drops a subject when its command exits with anything but 0, because a failed run usually

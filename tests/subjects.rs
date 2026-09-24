@@ -1541,3 +1541,24 @@ fn a_failing_step_with_long_stderr_reports_its_last_line() {
         .unwrap();
     assert!(line.trim_end().ends_with(": final line"), "{line}");
 }
+
+/// A leftover process that keeps writing heavily to stderr after its step
+/// has exited neither blocks nor slows later samples: tak drains and
+/// discards what it writes, on a thread of its own.
+#[test]
+fn a_leftover_writing_lots_of_stderr_does_not_slow_the_run() {
+    let p = Project::new(
+        "bg-loud",
+        "[bench.cmp]\nwarmup = 0\nruns = 10\n[bench.cmp.subject.a]\ncmd = [\"sh\", \"-c\", \"echo run:a >> log\"]\nprepare = [\"sh\", \"-c\", \"yes filler | head -c 5000000 >&2 & exit 0\"]\n",
+    );
+    let start = std::time::Instant::now();
+    let out = p.run(&["--no-progress"]);
+    let took = start.elapsed();
+    assert!(
+        took < std::time::Duration::from_secs(3),
+        "took {took:?}: {}",
+        stderr(&out)
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(p.log().len(), 10);
+}
