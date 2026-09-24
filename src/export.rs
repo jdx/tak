@@ -53,9 +53,10 @@ pub struct ExportResult {
     pub max: f64,
     /// Every timed sample in seconds, in the order taken.
     pub times: Vec<f64>,
-    /// Always zero: a sample that fails drops its subject rather than being
-    /// kept, so every exported time is from a successful run. A failed
-    /// `check` is not a failed run, and is reported in `checks` instead.
+    /// What each sample exited with, aligned with `times`. Always one of the
+    /// subject's `ok_exit_codes` (0 unless it says otherwise): a sample that
+    /// exits with anything else drops its subject rather than being kept. A
+    /// failed `check` is not a failed run, and is reported in `checks`.
     pub exit_codes: Vec<i32>,
     /// The outcome of the subject's `check`, when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -83,6 +84,7 @@ impl Checks {
 }
 
 impl ExportResult {
+    /// A result whose samples all exited 0; see [`Self::with_exit_codes`].
     pub fn new(bench: &str, subject: &str, command: &str, samples_ms: &[f64]) -> Self {
         let times: Vec<f64> = samples_ms.iter().map(|ms| ms / 1000.0).collect();
         let mut sorted = times.clone();
@@ -112,6 +114,13 @@ impl ExportResult {
             times,
             checks: None,
         }
+    }
+
+    /// Record what each sample actually exited with, one per sample.
+    pub fn with_exit_codes(mut self, codes: &[i32]) -> Self {
+        debug_assert_eq!(codes.len(), self.times.len());
+        self.exit_codes = codes.to_vec();
+        self
     }
 
     /// Attach a subject's check outcomes, one per sample.
@@ -168,5 +177,13 @@ mod tests {
         assert_eq!(r.stddev, None);
         let json = serde_json::to_value(&r).unwrap();
         assert!(json["stddev"].is_null());
+    }
+
+    /// Each sample's real exit code is kept, in the order taken, rather than
+    /// assumed to be 0.
+    #[test]
+    fn exit_codes_are_what_each_sample_exited_with() {
+        let r = ExportResult::new("b", "s", "s", &[1.0, 2.0]).with_exit_codes(&[1, 0]);
+        assert_eq!(r.exit_codes, [1, 0]);
     }
 }

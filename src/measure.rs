@@ -13,7 +13,7 @@
 //! clock (~1%) but not deterministic, because they move with thread scheduling.
 //! They are recorded, and may be flagged, but must not gate at a tight threshold.
 
-use crate::config::{AutoRuns, Runs, SELF_TOOL, Subject};
+use crate::config::{AutoRuns, DEFAULT_OK_EXIT_CODES, Runs, SELF_TOOL, Subject};
 use crate::settings::Settings;
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
@@ -86,12 +86,44 @@ fn command(argv: &[String], site: &Site) -> Result<Command> {
     Ok(c)
 }
 
-/// Run once, discarding output, returning elapsed wall time in milliseconds.
+/// One successful run of a subject's timed command.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sample {
+    /// Elapsed wall time in milliseconds.
+    pub ms: f64,
+    /// What the command exited with: one of its `ok_exit_codes`, kept so the
+    /// export shows what actually happened rather than assuming 0.
+    pub exit_code: i32,
+}
+
+/// The exit code of a sample that counts, or the error that drops its
+/// subject.
+///
+/// A death by signal has no exit code and always fails: a subject that
+/// crashed or was killed did not do the work being measured, whatever its
+/// `ok_exit_codes` allow.
+fn accepted(bin: &str, status: std::process::ExitStatus, ok: &[i32], via: &str) -> Result<i32> {
+    match status.code() {
+        Some(code) if ok.contains(&code) => Ok(code),
+        // Name the accepted codes only when they are not the default, where
+        // "exited with 1" alone would leave the reader wondering why that
+        // was a failure.
+        _ if ok == DEFAULT_OK_EXIT_CODES => {
+            bail!("benchmark subject `{bin}` exited with {status}{via}")
+        }
+        _ => bail!(
+            "benchmark subject `{bin}` exited with {status}{via}, and ok_exit_codes is {}",
+            ok.iter().map(i32::to_string).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
+/// Run once, discarding output, returning elapsed wall time and exit code.
 ///
 /// No shell. Spawning a shell adds its own startup cost and variance to every
 /// sample, which for commands in the 10ms range is a large fraction of the
 /// measurement — the same reasoning behind poop's refusal to support one.
-fn time_once(cmd: &[String], site: &Site) -> Result<f64> {
+fn time_once(cmd: &[String], site: &Site, ok: &[i32]) -> Result<Sample> {
     let mut c = command(cmd, site)?;
     c.stdout(Stdio::null()).stderr(Stdio::null());
     let bin = &cmd[0];
@@ -99,11 +131,9 @@ fn time_once(cmd: &[String], site: &Site) -> Result<f64> {
     let status = c
         .status()
         .with_context(|| format!("failed to spawn `{bin}`"))?;
-    let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-    if !status.success() {
-        bail!("benchmark subject `{bin}` exited with {status}");
-    }
-    Ok(elapsed)
+    let ms = start.elapsed().as_secs_f64() * 1000.0;
+    let exit_code = accepted(bin, status, ok, "")?;
+    Ok(Sample { ms, exit_code })
 }
 
 /// How much of a failing prepare, setup or check step's stderr to keep for
@@ -140,6 +170,11 @@ fn check_once(cmd: &[String], site: &Site) -> Result<Option<String>> {
 /// Its output is not passed through: on a terminal it would tear up the
 /// progress bar, and in a log a setup that clones a fixture could bury the
 /// results. The tail of stderr is kept for the message.
+///
+/// Always judged by exit 0, whatever the subject's `ok_exit_codes` say: those
+/// describe the program being measured. A setup or reset that failed leaves
+/// every later sample starting from the wrong state, and a check passes only
+/// by exiting 0.
 fn untimed(step: &str, cmd: &[String], site: &Site) -> Result<Option<String>> {
     use std::io::Read;
 
@@ -271,6 +306,9 @@ pub struct Samples {
     /// Whether the subject's `check` passed after each timed sample, aligned
     /// with `times`. Empty when the subject has no check.
     pub checks: Vec<bool>,
+    /// What each timed sample exited with, aligned with `times`: always one
+    /// of the subject's `ok_exit_codes`.
+    pub exit_codes: Vec<i32>,
     /// Why the first failing check failed, for the warning that reports it.
     pub first_failure: Option<String>,
 }
@@ -434,7 +472,7 @@ fn run_slots(
             .prepare
             .as_deref()
             .map_or(Ok(()), |p| prepare_once(p, &site))
-            .and_then(|()| time_once(&s.cmd, &site));
+            .and_then(|()| time_once(&s.cmd, &site, &s.ok_exit_codes));
         let elapsed = began.elapsed();
         // Only after the clock has stopped: the check is outside the
         // measurement, however long it takes.
@@ -442,10 +480,11 @@ fn run_slots(
             (Ok(_), Some(check)) if slot.timed => check_once(check, &site).map(Some),
             _ => Ok(None),
         };
-        match taken.and_then(|ms| checked.map(|c| (ms, c))) {
-            Ok((ms, check)) => {
+        match taken.and_then(|sample| checked.map(|c| (sample, c))) {
+            Ok((sample, check)) => {
                 if slot.timed {
-                    samples.times.push(ms);
+                    samples.times.push(sample.ms);
+                    samples.exit_codes.push(sample.exit_code);
                 }
                 if let Some(failure) = check {
                     samples.checks.push(failure.is_none());
@@ -591,6 +630,7 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
         },
         warmup: plan.warmup,
         counters: false,
+        ok_exit_codes: DEFAULT_OK_EXIT_CODES.to_vec(),
     };
     // One subject has one possible order, so the seed is irrelevant.
     let samples = interleaved(
@@ -681,12 +721,13 @@ pub fn instructions(
             env: &BTreeMap::new(),
             settings,
         },
+        &DEFAULT_OK_EXIT_CODES,
     )
 }
 
-/// [`instructions`] for a declared subject: its environment, and its prepare
-/// step before every cachegrind run, since each run has to start from the
-/// same state the timed samples did.
+/// [`instructions`] for a declared subject: its environment, its
+/// `ok_exit_codes`, and its prepare step before every cachegrind run, since
+/// each run has to start from the same state the timed samples did.
 pub fn subject_instructions(s: &Subject, settings: &Settings) -> Result<Option<Counted>> {
     count(
         &s.cmd,
@@ -696,10 +737,18 @@ pub fn subject_instructions(s: &Subject, settings: &Settings) -> Result<Option<C
             env: &s.env,
             settings,
         },
+        &s.ok_exit_codes,
     )
 }
 
-fn count(cmd: &[String], prepare: Option<&[String]>, site: &Site) -> Result<Option<Counted>> {
+/// `ok` applies to the subject under valgrind: cachegrind exits with its
+/// client's code, and re-raises the signal a client died of.
+fn count(
+    cmd: &[String],
+    prepare: Option<&[String]>,
+    site: &Site,
+    ok: &[i32],
+) -> Result<Option<Counted>> {
     if !valgrind_available() {
         return Ok(None);
     }
@@ -725,13 +774,8 @@ fn count(cmd: &[String], prepare: Option<&[String]>, site: &Site) -> Result<Opti
 
         // cachegrind writes its summary to stderr as e.g. "I refs:  48,349,132".
         let stderr = String::from_utf8_lossy(&out.stderr);
-        if !out.status.success() {
-            let bin = cmd.first().map(String::as_str).unwrap_or("(empty command)");
-            bail!(
-                "benchmark subject `{bin}` exited with {} under valgrind",
-                out.status
-            );
-        }
+        let bin = cmd.first().map(String::as_str).unwrap_or("(empty command)");
+        accepted(bin, out.status, ok, " under valgrind")?;
         match parse_irefs(&stderr) {
             Some(n) => samples.push(n),
             // Valgrind is installed but produced no summary — a real failure,
@@ -973,6 +1017,7 @@ mod tests {
             },
             warmup: 1,
             counters: false,
+            ok_exit_codes: vec![0],
         };
         let res = interleaved(
             &[mk("ok", &["true"]), mk("bad", &["false"])],
@@ -1012,6 +1057,7 @@ mod tests {
                 },
                 warmup: 0,
                 counters: false,
+                ok_exit_codes: vec![0],
             }],
             0,
             &Settings::default(),
@@ -1053,6 +1099,7 @@ mod tests {
             },
             warmup,
             counters: false,
+            ok_exit_codes: vec![0],
         }
     }
 
@@ -1082,6 +1129,24 @@ mod tests {
         );
         let checked = std::fs::read_to_string(dir.path().join("checked")).unwrap();
         assert_eq!(checked.lines().count(), 6, "no check after the warmup");
+    }
+
+    /// `ok_exit_codes` belong to the command, not its check: a command that
+    /// exits 1 under `[0, 1]` is kept with its code, and a check that exits 1
+    /// is still a failed check.
+    #[cfg(unix)]
+    #[test]
+    fn ok_exit_codes_do_not_pass_a_check_that_exits_1() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = alternating(dir.path(), 0, 2);
+        s.cmd = vec!["/bin/sh".into(), "-c".into(), "exit 1".into()];
+        s.check = Some(vec!["/bin/sh".into(), "-c".into(), "exit 1".into()]);
+        s.ok_exit_codes = vec![0, 1];
+        let res = interleaved(&[s], 0, &Settings::default(), &mut Quiet);
+        let s = res[0].as_ref().unwrap();
+        assert_eq!(s.exit_codes, [1, 1]);
+        assert_eq!(s.checks, [false, false]);
+        assert_eq!(s.passed(), 0);
     }
 
     /// A check that cannot be started is a configuration mistake, not six
@@ -1148,6 +1213,7 @@ mod tests {
             },
             warmup: 1,
             counters: false,
+            ok_exit_codes: vec![0],
         };
         let mut log = Log::default();
         let res = interleaved(
@@ -1196,6 +1262,7 @@ mod tests {
             },
             warmup,
             counters: false,
+            ok_exit_codes: vec![0],
         };
         let mut log = Log::default();
         // The slow one has no warmup, so its first kept sample sizes it.
