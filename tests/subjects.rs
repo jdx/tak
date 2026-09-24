@@ -1372,6 +1372,80 @@ check = ["false"]
     assert!(!git(&["notes", "--ref=tak", "list"]).is_empty());
 }
 
+/// A step that leaves something running in the background which holds its
+/// stderr open. `sleep 30 >&2 &` outlives the step by far more than the run
+/// is allowed to take, so a tak waiting for stderr to close would hang here.
+const LEAVES_STDERR_OPEN: &str = r#"["sh", "-c", "sleep 30 >&2 & exit 0"]"#;
+
+/// Runs a one-subject benchmark with `step` set to [`LEAVES_STDERR_OPEN`],
+/// returning tak's output once it finishes well before the sleep would.
+fn run_with_background_step(name: &str, step: &str) -> Output {
+    let p = Project::new(
+        name,
+        &format!(
+            "[bench.cmp]\nwarmup = 0\nruns = 1\n[bench.cmp.subject.a]\ncmd = [\"sh\", \"-c\", \"echo run:a >> log\"]\n{step} = {LEAVES_STDERR_OPEN}\n"
+        ),
+    );
+    let start = std::time::Instant::now();
+    let out = p.run(&["--no-progress"]);
+    let took = start.elapsed();
+    assert!(
+        took < std::time::Duration::from_secs(10),
+        "{step} with a background process took {took:?}: {}",
+        stderr(&out)
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(p.log(), ["run:a"]);
+    out
+}
+
+/// A prepare whose background process keeps its stderr open is done when the
+/// prepare itself exits.
+#[test]
+fn a_prepare_leaving_stderr_open_does_not_hang() {
+    run_with_background_step("bg-prepare", "prepare");
+}
+
+/// Likewise a setup — which tak does not kill, since starting a fixture
+/// server is a reasonable thing for one to do.
+#[test]
+fn a_setup_leaving_stderr_open_does_not_hang() {
+    run_with_background_step("bg-setup", "setup");
+}
+
+/// Likewise a check, which passes on its exit status.
+#[test]
+fn a_check_leaving_stderr_open_does_not_hang() {
+    let out = run_with_background_step("bg-check", "check");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("n=1  checks 1/1"), "{stdout}");
+}
+
+/// A failing step that backgrounds a process still reports what it wrote to
+/// stderr before exiting.
+#[test]
+fn a_failing_step_leaving_stderr_open_keeps_its_message() {
+    let p = Project::new(
+        "bg-fails",
+        &format!(
+            "[bench.cmp]\nwarmup = 0\n{}\n[bench.cmp.subject.broken]\ncmd = [\"sh\", \"-c\", \"echo run:broken >> log\"]\nsetup = [\"sh\", \"-c\", \"echo no fixture >&2; sleep 30 >&2 & exit 1\"]\n",
+            logging_subject("a", 1)
+        ),
+    );
+    let start = std::time::Instant::now();
+    let out = p.run(&["--no-progress"]);
+    let took = start.elapsed();
+    assert!(took < std::time::Duration::from_secs(10), "took {took:?}");
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(
+        err.contains("cmp (broken) dropped")
+            && err.contains("setup `sh` exited with")
+            && err.contains(": no fixture"),
+        "{err}"
+    );
+}
+
 /// A subject that exits 1 by design, like pre-commit after a hook modified
 /// files, is kept when `ok_exit_codes` allows it, warmups included, and its
 /// real exit codes are exported. Without the setting the same command is
@@ -1633,4 +1707,54 @@ ok_exit_codes = [0, 1]
     let r = &json["results"][0];
     assert_eq!(r["exit_codes"], serde_json::json!([1, 1]));
     assert_eq!(r["checks"]["passed"], 0);
+}
+
+/// A passing prepare and check that leave a process holding stderr cost a
+/// sample nothing extra: tak moves on as soon as each step exits.
+#[test]
+fn passing_steps_leaving_stderr_open_add_no_delay() {
+    let p = Project::new(
+        "bg-many",
+        &format!(
+            "[bench.cmp]\nwarmup = 0\nruns = 10\n[bench.cmp.subject.a]\ncmd = [\"sh\", \"-c\", \"echo run:a >> log\"]\nprepare = {LEAVES_STDERR_OPEN}\ncheck = {LEAVES_STDERR_OPEN}\n"
+        ),
+    );
+    let start = std::time::Instant::now();
+    let out = p.run(&["--no-progress"]);
+    let took = start.elapsed();
+    // 10 prepares and 10 checks, each with a background sleep; waiting even
+    // 500 ms after each would take 10 s.
+    assert!(
+        took < std::time::Duration::from_secs(2),
+        "took {took:?}: {}",
+        stderr(&out)
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("checks 10/10"));
+    assert_eq!(p.log().len(), 10);
+}
+
+/// A failing step's message comes from the end of its stderr, however much
+/// it wrote first.
+#[test]
+fn a_failing_step_with_long_stderr_reports_its_last_line() {
+    let p = Project::new(
+        "long-stderr",
+        &format!(
+            "[bench.cmp]\nwarmup = 0\n{}\n[bench.cmp.subject.broken]\ncmd = [\"sh\", \"-c\", \"echo run:broken >> log\"]\nsetup = [\"sh\", \"-c\", \"{{ yes filler | head -c 10000; echo; echo final line; }} >&2; exit 1\"]\n",
+            logging_subject("a", 1)
+        ),
+    );
+    let out = p.run(&["--no-progress"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(
+        err.contains("cmp (broken) dropped") && err.contains("setup `sh` exited with"),
+        "{err}"
+    );
+    let line = err
+        .lines()
+        .find(|l| l.contains("setup `sh` exited with"))
+        .unwrap();
+    assert!(line.trim_end().ends_with(": final line"), "{line}");
 }
