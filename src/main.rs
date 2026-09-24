@@ -467,9 +467,14 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
             })
             .collect::<Result<Vec<_>>>()?;
         for s in &mut subjects {
-            // Only for what runs: a portable tak.toml may list Windows codes
-            // next to Unix ones. A list with none possible failed at load.
-            let impossible = config::impossible_exit_codes(&s.ok_exit_codes, cfg!(unix));
+            // Only for what runs, after `when`, --bench and --subject, and
+            // before anything is set up or sampled: a portable tak.toml may
+            // hold a Windows-only subject, or list Windows codes next to Unix
+            // ones. A list with no possible code at all fails the run here,
+            // dry run included, rather than dropping the subject at its
+            // first sample.
+            let impossible = config::check_platform_exit_codes(&s.ok_exit_codes, cfg!(unix))
+                .with_context(|| format!("benchmark `{name}`, subject `{}`", s.name))?;
             if !impossible.is_empty() {
                 let range = config::exit_code_range(cfg!(unix)).expect("narrowed");
                 eprintln!(

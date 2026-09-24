@@ -1054,3 +1054,67 @@ warmup = 0
         stderr(&out)
     );
 }
+
+/// A Windows-only benchmark whose codes are all impossible on Unix neither
+/// stops the file loading nor blocks another benchmark, because `when` keeps
+/// it from running. Selected without a `when`, the same subject fails before
+/// its setup or any sample runs, in a dry run too; left out with
+/// `--subject`, it is not checked.
+#[test]
+fn ok_exit_codes_impossible_here_are_only_checked_for_what_runs() {
+    let p = Project::new(
+        "ok-exit-platform",
+        r#"
+[bench.windows]
+when = 'os == "windows"'
+cmd = ["cmd", "/C", "exit 1"]
+ok_exit_codes = [-1073741819]
+
+[bench.unix]
+cmd = ["sh", "-c", "echo ran:unix >> log"]
+runs = 1
+warmup = 0
+
+[bench.cmp]
+runs = 1
+warmup = 0
+
+[bench.cmp.subject.win]
+cmd = ["sh", "-c", "echo ran:win >> log"]
+setup = ["sh", "-c", "echo setup:win >> log"]
+ok_exit_codes = [-1073741819]
+
+[bench.cmp.subject.ok]
+cmd = ["sh", "-c", "echo ran:ok >> log"]
+"#,
+    );
+
+    // (a) The Windows-only benchmark is skipped and the Unix one runs.
+    let out = p.run(&["--bench", "unix", "--no-progress"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = p.run(&["--bench", "windows", "--no-progress"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(p.log(), ["ran:unix"]);
+
+    // (b) Selected on Unix, it fails before setup or any sample.
+    for args in [
+        &["--bench", "cmp", "--no-progress"][..],
+        &["--bench", "cmp", "--dry-run"][..],
+    ] {
+        let out = p.run(args);
+        assert!(!out.status.success(), "{args:?}");
+        let err = stderr(&out);
+        assert!(
+            err.contains("benchmark `cmp`, subject `win`")
+                && err.contains("-1073741819 can never match")
+                && err.contains("0 to 255"),
+            "{err}"
+        );
+    }
+    assert_eq!(p.log(), ["ran:unix"], "nothing of cmp ran");
+
+    // (c) Left out with --subject, it is not checked.
+    let out = p.run(&["--bench", "cmp", "--subject", "ok", "--no-progress"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(p.log(), ["ran:unix", "ran:ok"]);
+}

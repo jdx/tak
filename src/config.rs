@@ -594,14 +594,6 @@ fn resolve(
     })
 }
 
-/// Check `ok_exit_codes` as written, returning it sorted and deduplicated.
-///
-/// The range is whatever `ExitStatus::code()` can report, which is an `i32`.
-/// Unix only ever reports 0–255, but Windows passes a program's 32-bit exit
-/// code through, and an NTSTATUS such as 0xC0000005 arrives negative
-/// (-1073741819); limiting the list to 0–255 would make those unlistable.
-/// An empty list would fail every sample, so it is an error here rather than
-/// a confusing run.
 /// The range of exit codes a platform can report, when narrower than `i32`:
 /// Unix keeps only the low 8 bits of a process's status. `None` where the
 /// whole `i32` range is possible, as on Windows.
@@ -614,7 +606,7 @@ pub fn exit_code_range(unix: bool) -> Option<std::ops::RangeInclusive<i32>> {
 /// A `tak.toml` shared between platforms may list a Windows code next to
 /// Unix ones, such as `[0, 1, -1073741819]`, so some impossible codes are
 /// only worth a warning. A list with *no* possible code would drop the
-/// subject at its first sample, which is a mistake to catch at load.
+/// subject at its first sample, which is a mistake to catch before it runs.
 pub fn impossible_exit_codes(codes: &[i32], unix: bool) -> Vec<i32> {
     match exit_code_range(unix) {
         Some(range) => codes
@@ -626,8 +618,15 @@ pub fn impossible_exit_codes(codes: &[i32], unix: bool) -> Vec<i32> {
     }
 }
 
-/// Fail when no code in `codes` is possible on this platform.
-fn check_possible_exit_codes(codes: &[i32], unix: bool) -> Result<()> {
+/// Check a subject's resolved `ok_exit_codes` against a platform: fail when
+/// none of them is possible there, otherwise return the ones that are not,
+/// for a warning.
+///
+/// Not part of loading `tak.toml`. A shared file may hold a Windows-only
+/// subject, switched off elsewhere by `when`, whose codes are all impossible
+/// on Unix; checking it at load would stop every other benchmark from
+/// running there. `tak run` calls this only for the subjects it will measure.
+pub fn check_platform_exit_codes(codes: &[i32], unix: bool) -> Result<Vec<i32>> {
     let impossible = impossible_exit_codes(codes, unix);
     if !impossible.is_empty() && impossible.len() == codes.len() {
         let range = exit_code_range(unix).expect("only a narrowed range rules codes out");
@@ -638,7 +637,7 @@ fn check_possible_exit_codes(codes: &[i32], unix: bool) -> Result<()> {
             range.end()
         );
     }
-    Ok(())
+    Ok(impossible)
 }
 
 /// Exit codes for a message: `0, 1`.
@@ -650,6 +649,14 @@ pub fn join_codes(codes: &[i32]) -> String {
         .join(", ")
 }
 
+/// Check `ok_exit_codes` as written, returning it sorted and deduplicated.
+///
+/// The range is whatever `ExitStatus::code()` can report, which is an `i32`.
+/// Unix only ever reports 0–255, but Windows passes a program's 32-bit exit
+/// code through, and an NTSTATUS such as 0xC0000005 arrives negative
+/// (-1073741819); limiting the list to 0–255 would make those unlistable.
+/// An empty list would fail every sample, so it is an error here rather than
+/// a confusing run.
 fn ok_exit_codes(codes: &[i64]) -> Result<Vec<i32>> {
     if codes.is_empty() {
         bail!("ok_exit_codes must list at least one exit code");
@@ -696,10 +703,6 @@ impl Config {
                 .subjects(name)
                 .with_context(|| format!("benchmark `{name}`"))?;
             for s in &subjects {
-                // Checked on the resolved list, since that is what a sample
-                // is held to: a layer's impossible code may be overridden.
-                check_possible_exit_codes(&s.ok_exit_codes, cfg!(unix))
-                    .with_context(|| format!("benchmark `{name}`, subject `{}`", s.name))?;
                 // Zero runs leaves nothing to report; catching it here names
                 // the benchmark instead of failing after the others ran.
                 if s.runs == Runs::Fixed(0) {
@@ -1311,34 +1314,24 @@ cmd = "mycli 'two words'""#,
         assert!(impossible_exit_codes(&[0, 1, -1073741819, 256], false).is_empty());
 
         assert!(
-            check_possible_exit_codes(&[0, 256], true).is_ok(),
+            check_platform_exit_codes(&[0, 256], true).is_ok(),
             "some possible"
         );
-        let err = check_possible_exit_codes(&[256, -1], true).unwrap_err();
+        let err = check_platform_exit_codes(&[256, -1], true).unwrap_err();
         assert!(format!("{err:#}").contains("0 to 255"), "{err:#}");
         assert!(
-            check_possible_exit_codes(&[256, -1], false).is_ok(),
+            check_platform_exit_codes(&[256, -1], false).is_ok(),
             "fine on Windows"
         );
-        assert!(check_possible_exit_codes(&[i32::MIN, i32::MAX], false).is_ok());
+        assert!(check_platform_exit_codes(&[i32::MIN, i32::MAX], false).is_ok());
     }
 
-    /// Checked on the resolved list at load, naming the subject.
-    #[cfg(unix)]
+    /// Only the platform-independent checks run at load: a Windows-only
+    /// subject whose codes are all impossible on Unix still loads, since
+    /// `when` may keep it from ever running there.
     #[test]
-    fn a_list_with_no_possible_code_is_rejected_at_load_on_unix() {
-        let err =
-            Config::parse("[bench.b.subject.win]\ncmd = \"x\"\nok_exit_codes = [-1073741819]")
-                .unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("`win`") && msg.contains("0 to 255"), "{msg}");
-        // A portable list with a Unix code in it loads.
-        Config::parse("[bench.b]\ncmd = \"x\"\nok_exit_codes = [0, 1, -1073741819]").unwrap();
-        // An impossible layer that a more specific one replaces is fine.
-        Config::parse(
-            "[defaults]\nok_exit_codes = [256]\n[bench.b.subject.x]\ncmd = \"x\"\nok_exit_codes = [1]",
-        )
-        .unwrap();
+    fn a_list_impossible_here_still_loads() {
+        Config::parse("[bench.b.subject.win]\ncmd = \"x\"\nok_exit_codes = [-1073741819]").unwrap();
     }
 
     /// A list that could never match a real exit status would fail every

@@ -139,8 +139,11 @@ ok_exit_codes = [0, 1]   # 1: a hook modified files, which is the case being mea
   such as `0xC0000005` as its negative decimal value, `-1073741819`.
 - A `tak.toml` shared between platforms can list both, such as `[0, 1, -1073741819]`. On Unix,
   tak warns about the codes that can never match there and runs with the rest. If none of a
-  subject's codes can match on the current platform, loading `tak.toml` fails and names the
-  subject.
+  subject's codes can match on the current platform, `tak run` fails before any `setup` or
+  sample runs, naming the benchmark and subject. `--dry-run` reports the same warning or
+  error. Both checks only cover the subjects being run, after `when`, `--bench` and `--subject`
+  are applied, so a Windows-only subject switched off with `when = 'os == "windows"'` doesn't
+  stop the rest of the file from running on Unix.
 
 ## Comparing several programs
 
