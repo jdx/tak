@@ -13,6 +13,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub const FILE_NAME: &str = "tak.toml";
 
@@ -20,6 +21,15 @@ pub const FILE_NAME: &str = "tak.toml";
 /// does not silently change what it measures.
 pub const DEFAULT_RUNS: u32 = 20;
 pub const DEFAULT_WARMUP: u32 = 3;
+
+/// `runs = "auto"` defaults: about this much wall time per subject, prepare
+/// included, and never fewer or more runs than these. The floor keeps a slow
+/// competitor's result from resting on one or two samples; the ceiling stops
+/// a millisecond-scale subject from spending the whole budget on runs that
+/// stopped adding information long before.
+pub const DEFAULT_BUDGET: Duration = Duration::from_secs(30);
+pub const DEFAULT_MIN_RUNS: u32 = 5;
+pub const DEFAULT_MAX_RUNS: u32 = 50;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -40,8 +50,15 @@ pub struct Bench {
     /// `subject`, which declares several programs measured against each other.
     #[serde(default)]
     cmd: Option<Cmd>,
-    pub runs: Option<u32>,
+    /// A count, or `"auto"` to size each subject from its own speed.
+    pub runs: Option<RunsDecl>,
     pub warmup: Option<u32>,
+    /// `runs = "auto"`: wall time to spend per subject, as `30s`, `2m`, `500ms`.
+    pub budget: Option<String>,
+    /// `runs = "auto"`: fewest runs any subject gets.
+    pub min_runs: Option<u32>,
+    /// `runs = "auto"`: most runs any subject gets.
+    pub max_runs: Option<u32>,
     /// Untimed command run before every sample. On a multi-subject benchmark
     /// this is the default for subjects that do not declare their own.
     #[serde(default)]
@@ -70,8 +87,11 @@ pub struct SubjectDecl {
     dir: Option<PathBuf>,
     #[serde(default)]
     env: BTreeMap<String, String>,
-    runs: Option<u32>,
+    runs: Option<RunsDecl>,
     warmup: Option<u32>,
+    budget: Option<String>,
+    min_runs: Option<u32>,
+    max_runs: Option<u32>,
     /// Opt in to instruction counting. Off by default because a
     /// multi-subject benchmark usually compares against other people's
     /// programs, whose instruction counts are not this project's to gate on:
@@ -108,6 +128,92 @@ impl Cmd {
     }
 }
 
+/// `runs` as written: a count, or a word. Only `"auto"` is a valid word,
+/// checked when the subject is resolved so the error names it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum RunsDecl {
+    Count(u32),
+    Word(String),
+}
+
+impl RunsDecl {
+    fn resolve(&self) -> Result<Runs> {
+        match self {
+            RunsDecl::Count(n) => Ok(Runs::Fixed(*n)),
+            RunsDecl::Word(w) if w == "auto" => Ok(Runs::Auto),
+            RunsDecl::Word(w) => bail!("runs must be a number or \"auto\", not {w:?}"),
+        }
+    }
+}
+
+/// How many timed runs a subject gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Runs {
+    Fixed(u32),
+    /// Decided after the warmups, from how long one sample takes: see
+    /// [`AutoRuns`].
+    Auto,
+}
+
+impl std::str::FromStr for Runs {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        if s == "auto" {
+            return Ok(Runs::Auto);
+        }
+        s.parse()
+            .map(Runs::Fixed)
+            .map_err(|_| anyhow::anyhow!("runs must be a number or \"auto\", not {s:?}"))
+    }
+}
+
+/// The limits `runs = "auto"` works within. Resolved for every subject, so
+/// `tak run --runs auto` can switch a fixed benchmark over without the file
+/// having to declare them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoRuns {
+    pub budget: Duration,
+    pub min: u32,
+    pub max: u32,
+}
+
+impl AutoRuns {
+    /// Runs for a subject whose samples take `slot` each, prepare included:
+    /// as many as fit in the budget, within `min..=max`.
+    pub fn runs_for(&self, slot: Duration) -> u32 {
+        let fit = if slot.is_zero() {
+            u64::from(self.max)
+        } else {
+            (self.budget.as_secs_f64() / slot.as_secs_f64()) as u64
+        };
+        fit.clamp(u64::from(self.min), u64::from(self.max)) as u32
+    }
+}
+
+/// Parse `500ms`, `30s`, `2m` or `1h`; a bare number is seconds.
+pub fn parse_duration(text: &str) -> Result<Duration> {
+    let t = text.trim();
+    let split = t
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(t.len());
+    let (num, unit) = t.split_at(split);
+    let n: f64 = num
+        .parse()
+        .map_err(|_| anyhow::anyhow!("not a duration: {text:?} (try `30s` or `2m`)"))?;
+    let secs = match unit.trim() {
+        "ms" => n / 1000.0,
+        "" | "s" => n,
+        "m" => n * 60.0,
+        "h" => n * 3600.0,
+        _ => bail!("not a duration: {text:?} (units are ms, s, m, h)"),
+    };
+    if !secs.is_finite() || secs <= 0.0 {
+        bail!("a duration must be positive: {text:?}");
+    }
+    Ok(Duration::from_secs_f64(secs))
+}
+
 /// The name a single-command benchmark records under. `compare` renders this
 /// tool as the bare benchmark name.
 pub const SELF_TOOL: &str = "self";
@@ -122,7 +228,9 @@ pub struct Subject {
     /// Relative to `tak.toml`; the caller resolves it.
     pub dir: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
-    pub runs: u32,
+    pub runs: Runs,
+    /// The limits `Runs::Auto` works within.
+    pub auto: AutoRuns,
     pub warmup: u32,
     pub counters: bool,
 }
@@ -176,7 +284,8 @@ impl Bench {
                 prepare: self.prepare.as_ref().map(Cmd::argv).transpose()?,
                 dir: self.dir.clone(),
                 env: self.env.clone(),
-                runs: self.runs(),
+                runs: self.runs()?,
+                auto: self.auto(None, None, None)?,
                 warmup: self.warmup(),
                 counters: true,
             }]),
@@ -197,7 +306,11 @@ impl Bench {
                             prepare: prepare.map(Cmd::argv).transpose()?,
                             dir: s.dir.clone().or_else(|| self.dir.clone()),
                             env,
-                            runs: s.runs.unwrap_or_else(|| self.runs()),
+                            runs: match &s.runs {
+                                Some(r) => r.resolve()?,
+                                None => self.runs()?,
+                            },
+                            auto: self.auto(s.budget.as_deref(), s.min_runs, s.max_runs)?,
                             warmup: s.warmup.unwrap_or_else(|| self.warmup()),
                             counters: s.counters,
                         })
@@ -208,8 +321,31 @@ impl Bench {
         }
     }
 
-    pub fn runs(&self) -> u32 {
-        self.runs.unwrap_or(DEFAULT_RUNS)
+    pub fn runs(&self) -> Result<Runs> {
+        self.runs
+            .as_ref()
+            .map_or(Ok(Runs::Fixed(DEFAULT_RUNS)), RunsDecl::resolve)
+    }
+
+    /// The auto-run limits, a subject's own values over the benchmark's over
+    /// the defaults.
+    fn auto(&self, budget: Option<&str>, min: Option<u32>, max: Option<u32>) -> Result<AutoRuns> {
+        let budget = match budget.or(self.budget.as_deref()) {
+            Some(b) => parse_duration(b).context("budget")?,
+            None => DEFAULT_BUDGET,
+        };
+        let a = AutoRuns {
+            budget,
+            min: min.or(self.min_runs).unwrap_or(DEFAULT_MIN_RUNS),
+            max: max.or(self.max_runs).unwrap_or(DEFAULT_MAX_RUNS),
+        };
+        if a.min == 0 {
+            bail!("min_runs must be at least 1");
+        }
+        if a.min > a.max {
+            bail!("min_runs ({}) is more than max_runs ({})", a.min, a.max);
+        }
+        Ok(a)
     }
 
     pub fn warmup(&self) -> u32 {
@@ -229,7 +365,7 @@ impl Config {
             for s in &subjects {
                 // Zero runs leaves nothing to report; catching it here names
                 // the benchmark instead of failing after the others ran.
-                if s.runs == 0 {
+                if s.runs == Runs::Fixed(0) {
                     bail!("benchmark `{name}`: runs must be at least 1");
                 }
                 if s.name.trim().is_empty() {
@@ -307,14 +443,14 @@ cmd = "mycli 'two words'""#,
     #[test]
     fn defaults_match_the_cli() {
         let c = Config::parse("[bench.a]\ncmd = \"x\"").unwrap();
-        assert_eq!(c.bench["a"].runs(), DEFAULT_RUNS);
+        assert_eq!(c.bench["a"].runs().unwrap(), Runs::Fixed(DEFAULT_RUNS));
         assert_eq!(c.bench["a"].warmup(), DEFAULT_WARMUP);
     }
 
     #[test]
     fn per_benchmark_overrides_win() {
         let c = Config::parse("[bench.a]\ncmd = \"x\"\nruns = 5\nwarmup = 1").unwrap();
-        assert_eq!(c.bench["a"].runs(), 5);
+        assert_eq!(c.bench["a"].runs().unwrap(), Runs::Fixed(5));
         assert_eq!(c.bench["a"].warmup(), 1);
     }
 
@@ -402,7 +538,7 @@ cmd = "mycli 'two words'""#,
         assert_eq!(s[0].dir.as_deref(), Some(Path::new("fixture")));
         assert_eq!(s[0].env["CI"], "1");
         assert_eq!(s[0].env["HOME"], "/tmp/aube");
-        assert_eq!((s[0].runs, s[0].warmup), (6, 2));
+        assert_eq!((s[0].runs, s[0].warmup), (Runs::Fixed(6), 2));
         assert!(!s[0].counters, "named subjects count only when asked to");
 
         assert_eq!(
@@ -411,7 +547,7 @@ cmd = "mycli 'two words'""#,
         );
         assert_eq!(s[1].dir.as_deref(), Some(Path::new("fixture-pnpm")));
         assert_eq!(s[1].env["HOME"], "/tmp/shared");
-        assert_eq!((s[1].runs, s[1].warmup), (3, 0));
+        assert_eq!((s[1].runs, s[1].warmup), (Runs::Fixed(3), 0));
         assert!(s[1].counters);
     }
 
@@ -490,5 +626,82 @@ cmd = "mycli 'two words'""#,
             "a bare name is still looked up on PATH"
         );
         assert_eq!(bare.dir.unwrap(), Path::new("/repo"));
+    }
+
+    #[test]
+    fn runs_may_be_auto_with_limits_inherited_and_overridden() {
+        let c = Config::parse(
+            r#"
+            [bench.b]
+            runs = "auto"
+            budget = "2m"
+            min_runs = 3
+
+            [bench.b.subject.fast]
+            cmd = "x"
+
+            [bench.b.subject.slow]
+            cmd = "y"
+            max_runs = 10
+            budget = "500ms"
+
+            [bench.b.subject.pinned]
+            cmd = "z"
+            runs = 7
+            "#,
+        )
+        .unwrap();
+        let s = c.bench["b"].subjects().unwrap();
+        let by = |n: &str| s.iter().find(|x| x.name == n).unwrap();
+        assert_eq!(by("fast").runs, Runs::Auto);
+        assert_eq!(
+            by("fast").auto,
+            AutoRuns {
+                budget: Duration::from_secs(120),
+                min: 3,
+                max: DEFAULT_MAX_RUNS
+            }
+        );
+        assert_eq!(by("slow").auto.budget, Duration::from_millis(500));
+        assert_eq!((by("slow").auto.min, by("slow").auto.max), (3, 10));
+        assert_eq!(by("pinned").runs, Runs::Fixed(7));
+    }
+
+    #[test]
+    fn bad_auto_settings_are_rejected_at_parse_time() {
+        for bad in [
+            "runs = \"lots\"",
+            "runs = \"auto\"\nbudget = \"soon\"",
+            "runs = \"auto\"\nbudget = \"0s\"",
+            "runs = \"auto\"\nmin_runs = 0",
+            "runs = \"auto\"\nmin_runs = 9\nmax_runs = 3",
+        ] {
+            let toml = format!("[bench.a]\ncmd = \"x\"\n{bad}");
+            assert!(Config::parse(&toml).is_err(), "accepted: {bad}");
+        }
+    }
+
+    #[test]
+    fn durations_take_the_common_units() {
+        assert_eq!(parse_duration("500ms").unwrap(), Duration::from_millis(500));
+        assert_eq!(parse_duration("30s").unwrap(), Duration::from_secs(30));
+        assert_eq!(parse_duration("45").unwrap(), Duration::from_secs(45));
+        assert_eq!(parse_duration("2m").unwrap(), Duration::from_secs(120));
+        assert_eq!(parse_duration("1.5h").unwrap(), Duration::from_secs(5400));
+    }
+
+    /// A slow subject is held at the floor, a fast one at the ceiling, and
+    /// anything between gets what fits in the budget.
+    #[test]
+    fn auto_runs_fit_the_budget_within_the_limits() {
+        let a = AutoRuns {
+            budget: Duration::from_secs(30),
+            min: 5,
+            max: 50,
+        };
+        assert_eq!(a.runs_for(Duration::from_millis(1700)), 17);
+        assert_eq!(a.runs_for(Duration::from_secs(21)), 5);
+        assert_eq!(a.runs_for(Duration::from_millis(300)), 50);
+        assert_eq!(a.runs_for(Duration::ZERO), 50);
     }
 }

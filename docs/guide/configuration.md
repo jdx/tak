@@ -78,6 +78,45 @@ order, rather than every sample of one subject and then the next. See
 - If a subject fails, tak drops it and keeps measuring the others. The run then exits non-zero
   and `--record` writes nothing, because a partial set of measurements would look complete.
 
+### Choosing the number of runs
+
+Programs in one comparison can differ in speed by a factor of 50: a
+300 ms install next to a 20 s one. A fixed `runs` either spends minutes on the slow program or
+leaves the fast one under-sampled. `runs = "auto"` lets tak decide per subject:
+
+```toml
+[bench.install]
+runs = "auto"
+budget = "30s"   # wall time to spend per subject, prepare included (default 30s)
+min_runs = 5     # never fewer (default 5)
+max_runs = 50    # never more (default 50)
+```
+
+After the warmups, tak times each subject and gives it as many runs as fit in `budget`, within
+`min_runs` and `max_runs`. With the defaults, a 1.7 s install gets 17 runs and a 21 s one gets
+the minimum of 5. A subject with `warmup = 0` is sized from its first real sample, which still
+counts toward its runs. Each sample is measured from the start of its `prepare` step, because
+that's how long it actually takes.
+
+`budget`, `min_runs` and `max_runs` can be set on the benchmark or per subject, and a subject
+can still fix its own `runs`. `tak run --runs auto` switches a benchmark to auto for one run.
+Because the counts depend on measured timings, `--seed` only repeats the same order when the
+counts come out the same.
+
+### Output
+
+While a benchmark runs, tak shows progress on stderr: a bar in a terminal, or a plain line
+every tenth of the way (or every 30 seconds) anywhere else, such as CI logs. The time
+remaining is estimated separately for each subject from its own samples so far, so a slow
+subject's remaining samples are counted at its own speed. Pass `--no-progress` to turn it off.
+A multi-subject benchmark prints one summary line per subject:
+
+```
+  install: 2 subjects, interleaved (--seed 1234)
+    mycli      min    256.25  p50    257.13  mean    261.78 ± 8.82     max    271.95 ms  n=17
+    othertool  min    848.03  p50    883.24  mean    865.64 ± 24.90    max    883.24 ms  n=5
+```
+
 Every multi-subject run prints its seed. Pass it back with `--seed` to repeat an order.
 `--subject NAME` limits a run to the named subjects, and `--export-json PATH` writes every sample
 in hyperfine's `--export-json` shape, with `bench` and `subject` fields added:

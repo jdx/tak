@@ -28,14 +28,15 @@ cmd run help="Benchmark a command, or everything declared in tak.toml." {
     flag --bench help="Name to record this measurement under. With no command, selects a single benchmark from tak.toml instead of running all of them." {
         arg <BENCH>
     }
-    flag --runs help="Timed runs. Overrides tak.toml when both are given." {
-        arg <RUNS>
+    flag --runs help="Timed runs, or `auto` to size each subject from how long its samples take. Overrides tak.toml when both are given." {
+        arg <N|auto>
     }
     flag --warmup help="Untimed warmup runs. Overrides tak.toml when both are given." {
         arg <WARMUP>
     }
     flag --no-counters help="Skip instruction counting even where valgrind is available."
     flag --record help="Append the result to refs/notes/tak for the current commit."
+    flag --no-progress help="Do not report progress on stderr."
     flag --subject help="Measure only this subject of each multi-subject benchmark. Repeatable. Benchmarks with none of the named subjects are skipped." var=#true {
         arg <NAME>
     }

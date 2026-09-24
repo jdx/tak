@@ -103,9 +103,9 @@
           },
           {
             "name": "runs",
-            "usage": "--runs <RUNS>",
-            "help": "Timed runs. Overrides tak.toml when both are given.",
-            "help_first_line": "Timed runs. Overrides tak.toml when both are given.",
+            "usage": "--runs <N|auto>",
+            "help": "Timed runs, or `auto` to size each subject from how long its samples take. Overrides tak.toml when both are given.",
+            "help_first_line": "Timed runs, or `auto` to size each subject from how long its samples take. Overrides tak.toml when both are given.",
             "short": [],
             "long": [
               "runs"
@@ -113,8 +113,8 @@
             "hide": false,
             "global": false,
             "arg": {
-              "name": "RUNS",
-              "usage": "<RUNS>",
+              "name": "N|auto",
+              "usage": "<N|auto>",
               "required": true,
               "double_dash": "Optional",
               "hide": false
@@ -159,6 +159,18 @@
             "short": [],
             "long": [
               "record"
+            ],
+            "hide": false,
+            "global": false
+          },
+          {
+            "name": "no-progress",
+            "usage": "--no-progress",
+            "help": "Do not report progress on stderr.",
+            "help_first_line": "Do not report progress on stderr.",
+            "short": [],
+            "long": [
+              "no-progress"
             ],
             "hide": false,
             "global": false
