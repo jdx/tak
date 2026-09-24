@@ -9,7 +9,10 @@ use usage_rs::{Args, Cli, Subcommands};
 
 use tak_cli::backfill;
 use tak_cli::compare;
-use tak_cli::config::{self, Config, DEFAULT_RUNS, DEFAULT_WARMUP, SELF_TOOL, Subject};
+use tak_cli::config::{
+    self, AutoRuns, Config, DEFAULT_BUDGET, DEFAULT_MAX_RUNS, DEFAULT_MIN_RUNS, DEFAULT_RUNS,
+    DEFAULT_WARMUP, Runs, SELF_TOOL, Subject,
+};
 use tak_cli::export::{self, ExportResult};
 use tak_cli::measure::{self, Plan};
 use tak_cli::notes;
@@ -73,9 +76,10 @@ enum Cmd {
         /// single benchmark from tak.toml instead of running all of them.
         #[usage(long)]
         bench: Option<String>,
-        /// Timed runs. Overrides tak.toml when both are given.
-        #[usage(long)]
-        runs: Option<u32>,
+        /// Timed runs, or `auto` to size each subject from how long its
+        /// samples take. Overrides tak.toml when both are given.
+        #[usage(long, value_name = "N|auto")]
+        runs: Option<String>,
         /// Untimed warmup runs. Overrides tak.toml when both are given.
         #[usage(long)]
         warmup: Option<u32>,
@@ -85,6 +89,9 @@ enum Cmd {
         /// Append the result to refs/notes/tak for the current commit.
         #[usage(long)]
         record: bool,
+        /// Do not report progress on stderr.
+        #[usage(long)]
+        no_progress: bool,
         /// Measure only this subject of each multi-subject benchmark.
         /// Repeatable. Benchmarks with none of the named subjects are skipped.
         #[usage(long, value_name = "NAME")]
@@ -263,10 +270,11 @@ fn now_rfc3339() -> String {
 /// `tak run`'s options, gathered so they travel as one value.
 struct RunOpts {
     bench: Option<String>,
-    runs: Option<u32>,
+    runs: Option<Runs>,
     warmup: Option<u32>,
     no_counters: bool,
     record: bool,
+    no_progress: bool,
     subjects: Vec<String>,
     seed: Option<u64>,
     export_json: Option<std::path::PathBuf>,
@@ -298,7 +306,12 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         prepare: None,
         dir: None,
         env: BTreeMap::new(),
-        runs: opts.runs.unwrap_or(DEFAULT_RUNS),
+        runs: opts.runs.unwrap_or(Runs::Fixed(DEFAULT_RUNS)),
+        auto: AutoRuns {
+            budget: DEFAULT_BUDGET,
+            min: DEFAULT_MIN_RUNS,
+            max: DEFAULT_MAX_RUNS,
+        },
         warmup: opts.warmup.unwrap_or(DEFAULT_WARMUP),
         counters: true,
     };
@@ -462,7 +475,16 @@ fn measure_bench(
             subjects.len()
         );
     }
-    let results = measure::interleaved(subjects, measure::seed_for(seed, bench), settings);
+    let bench_seed = measure::seed_for(seed, bench);
+    let results = if opts.no_progress {
+        measure::interleaved(subjects, bench_seed, settings, &mut measure::Quiet)
+    } else {
+        let names = subjects.iter().map(|s| s.name.clone()).collect();
+        let mut bar = tak_cli::progress::Bar::new(bench, names);
+        let r = measure::interleaved(subjects, bench_seed, settings, &mut bar);
+        bar.finish();
+        r
+    };
     let mut measured = Vec::new();
     let mut failed = Vec::new();
     for (s, result) in subjects.iter().zip(results) {
@@ -481,11 +503,28 @@ fn measure_bench(
         }
 
         if multi {
-            println!("  {bench} ({})  {}", s.name, s.cmd.join(" "));
+            // One line per subject, in the order of a quick read: the floor
+            // first, since that is the robust estimator, then the spread.
+            // The command is in tak.toml; repeating it here buried the numbers.
+            // Instruction counts, when a subject opted in, stay on its line.
+            let count = metrics
+                .get("instructions")
+                .map_or(String::new(), |i| format!("  instructions {i:.0}"));
+            println!(
+                "    {:<width$}  min {:>9.2}  p50 {:>9.2}  mean {:>9.2} ± {:<8.2} max {:>9.2} ms  n={}{count}",
+                s.name,
+                metrics["wall_min_ms"],
+                metrics["wall_p50_ms"],
+                metrics["wall_mean_ms"],
+                metrics["wall_stddev_ms"],
+                metrics["wall_max_ms"],
+                samples.len(),
+                width = subjects.iter().map(|s| s.name.len()).max().unwrap_or(0),
+            );
         } else {
             println!("  {bench}  {}", s.cmd.join(" "));
         }
-        for (k, v) in &metrics {
+        for (k, v) in metrics.iter().filter(|_| !multi) {
             if k == "wall_n" {
                 continue;
             }
@@ -975,6 +1014,7 @@ fn main() -> Result<()> {
             warmup,
             no_counters,
             record,
+            no_progress,
             subject,
             seed,
             export_json,
@@ -982,10 +1022,11 @@ fn main() -> Result<()> {
         } => cmd_run(
             RunOpts {
                 bench,
-                runs,
+                runs: runs.as_deref().map(str::parse).transpose()?,
                 warmup,
                 no_counters,
                 record,
+                no_progress,
                 subjects: subject,
                 seed,
                 export_json,

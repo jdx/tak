@@ -13,12 +13,13 @@
 //! clock (~1%) but not deterministic, because they move with thread scheduling.
 //! They are recorded, and may be flagged, but must not gate at a tight threshold.
 
-use crate::config::{SELF_TOOL, Subject};
+use crate::config::{AutoRuns, Runs, SELF_TOOL, Subject};
 use crate::settings::Settings;
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 use std::time::Instant;
 
 #[derive(Debug, Clone)]
@@ -181,22 +182,25 @@ pub struct Slot {
 /// order for the same subjects.
 pub fn schedule(counts: &[(u32, u32)], seed: u64) -> Vec<Slot> {
     let mut rng = fastrand::Rng::with_seed(seed);
+    let warmups: Vec<u64> = counts.iter().map(|&(w, _)| u64::from(w)).collect();
+    let runs: Vec<u64> = counts.iter().map(|&(_, r)| u64::from(r)).collect();
+    let mut out = rounds(&warmups, false, &mut rng);
+    out.extend(rounds(&runs, true, &mut rng));
+    out
+}
+
+/// Shuffled rounds taking `count[i]` samples of subject `i`.
+fn rounds(count: &[u64], timed: bool, rng: &mut fastrand::Rng) -> Vec<Slot> {
+    let total = count.iter().copied().max().unwrap_or(0);
     let mut out = Vec::new();
-    for timed in [false, true] {
-        let count = |i: usize| {
-            let (warmup, runs) = counts[i];
-            u64::from(if timed { runs } else { warmup })
-        };
-        let rounds = (0..counts.len()).map(count).max().unwrap_or(0);
-        for round in 0..rounds {
-            // Subject i is due in the rounds where floor(r * k / R) steps up:
-            // exactly k of the R rounds, as evenly spaced as integers allow.
-            let mut due: Vec<usize> = (0..counts.len())
-                .filter(|&i| (round + 1) * count(i) / rounds > round * count(i) / rounds)
-                .collect();
-            rng.shuffle(&mut due);
-            out.extend(due.into_iter().map(|subject| Slot { subject, timed }));
-        }
+    for round in 0..total {
+        // Subject i is due in the rounds where floor(r * k / R) steps up:
+        // exactly k of the R rounds, as evenly spaced as integers allow.
+        let mut due: Vec<usize> = (0..count.len())
+            .filter(|&i| (round + 1) * count[i] / total > round * count[i] / total)
+            .collect();
+        rng.shuffle(&mut due);
+        out.extend(due.into_iter().map(|subject| Slot { subject, timed }));
     }
     out
 }
@@ -210,6 +214,23 @@ pub fn seed_for(seed: u64, bench: &str) -> u64 {
     })
 }
 
+/// Told about a run as it happens, to report progress.
+pub trait Observer {
+    /// Samples still to take per subject, warmups included. Called before the
+    /// first sample and again once `runs = "auto"` has settled its counts.
+    fn planned(&mut self, _remaining: &[u64]) {}
+    /// A sample of `subject` is starting.
+    fn started(&mut self, _subject: usize) {}
+    /// A sample of `subject` finished; `elapsed` covers its prepare step too.
+    fn finished(&mut self, _subject: usize, _elapsed: Duration) {}
+    /// `subject` failed and takes no more samples.
+    fn dropped(&mut self, _subject: usize) {}
+}
+
+/// An observer that reports nothing.
+pub struct Quiet;
+impl Observer for Quiet {}
+
 /// Measure several subjects against each other, interleaved.
 ///
 /// Returns each subject's timed samples in the order they were taken, or the
@@ -217,19 +238,103 @@ pub fn seed_for(seed: u64, bench: &str) -> u64 {
 /// rounds and the others carry on: one competitor breaking should not throw
 /// away a long run's worth of everyone else's samples. Subject directories
 /// are used as given, so the caller resolves them first.
-pub fn interleaved(subjects: &[Subject], seed: u64, settings: &Settings) -> Vec<Result<Vec<f64>>> {
-    let counts: Vec<_> = subjects.iter().map(|s| (s.warmup, s.runs)).collect();
+///
+/// Runs in two phases. The warmups come first, plus one kept sample of every
+/// `runs = "auto"` subject that has no warmups, so each auto subject has been
+/// timed at least once. Its run count is then fixed from the fastest of those
+/// samples, and every remaining timed sample is taken in shuffled rounds.
+pub fn interleaved(
+    subjects: &[Subject],
+    seed: u64,
+    settings: &Settings,
+    observer: &mut dyn Observer,
+) -> Vec<Result<Vec<f64>>> {
+    let mut rng = fastrand::Rng::with_seed(seed);
     let mut results: Vec<Result<Vec<f64>>> = subjects
         .iter()
         .map(|s| {
             // Zero runs would leave nothing to report on.
-            if s.runs == 0 {
+            if s.runs == Runs::Fixed(0) {
                 bail!("runs must be at least 1");
             }
-            Ok(Vec::with_capacity(s.runs as usize))
+            Ok(Vec::new())
         })
         .collect();
-    for slot in schedule(&counts, seed) {
+    // The fastest whole sample of each subject so far, prepare included —
+    // what an auto count is sized from. The fastest, because a warmup is
+    // often a cold outlier and would shrink the count for no reason.
+    let mut fastest: Vec<Option<Duration>> = vec![None; subjects.len()];
+
+    let warmups: Vec<u64> = subjects.iter().map(|s| u64::from(s.warmup)).collect();
+    let pilots: Vec<u64> = subjects
+        .iter()
+        .map(|s| u64::from(s.runs == Runs::Auto && s.warmup == 0))
+        .collect();
+    // Until the auto counts are known, plan on each one's floor.
+    let provisional: Vec<u64> = subjects
+        .iter()
+        .zip(&warmups)
+        .map(|(s, w)| {
+            w + u64::from(match s.runs {
+                Runs::Fixed(n) => n,
+                Runs::Auto => s.auto.min,
+            })
+        })
+        .collect();
+    observer.planned(&provisional);
+
+    let mut first = rounds(&warmups, false, &mut rng);
+    first.extend(rounds(&pilots, true, &mut rng));
+    run_slots(
+        &first,
+        subjects,
+        settings,
+        &mut results,
+        &mut fastest,
+        observer,
+    );
+
+    let remaining: Vec<u64> = subjects
+        .iter()
+        .enumerate()
+        .map(|(i, s)| match (&results[i], s.runs) {
+            (Err(_), _) => 0,
+            (Ok(_), Runs::Fixed(n)) => u64::from(n),
+            (Ok(taken), Runs::Auto) => {
+                let n = auto_runs(&s.auto, fastest[i]);
+                u64::from(n).saturating_sub(taken.len() as u64)
+            }
+        })
+        .collect();
+    observer.planned(&remaining);
+    let second = rounds(&remaining, true, &mut rng);
+    run_slots(
+        &second,
+        subjects,
+        settings,
+        &mut results,
+        &mut fastest,
+        observer,
+    );
+    results
+}
+
+/// An auto subject's run count. One that was never timed — its every sample
+/// failed, so it is being dropped anyway — gets the floor.
+fn auto_runs(auto: &AutoRuns, fastest: Option<Duration>) -> u32 {
+    fastest.map_or(auto.min, |d| auto.runs_for(d))
+}
+
+/// Take the given samples, recording timed ones and the fastest slot seen.
+fn run_slots(
+    slots: &[Slot],
+    subjects: &[Subject],
+    settings: &Settings,
+    results: &mut [Result<Vec<f64>>],
+    fastest: &mut [Option<Duration>],
+    observer: &mut dyn Observer,
+) {
+    for slot in slots {
         let Ok(samples) = &mut results[slot.subject] else {
             continue;
         };
@@ -239,18 +344,29 @@ pub fn interleaved(subjects: &[Subject], seed: u64, settings: &Settings) -> Vec<
             env: &s.env,
             settings,
         };
+        observer.started(slot.subject);
+        let began = Instant::now();
         let taken = s
             .prepare
             .as_deref()
             .map_or(Ok(()), |p| prepare_once(p, &site))
             .and_then(|()| time_once(&s.cmd, &site));
+        let elapsed = began.elapsed();
         match taken {
-            Ok(ms) if slot.timed => samples.push(ms),
-            Ok(_) => {}
-            Err(e) => results[slot.subject] = Err(e),
+            Ok(ms) => {
+                if slot.timed {
+                    samples.push(ms);
+                }
+                let f = &mut fastest[slot.subject];
+                *f = Some(f.map_or(elapsed, |f| f.min(elapsed)));
+                observer.finished(slot.subject, elapsed);
+            }
+            Err(e) => {
+                results[slot.subject] = Err(e);
+                observer.dropped(slot.subject);
+            }
         }
     }
-    results
 }
 
 /// Wall-clock statistics over a set of samples, in milliseconds.
@@ -288,14 +404,24 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
         prepare: None,
         dir: plan.dir.clone(),
         env: BTreeMap::new(),
-        runs: plan.runs,
+        runs: Runs::Fixed(plan.runs),
+        auto: AutoRuns {
+            budget: crate::config::DEFAULT_BUDGET,
+            min: crate::config::DEFAULT_MIN_RUNS,
+            max: crate::config::DEFAULT_MAX_RUNS,
+        },
         warmup: plan.warmup,
         counters: false,
     };
     // One subject has one possible order, so the seed is irrelevant.
-    let samples = interleaved(std::slice::from_ref(&subject), 0, &plan.settings)
-        .pop()
-        .expect("one result per subject")?;
+    let samples = interleaved(
+        std::slice::from_ref(&subject),
+        0,
+        &plan.settings,
+        &mut Quiet,
+    )
+    .pop()
+    .expect("one result per subject")?;
     Ok(stats(&samples))
 }
 
@@ -655,7 +781,12 @@ mod tests {
             prepare: None,
             dir: None,
             env: BTreeMap::new(),
-            runs: 4,
+            runs: Runs::Fixed(4),
+            auto: AutoRuns {
+                budget: Duration::from_secs(30),
+                min: 5,
+                max: 50,
+            },
             warmup: 1,
             counters: false,
         };
@@ -663,6 +794,7 @@ mod tests {
             &[mk("ok", &["true"]), mk("bad", &["false"])],
             5,
             &Settings::default(),
+            &mut Quiet,
         );
         assert_eq!(res[0].as_ref().unwrap().len(), 4);
         assert!(format!("{:#}", res[1].as_ref().unwrap_err()).contains("exited with"));
@@ -683,14 +815,74 @@ mod tests {
                 ]),
                 dir: None,
                 env: BTreeMap::new(),
-                runs: 1,
+                runs: Runs::Fixed(1),
+                auto: AutoRuns {
+                    budget: Duration::from_secs(30),
+                    min: 5,
+                    max: 50,
+                },
                 warmup: 0,
                 counters: false,
             }],
             0,
             &Settings::default(),
+            &mut Quiet,
         );
         let msg = format!("{:#}", res[0].as_ref().unwrap_err());
         assert!(msg.contains("prepare") && msg.contains("nope"), "{msg}");
+    }
+
+    /// An observer that records what it was told.
+    #[derive(Default)]
+    struct Log {
+        plans: Vec<Vec<u64>>,
+        finished: Vec<usize>,
+    }
+    impl Observer for Log {
+        fn planned(&mut self, remaining: &[u64]) {
+            self.plans.push(remaining.to_vec());
+        }
+        fn finished(&mut self, subject: usize, _: Duration) {
+            self.finished.push(subject);
+        }
+    }
+
+    /// `runs = "auto"` sizes each subject from its own speed: a subject too
+    /// slow for the budget gets the floor, a faster one gets more. Uses real
+    /// sleeps, so the fast count is only bounded, not exact.
+    #[cfg(unix)]
+    #[test]
+    fn auto_runs_give_a_slow_subject_the_floor_and_a_fast_one_more() {
+        let mk = |name: &str, secs: &str, warmup: u32| Subject {
+            name: name.into(),
+            cmd: vec!["sleep".into(), secs.into()],
+            prepare: None,
+            dir: None,
+            env: BTreeMap::new(),
+            runs: Runs::Auto,
+            auto: AutoRuns {
+                budget: Duration::from_millis(400),
+                min: 2,
+                max: 6,
+            },
+            warmup,
+            counters: false,
+        };
+        let mut log = Log::default();
+        // The slow one has no warmup, so its first kept sample sizes it.
+        let res = interleaved(
+            &[mk("fast", "0.02", 1), mk("slow", "0.3", 0)],
+            9,
+            &Settings::default(),
+            &mut log,
+        );
+        let fast = res[0].as_ref().unwrap().len();
+        let slow = res[1].as_ref().unwrap().len();
+        assert_eq!(slow, 2, "0.4s budget / 0.3s sample is below the floor");
+        assert!(fast > slow && fast <= 6, "fast got {fast}");
+        // Planned on the floors first, then on the settled counts.
+        assert_eq!(log.plans[0], [1 + 2, 2]);
+        assert_eq!(log.plans.len(), 2);
+        assert_eq!(log.finished.len(), 1 + fast + slow);
     }
 }

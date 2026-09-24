@@ -276,3 +276,73 @@ dir = "fixture"
         "prepare and cmd both ran, in `dir`"
     );
 }
+
+/// Outside a terminal, progress is plain lines on stderr, ending at 100%,
+/// and `--no-progress` silences it.
+#[test]
+fn progress_is_logged_and_can_be_turned_off() {
+    let p = Project::new(
+        "progress",
+        &format!(
+            "[bench.cmp]\nwarmup = 0\n{}{}",
+            logging_subject("a", 3),
+            logging_subject("b", 3)
+        ),
+    );
+    let out = p.run(&[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("  cmp: 6/6 100%"), "{err}");
+    assert!(err.contains("elapsed"), "{err}");
+    assert!(!err.contains('\r'), "no terminal redraws in a log: {err:?}");
+
+    let quiet = p.run(&["--no-progress"]);
+    assert!(quiet.status.success());
+    assert!(!stderr(&quiet).contains("elapsed"), "{}", stderr(&quiet));
+}
+
+/// A multi-subject summary is one line per subject, not a metric per line.
+#[test]
+fn a_multi_subject_summary_is_one_line_per_subject() {
+    let p = Project::new(
+        "summary",
+        &format!(
+            "[bench.cmp]\nwarmup = 0\n{}{}",
+            logging_subject("a", 2),
+            logging_subject("bb", 2)
+        ),
+    );
+    let out = p.run(&["--no-progress"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let rows: Vec<&str> = stdout.lines().filter(|l| l.contains(" min ")).collect();
+    assert_eq!(rows.len(), 2, "{stdout}");
+    assert!(
+        rows[0].trim_start().starts_with("a ") && rows[0].contains("n=2"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("wall_min_ms"), "{stdout}");
+}
+
+/// `--runs auto` works on the command line against a benchmark that never
+/// declared it, using the default limits.
+#[test]
+fn runs_auto_can_be_given_on_the_command_line() {
+    let p = Project::new(
+        "auto-cli",
+        &format!(
+            "[bench.cmp]\nwarmup = 0\nmax_runs = 7\n{}",
+            logging_subject("a", 3)
+        ),
+    );
+    let out = p.run(&["--runs", "auto", "--no-progress", "--export-json", "r.json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    // A near-instant sample fits the budget many times over: the ceiling.
+    assert_eq!(json["results"][0]["times"].as_array().unwrap().len(), 7);
+
+    let bad = p.run(&["--runs", "lots"]);
+    assert!(!bad.status.success());
+    assert!(stderr(&bad).contains("auto"), "{}", stderr(&bad));
+}

@@ -13,5 +13,6 @@ pub mod config;
 pub mod export;
 pub mod measure;
 pub mod notes;
+pub mod progress;
 pub mod record;
 pub mod settings;
