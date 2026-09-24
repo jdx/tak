@@ -29,6 +29,7 @@ budget = "30s"
 min_runs = 5
 max_runs = 50
 prepare = ["true"]
+setup = ["true"]
 version_cmd = ["true", "--version"]
 dir = "."
 env = { A = "1" }
@@ -44,6 +45,7 @@ budget = "1s"
 min_runs = 1
 max_runs = 2
 prepare = "true"
+setup = "true"
 version_cmd = "true --version"
 dir = "."
 env = { B = "2" }
@@ -58,6 +60,7 @@ budget = "5s"
 min_runs = 1
 max_runs = 3
 prepare = ["true"]
+setup = "true"
 version_cmd = ["true"]
 dir = "."
 env = { C = "3" }

@@ -67,8 +67,11 @@ struct Layer {
     max_runs: Option<u32>,
     /// Untimed command run before every sample.
     prepare: Option<Cmd>,
-    /// Command whose output names the subject's version, run once before
-    /// sampling and reported in `--export-json`.
+    /// Untimed command run once per benchmark and subject, before its first
+    /// sample, in the directory holding `tak.toml`.
+    setup: Option<Cmd>,
+    /// Command whose output names the subject's version, run once after
+    /// `setup` and before sampling, and reported in `--export-json`.
     version_cmd: Option<Cmd>,
     /// Directory to run in, relative to `tak.toml`.
     dir: Option<PathBuf>,
@@ -289,8 +292,15 @@ pub struct Subject {
     pub name: String,
     pub cmd: Vec<String>,
     pub prepare: Option<Vec<String>>,
-    /// Run once, untimed, before sampling; its first line of output is the
-    /// version exported for this subject. See [`crate::measure::subject_version`].
+    /// Run once before the subject's first sample. Always from the directory
+    /// holding `tak.toml`, never from `dir`; see [`Subject::anchor`].
+    pub setup: Option<Vec<String>>,
+    /// Where `setup` runs: set by [`Subject::anchor`] to the directory holding
+    /// `tak.toml`. `None` runs it in tak's own working directory.
+    pub setup_dir: Option<PathBuf>,
+    /// Run once, untimed, after `setup` and before the first warmup; its first
+    /// line of output is the version exported for this subject. See
+    /// [`crate::measure::interleaved_with_versions`].
     pub version_cmd: Option<Vec<String>>,
     /// Relative to `tak.toml`; the caller resolves it.
     pub dir: Option<PathBuf>,
@@ -314,6 +324,14 @@ impl Subject {
     /// `root`, not `dir`. Otherwise giving a subject a fixture directory would
     /// make the project's own binary unfindable. A bare name is left for PATH
     /// lookup, and arguments are never touched.
+    ///
+    /// `setup` is the exception to `dir`: it runs in `root` itself. Its usual
+    /// job is to create or recreate `dir` — a clone, a generated project — and
+    /// a command cannot sensibly start inside a directory that does not exist
+    /// yet or that it is about to delete. Running it where `dir` is written
+    /// relative to also means the same path works as one of its arguments.
+    /// Choosing between the two by whether `dir` exists would give a setup a
+    /// different working directory on its second run than on its first.
     pub fn anchor(&mut self, root: &Path) {
         let program = |argv: &mut Vec<String>| {
             if let Some(p) = argv.first_mut()
@@ -327,6 +345,9 @@ impl Subject {
         if let Some(prepare) = &mut self.prepare {
             program(prepare);
         }
+        if let Some(setup) = &mut self.setup {
+            program(setup);
+        }
         if let Some(version) = &mut self.version_cmd {
             program(version);
         }
@@ -334,6 +355,7 @@ impl Subject {
             Some(d) => root.join(d),
             None => root.to_path_buf(),
         });
+        self.setup_dir = Some(root.to_path_buf());
     }
 }
 
@@ -440,6 +462,9 @@ impl Config {
             if let Some(p) = &l.prepare {
                 cmd(out, &format!("{at}.prepare"), p);
             }
+            if let Some(p) = &l.setup {
+                cmd(out, &format!("{at}.setup"), p);
+            }
             if let Some(v) = &l.version_cmd {
                 cmd(out, &format!("{at}.version_cmd"), v);
             }
@@ -486,7 +511,8 @@ impl Config {
 /// Stack `layers`, least specific first, into one subject. A later layer's
 /// setting replaces an earlier one's — a subject's own prepare replaces the
 /// benchmark's rather than running after it, since the two usually reset the
-/// same state — except `env` and `vars`, which merge key by key.
+/// same state, and `setup` likewise — except `env` and `vars`, which merge key
+/// by key.
 fn resolve(
     name: &str,
     cmd: &Cmd,
@@ -532,6 +558,11 @@ fn resolve(
         prepare: last(layers, |l| l.prepare.as_ref())
             .map(Cmd::argv)
             .transpose()?,
+        setup: last(layers, |l| l.setup.as_ref())
+            .map(Cmd::argv)
+            .transpose()
+            .context("setup")?,
+        setup_dir: None,
         version_cmd: last(layers, |l| l.version_cmd.as_ref())
             .map(Cmd::argv)
             .transpose()
@@ -837,6 +868,89 @@ cmd = "mycli 'two words'""#,
             "a bare name is still looked up on PATH"
         );
         assert_eq!(bare.dir.unwrap(), Path::new("/repo"));
+    }
+
+    /// Setup layers like prepare — the most specific one replaces the rest —
+    /// and a benchmark without one has none.
+    #[test]
+    fn setup_stacks_by_specificity_and_replaces() {
+        let c = Config::parse(
+            r#"
+            [defaults]
+            setup = "make fixture"
+
+            [subject.a]
+            cmd = "a"
+
+            [subject.b]
+            cmd = "b"
+            setup = ["./clone", "b"]
+
+            [subject.c]
+            cmd = "c"
+
+            [bench.x]
+            subjects = ["a", "b", "c"]
+            [bench.x.subject.c]
+            setup = "./clone c --here"
+
+            [bench.y]
+            subjects = ["a", "b"]
+            setup = "./bench-setup"
+            prepare = "reset"
+            "#,
+        )
+        .unwrap();
+        let setups = |bench: &str| -> Vec<Vec<String>> {
+            c.subjects(bench)
+                .unwrap()
+                .into_iter()
+                .map(|s| s.setup.unwrap())
+                .collect()
+        };
+        assert_eq!(
+            setups("x"),
+            [
+                vec!["make", "fixture"],
+                vec!["./clone", "b"],
+                vec!["./clone", "c", "--here"]
+            ]
+        );
+        // The benchmark's replaces the defaults', and a shared subject's own
+        // replaces the benchmark's. Prepare is untouched by any of it.
+        assert_eq!(setups("y"), [vec!["./bench-setup"], vec!["./clone", "b"]]);
+        assert_eq!(
+            c.subjects("y").unwrap()[0].prepare.as_deref().unwrap(),
+            ["reset"]
+        );
+
+        let none = Config::parse("[bench.z]\ncmd = \"x\"").unwrap();
+        assert_eq!(only(&none, "z").setup, None);
+    }
+
+    /// Setup runs from the directory holding tak.toml whatever `dir` says,
+    /// so it can create `dir`; its program is anchored there like any other.
+    #[test]
+    fn setup_runs_from_the_config_directory() {
+        let mut s = Config::parse(
+            "[bench.a]\ncmd = \"x\"\nsetup = [\"./bin/clone\", \"work\"]\ndir = \"work\"",
+        )
+        .unwrap()
+        .subjects("a")
+        .unwrap()
+        .remove(0);
+        s.anchor(Path::new("/repo"));
+        assert_eq!(s.setup.unwrap(), ["/repo/./bin/clone", "work"]);
+        assert_eq!(s.setup_dir.unwrap(), Path::new("/repo"));
+        assert_eq!(s.dir.unwrap(), Path::new("/repo/work"));
+    }
+
+    #[test]
+    fn a_bad_setup_is_rejected_at_parse_time() {
+        assert!(Config::parse("[bench.a]\ncmd = \"x\"\nsetup = []").is_err());
+        let err = Config::parse("[defaults]\nsetup = [\"{{ env.X \"]\n[bench.a]\ncmd = \"x\"")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("defaults.setup"), "{err:#}");
     }
 
     #[test]

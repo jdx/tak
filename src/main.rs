@@ -103,8 +103,9 @@ enum Cmd {
         /// Read this file instead of searching for tak.toml.
         #[usage(long, value_name = "PATH")]
         config: Option<std::path::PathBuf>,
-        /// Print what would run — every subject's command, prepare, directory,
-        /// environment and run count, templates rendered — without running it.
+        /// Print what would run — every subject's command, setup, prepare,
+        /// directory, environment and run count, templates rendered — without
+        /// running any of it.
         #[usage(long)]
         dry_run: bool,
         /// Write every sample and summary to PATH as hyperfine-compatible JSON.
@@ -316,6 +317,8 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         name: SELF_TOOL.to_string(),
         cmd,
         prepare: None,
+        setup: None,
+        setup_dir: None,
         dir: None,
         version_cmd: None,
         env: BTreeMap::new(),
@@ -561,6 +564,13 @@ fn print_plan(bench: &str, multi: bool, subjects: &[Subject], no_counters: bool)
         }
         let pad = if multi { "      " } else { "    " };
         println!("{pad}cmd      {}", shell_words(&s.cmd));
+        if let Some(p) = &s.setup {
+            // Where it runs, since unlike everything else it is not `dir`.
+            match &s.setup_dir {
+                Some(d) => println!("{pad}setup    {}  (in {})", shell_words(p), d.display()),
+                None => println!("{pad}setup    {}", shell_words(p)),
+            }
+        }
         if let Some(p) = &s.prepare {
             println!("{pad}prepare  {}", shell_words(p));
         }
@@ -701,13 +711,25 @@ fn measure_bench(
             subjects.len()
         );
     }
-    // Versions first, once each and untimed: a tool that updates itself or
-    // warms a cache on `--version` does so before the warmups, not between
-    // samples. A failure costs only the label.
+    let bench_seed = measure::seed_for(seed, bench);
+    // Each subject's version is asked for inside the run, after its setup
+    // and before any warmup; see `measure::interleaved_with_versions`.
+    let (results, versions) = if opts.no_progress {
+        measure::interleaved_with_versions(subjects, bench_seed, settings, &mut measure::Quiet)
+    } else {
+        let names = subjects.iter().map(|s| s.name.clone()).collect();
+        let mut bar = tak_cli::progress::Bar::new(bench, names);
+        let r = measure::interleaved_with_versions(subjects, bench_seed, settings, &mut bar);
+        bar.finish();
+        r
+    };
+    // A failed version costs only the label: warned about once the progress
+    // bar is out of the way, and exported as null.
     let versions: Vec<Option<Option<String>>> = subjects
         .iter()
-        .map(|s| {
-            measure::subject_version(s, settings).map(|r| match r {
+        .zip(versions)
+        .map(|(s, v)| {
+            v.map(|r| match r {
                 Ok(v) => Some(v),
                 Err(e) => {
                     let label = if multi {
@@ -721,16 +743,6 @@ fn measure_bench(
             })
         })
         .collect();
-    let bench_seed = measure::seed_for(seed, bench);
-    let results = if opts.no_progress {
-        measure::interleaved(subjects, bench_seed, settings, &mut measure::Quiet)
-    } else {
-        let names = subjects.iter().map(|s| s.name.clone()).collect();
-        let mut bar = tak_cli::progress::Bar::new(bench, names);
-        let r = measure::interleaved(subjects, bench_seed, settings, &mut bar);
-        bar.finish();
-        r
-    };
     let mut measured = Vec::new();
     let mut failed = Vec::new();
     for ((s, result), version) in subjects.iter().zip(results).zip(versions) {

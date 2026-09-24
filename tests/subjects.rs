@@ -607,6 +607,29 @@ subjects = ["good", "broken"]
     }
 }
 
+/// `version_cmd` runs after `setup`, which may be what creates the program,
+/// and before any sample.
+#[test]
+fn version_cmd_runs_after_setup() {
+    let p = Project::new(
+        "version-after-setup",
+        r#"
+[bench.cmp.subject.built]
+setup = ["sh", "-c", "printf '#!/bin/sh\necho built 4.5.6\n' > tool && chmod +x tool && echo setup >> log"]
+version_cmd = ["sh", "-c", "echo version >> log; ./tool"]
+cmd = ["sh", "-c", "echo run >> log"]
+runs = 1
+warmup = 1
+"#,
+    );
+    let out = p.run(&["--no-progress", "--export-json", "r.json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(p.log(), ["setup", "version", "run", "run"]);
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    assert_eq!(json["results"][0]["version"], "built 4.5.6");
+}
+
 /// A subject without `version_cmd` has no `version` key at all, so a
 /// hyperfine consumer sees nothing new.
 #[test]
@@ -835,4 +858,173 @@ cmd = ["sh", "-c", "echo b >> log"]
     let out = p.run(&["--no-progress", "--subject", "x"]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(p.log(), ["b"]);
+}
+
+/// `setup` runs once per subject, before any subject's first sample — not
+/// once per sample like prepare — from the directory holding tak.toml, so it
+/// can create the subject's `dir`, with the subject's environment.
+#[test]
+fn setup_runs_once_per_subject_before_any_sample() {
+    let p = Project::new(
+        "setup",
+        r#"
+[defaults]
+warmup = 2
+runs = 3
+env = { WHO = "default" }
+# Creates the directory every other command runs in, and logs where it ran.
+setup = ["sh", "-c", "mkdir -p work/{{ subject }} && echo \"setup:{{ subject }}:$WHO:$(basename \"$PWD\")\" >> log"]
+dir = "work/{{ subject }}"
+
+[bench.cmp.subject.a]
+cmd = ["sh", "-c", "echo run:a >> ../../log"]
+prepare = ["sh", "-c", "echo prep:a >> ../../log"]
+env = { WHO = "a" }
+
+[bench.cmp.subject.b]
+cmd = ["sh", "-c", "echo run:b >> ../../log"]
+prepare = ["sh", "-c", "echo prep:b >> ../../log"]
+"#,
+    );
+    let root = p.dir.file_name().unwrap().to_string_lossy().into_owned();
+    let out = p.run(&["--seed", "5"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let log = p.log();
+    assert_eq!(
+        &log[..2],
+        [
+            format!("setup:a:a:{root}"),
+            format!("setup:b:default:{root}")
+        ],
+        "both setups, first, in tak.toml's directory: {log:?}"
+    );
+    let rest = &log[2..];
+    assert!(rest.iter().all(|l| !l.starts_with("setup:")), "{log:?}");
+    // Two subjects, each 2 warmups + 3 runs, each a prepare and a run.
+    assert_eq!(rest.len(), 2 * (2 + 3) * 2, "{log:?}");
+    assert!(rest[0].starts_with("prep:"), "{log:?}");
+    let err = stderr(&out);
+    assert!(err.contains("setup a"), "setup shown in progress: {err}");
+}
+
+/// A benchmark-level setup is replaced by a subject's own, like prepare.
+#[test]
+fn a_subject_setup_replaces_the_benchmark_setup() {
+    let p = Project::new(
+        "setup-override",
+        r#"
+[bench.cmp]
+warmup = 0
+runs = 1
+setup = ["sh", "-c", "echo setup:bench:{{ subject }} >> log"]
+
+[bench.cmp.subject.a]
+cmd = ["true"]
+
+[bench.cmp.subject.b]
+cmd = ["true"]
+setup = ["sh", "-c", "echo setup:own:b >> log"]
+"#,
+    );
+    let out = p.run(&["--no-progress"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(p.log(), ["setup:bench:a", "setup:own:b"]);
+}
+
+/// A failing setup drops its subject like a failing prepare: the others are
+/// still measured, the run fails, and --record writes nothing.
+#[test]
+fn a_failing_setup_drops_the_subject() {
+    let p = Project::new(
+        "setup-fails",
+        &format!(
+            "[bench.cmp]\nwarmup = 1\n{}\n[bench.cmp.subject.broken]\ncmd = [\"sh\", \"-c\", \"echo run:broken >> log\"]\nsetup = [\"sh\", \"-c\", \"echo no fixture >&2; exit 4\"]\n",
+            logging_subject("a", 3)
+        ),
+    );
+    let out = p.run(&["--no-progress", "--record"]);
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(
+        err.contains("cmp (broken) dropped") && err.contains("setup") && err.contains("no fixture"),
+        "{err}"
+    );
+    assert!(err.contains("not recording"), "{err}");
+    let log = p.log();
+    assert!(!log.iter().any(|l| l == "run:broken"), "{log:?}");
+    assert_eq!(log.iter().filter(|l| *l == "run:a").count(), 1 + 3);
+}
+
+/// Setup is only run for subjects that will be measured: not for one left
+/// out by --subject, one whose `when` is false, or a benchmark switched off.
+/// A subject in two benchmarks is set up once for each.
+#[test]
+fn setup_runs_only_for_measured_subjects() {
+    let p = Project::new(
+        "setup-skipped",
+        r#"
+[defaults]
+warmup = 0
+runs = 1
+setup = ["sh", "-c", "echo {{ bench }}:{{ subject }} >> log"]
+
+[subject.a]
+cmd = ["true"]
+
+[subject.b]
+cmd = ["true"]
+
+[subject.off]
+when = "false"
+cmd = ["true"]
+
+[bench.one]
+subjects = ["a", "b", "off"]
+
+[bench.two]
+subjects = ["a"]
+
+[bench.never]
+when = "false"
+subjects = ["a"]
+"#,
+    );
+    let out = p.run(&["--no-progress"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(p.log(), ["one:a", "one:b", "two:a"]);
+
+    std::fs::remove_file(p.path("log")).unwrap();
+    let out = p.run(&["--no-progress", "--subject", "b"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(p.log(), ["one:b"]);
+}
+
+/// --dry-run shows the rendered setup and where it would run, and runs it
+/// no more than anything else.
+#[test]
+fn dry_run_shows_setup_without_running_it() {
+    let p = Project::new(
+        "setup-dry",
+        r#"
+[bench.cmp.subject.a]
+cmd = ["true"]
+setup = ["sh", "-c", "echo setup:{{ subject }} >> log"]
+"#,
+    );
+    let out = p.run(&["--dry-run"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // tak finds tak.toml from its working directory, which the OS reports
+    // with symlinks resolved: on macOS the temp dir is under /var, a link to
+    // /private/var.
+    let root = p.dir.canonicalize().unwrap();
+    assert!(
+        stdout.contains(&format!(
+            "setup    sh -c 'echo setup:a >> log'  (in {})",
+            root.display()
+        )),
+        "{stdout}"
+    );
+    assert!(p.log().is_empty(), "nothing ran");
 }
