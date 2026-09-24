@@ -1034,3 +1034,44 @@ cmd = ["sh", "-c", "echo ran >> log"]
     );
     assert!(p.log().is_empty(), "nothing ran");
 }
+
+/// With `runs = "auto"` and no warmups, the first timed sample is the pilot
+/// that sizes the run, taken before the others. Its check verdict is still
+/// the first one exported, next to the first time.
+#[test]
+fn the_auto_pilot_sample_is_checked_in_order() {
+    let p = Project::new(
+        "check-pilot",
+        r#"
+[bench.cmp]
+runs = "auto"
+warmup = 0
+budget = "1s"
+min_runs = 3
+max_runs = 4
+# Fails only on its first invocation, which is the pilot's.
+check = ["sh", "-c", "echo x >> checks; test $(( $(wc -l < checks) )) != 1"]
+
+[bench.cmp.subject.a]
+cmd = ["true"]
+"#,
+    );
+    let out = p.run(&["--no-progress", "--export-json", "r.json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    let r = &json["results"][0];
+    let times = r["times"].as_array().unwrap().len();
+    assert!((3..=4).contains(&times), "{r}");
+    assert_eq!(r["checks"]["total"], times, "{r}");
+    let samples: Vec<bool> = r["checks"]["samples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_bool().unwrap())
+        .collect();
+    assert_eq!(samples.len(), times, "{r}");
+    assert!(!samples[0], "the pilot's failure comes first: {r}");
+    assert!(samples[1..].iter().all(|&ok| ok), "{r}");
+    assert_eq!(r["checks"]["passed"], times - 1, "{r}");
+}
