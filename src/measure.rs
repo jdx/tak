@@ -844,6 +844,26 @@ mod forward_signals {
 
     /// What the handler knows, as atomics alone: nothing else is safe to
     /// touch from a signal handler.
+    ///
+    /// A handler can run on any thread and be preempted anywhere, so every
+    /// path that records a signal in `pending` must end with someone acting
+    /// on it. All accesses are `SeqCst`, which puts them in one order:
+    ///
+    /// - The handler writes `pending`, then reads `done` and `pgid`.
+    ///   [`State::spawned`] writes `pgid` and then takes `pending`;
+    ///   [`State::end`] writes `done` and then takes `pending`. Either a take
+    ///   comes after the handler's write, and the spawning thread acts on the
+    ///   signal, or every take that could have collected it came before, and
+    ///   so did the store preceding it, which the handler's later read sees,
+    ///   so the handler acts on the signal itself.
+    /// - The handler reads `spawning` before `pgid`, and `spawned` writes
+    ///   them in the opposite order, so a handler that sees `spawning`
+    ///   cleared also sees the group.
+    ///
+    /// A handler that starts after [`State::end`] sees `spawning` cleared and
+    /// never writes `pending`; one that started earlier and was preempted
+    /// sees `done` and stops tak itself, without killing a group whose id may
+    /// have been reused by then.
     pub(super) struct State {
         /// Between installing the handlers and recording the group: a
         /// command may exist whose group the handler cannot know yet.
@@ -853,12 +873,15 @@ mod forward_signals {
         /// A signal that arrived while `spawning`, for the spawning thread
         /// to act on once the group is known.
         pending: AtomicI32,
+        /// The version step is over and nothing will look at `pending`
+        /// again, so a late handler must act on its signal itself.
+        done: AtomicBool,
     }
 
     /// What the handler should do with a signal.
     #[derive(Debug, PartialEq, Eq)]
     pub(super) enum Act {
-        /// Leave it for [`State::spawned`], which has the group.
+        /// Leave it for [`State::spawned`] or [`State::end`].
         Defer,
         /// Kill this group (0 for none) and stop tak.
         Die { pgid: i32 },
@@ -870,34 +893,46 @@ mod forward_signals {
                 spawning: AtomicBool::new(false),
                 pgid: AtomicI32::new(0),
                 pending: AtomicI32::new(0),
+                done: AtomicBool::new(true),
             }
         }
 
         pub(super) fn begin(&self) {
             self.pending.store(0, SeqCst);
             self.pgid.store(0, SeqCst);
+            self.done.store(false, SeqCst);
             self.spawning.store(true, SeqCst);
         }
 
-        /// The handler's decision. `spawning` is read before `pgid`, and
-        /// [`State::spawned`] writes them in the opposite order, so a
-        /// handler that sees `spawning` cleared also sees the group. One
-        /// that defers re-reads the group after recording the signal: if
-        /// `spawned` had already collected `pending` by then, it had also
-        /// stored the group, so exactly one of the two sees the signal
-        /// with the group known, and neither loses it.
+        /// The handler's decision.
         pub(super) fn on_signal(&self, sig: libc::c_int) -> Act {
-            let spawning = self.spawning.load(SeqCst);
-            let pgid = self.pgid.load(SeqCst);
-            if spawning && pgid == 0 {
-                self.pending.store(sig, SeqCst);
-                let pgid = self.pgid.load(SeqCst);
-                if pgid > 0 {
-                    return Act::Die { pgid };
+            if self.wants_to_defer() {
+                self.defer(sig)
+            } else {
+                Act::Die {
+                    pgid: self.pgid.load(SeqCst),
                 }
-                return Act::Defer;
             }
-            Act::Die { pgid }
+        }
+
+        /// First half of [`State::on_signal`]: still spawning, group not yet
+        /// known. Separate so a test can pause a handler between the halves.
+        fn wants_to_defer(&self) -> bool {
+            let spawning = self.spawning.load(SeqCst);
+            spawning && self.pgid.load(SeqCst) == 0
+        }
+
+        /// Second half: record the signal, then check whether whoever would
+        /// have collected it already has.
+        fn defer(&self, sig: libc::c_int) -> Act {
+            self.pending.store(sig, SeqCst);
+            if self.done.load(SeqCst) {
+                return Act::Die { pgid: 0 };
+            }
+            match self.pgid.load(SeqCst) {
+                0 => Act::Defer,
+                pgid => Act::Die { pgid },
+            }
         }
 
         /// Record the group once the spawn returns (`None` if it failed),
@@ -911,9 +946,15 @@ mod forward_signals {
             (sig != 0).then_some((sig, pgid))
         }
 
-        pub(super) fn end(&self) {
+        /// The step is over. Returns a signal a late handler deferred, which
+        /// the caller must still act on; its group is not killed, since the
+        /// command has been reaped and the id may be reused.
+        pub(super) fn end(&self) -> Option<libc::c_int> {
             self.spawning.store(false, SeqCst);
+            self.done.store(true, SeqCst);
             self.pgid.store(0, SeqCst);
+            let sig = self.pending.swap(0, SeqCst);
+            (sig != 0).then_some(sig)
         }
     }
 
@@ -977,13 +1018,85 @@ mod forward_signals {
 
     impl Drop for Guard {
         fn drop(&mut self) {
-            STATE.end();
+            // Before the previous handlers come back, so a signal one of ours
+            // deferred late is still acted on.
+            if let Some(sig) = STATE.end() {
+                die(sig, 0);
+            }
             for (sig, old) in &self.previous {
                 // SAFETY: restores the action saved by `install`.
                 unsafe {
                     libc::sigaction(*sig, old, std::ptr::null_mut());
                 }
             }
+        }
+    }
+
+    /// Driven on a private `State`, so no real signal is sent and the
+    /// handler's own state is untouched: every way a handler and the version
+    /// step can interleave ends with the signal acted on.
+    #[cfg(test)]
+    mod tests {
+        use super::{Act, SeqCst, State};
+
+        #[test]
+        fn a_signal_during_the_spawn_is_held_until_the_group_is_known() {
+            let s = State::new();
+            s.begin();
+            assert_eq!(s.on_signal(libc::SIGTERM), Act::Defer, "no group yet");
+            assert_eq!(s.spawned(Some(42)), Some((libc::SIGTERM, 42)));
+            assert_eq!(s.on_signal(libc::SIGINT), Act::Die { pgid: 42 });
+            assert_eq!(s.end(), None);
+
+            s.begin();
+            assert_eq!(s.spawned(Some(7)), None, "nothing arrived");
+            assert_eq!(s.end(), None);
+
+            s.begin();
+            assert_eq!(s.on_signal(libc::SIGINT), Act::Defer);
+            assert_eq!(
+                s.spawned(None),
+                Some((libc::SIGINT, 0)),
+                "a failed spawn still stops tak"
+            );
+            assert_eq!(s.end(), None);
+
+            assert_eq!(
+                s.on_signal(libc::SIGHUP),
+                Act::Die { pgid: 0 },
+                "after the step"
+            );
+            assert!(!s.wants_to_defer(), "and it never defers there");
+        }
+
+        /// A handler that decided to defer, then was preempted: whenever it
+        /// resumes, its signal is acted on.
+        #[test]
+        fn a_handler_preempted_past_the_step_still_acts() {
+            let s = State::new();
+
+            // Until after the step ended: it sees `done` and stops tak,
+            // without killing a group whose id may be reused.
+            s.begin();
+            assert!(s.wants_to_defer());
+            assert_eq!(s.spawned(Some(42)), None);
+            assert_eq!(s.end(), None);
+            assert_eq!(s.defer(libc::SIGTERM), Act::Die { pgid: 0 });
+
+            // Until after the spawn: it sees the group. Its write is also
+            // left for `end`; acting twice on a signal is harmless.
+            s.begin();
+            assert!(s.wants_to_defer());
+            assert_eq!(s.spawned(Some(42)), None);
+            assert_eq!(s.defer(libc::SIGINT), Act::Die { pgid: 42 });
+            assert_eq!(s.end(), Some(libc::SIGINT));
+
+            // Its write landed before `end` took `pending` (and it read the
+            // group before `spawned` stored it): `end` acts on it.
+            s.begin();
+            assert_eq!(s.spawned(Some(42)), None);
+            s.pending.store(libc::SIGHUP, SeqCst);
+            assert_eq!(s.end(), Some(libc::SIGHUP), "acted on at teardown");
         }
     }
 }
@@ -1546,41 +1659,6 @@ mod tests {
             let stat = stat.trim();
             out.status.success() && !stat.is_empty() && !stat.starts_with('Z')
         }
-    }
-
-    /// A signal during the spawn is held, not lost: whoever sees it with the
-    /// group known acts on it. Driven on a private `State`, so no real
-    /// signal is sent and the handler's own state is untouched.
-    #[cfg(unix)]
-    #[test]
-    fn a_signal_during_the_spawn_is_acted_on_once_the_group_is_known() {
-        use forward_signals::{Act, State};
-        let s = State::new();
-
-        s.begin();
-        assert_eq!(s.on_signal(libc::SIGTERM), Act::Defer, "no group yet");
-        assert_eq!(s.spawned(Some(42)), Some((libc::SIGTERM, 42)));
-        assert_eq!(s.on_signal(libc::SIGINT), Act::Die { pgid: 42 });
-        s.end();
-
-        s.begin();
-        assert_eq!(s.spawned(Some(7)), None, "nothing arrived");
-        s.end();
-
-        s.begin();
-        assert_eq!(s.on_signal(libc::SIGINT), Act::Defer);
-        assert_eq!(
-            s.spawned(None),
-            Some((libc::SIGINT, 0)),
-            "a failed spawn still stops tak"
-        );
-        s.end();
-
-        assert_eq!(
-            s.on_signal(libc::SIGHUP),
-            Act::Die { pgid: 0 },
-            "outside the window"
-        );
     }
 
     /// A background process that inherits the pipes keeps them open after
