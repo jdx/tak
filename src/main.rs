@@ -326,7 +326,7 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         warmup: opts.warmup.unwrap_or(DEFAULT_WARMUP),
         counters: true,
     };
-    let seed = opts.seed.unwrap_or_else(|| fastrand::u64(..));
+    let seed = opts.seed.unwrap_or_else(random_seed);
     if opts.dry_run {
         print_plan(
             &bench,
@@ -502,7 +502,7 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
         return Ok(());
     }
 
-    let seed = opts.seed.unwrap_or_else(|| fastrand::u64(..));
+    let seed = opts.seed.unwrap_or_else(random_seed);
     let mut measured = Vec::new();
     let mut failed = Vec::new();
     for (name, multi, subjects) in &plans {
@@ -511,6 +511,12 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
         failed.extend(f);
     }
     finish(measured, failed, &opts, seed, settings)
+}
+
+/// A random seed below 2^53, so it survives any JSON reader — JavaScript and
+/// jq hold numbers as doubles — and is shorter to copy into `--seed`.
+fn random_seed() -> u64 {
+    fastrand::u64(..1 << 53)
 }
 
 /// Print a benchmark's subjects as they would run, for `tak run --dry-run`:
