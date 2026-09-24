@@ -53,12 +53,33 @@ pub fn check_str(value: &str) -> Result<()> {
     Ok(())
 }
 
-/// The names a template refers to as `vars.NAME` or `vars["NAME"]`. A plain
-/// scan rather than a parse: it only decides rendering order, and naming a
-/// var that does not exist just means nothing to wait for.
+/// The names a template refers to as `vars.NAME` or `vars["NAME"]`, inside
+/// `{{ }}` and `{% %}` tags only: text outside a tag, or in a `{# #}`
+/// comment, is literal and never waits on anything. A plain scan rather than
+/// a parse: it only decides rendering order, and naming a var that does not
+/// exist just means nothing to wait for.
 fn var_refs(template: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = template;
+    loop {
+        let open = [("{{", "}}"), ("{%", "%}"), ("{#", "#}")]
+            .iter()
+            .filter_map(|&(o, c)| rest.find(o).map(|i| (i, o, c)))
+            .min_by_key(|&(i, ..)| i);
+        let Some((i, o, c)) = open else { break };
+        let inner = &rest[i + o.len()..];
+        let end = inner.find(c).unwrap_or(inner.len());
+        if o != "{#" {
+            refs_in(&inner[..end], &mut out);
+        }
+        rest = &inner[(end + c.len()).min(inner.len())..];
+    }
+    out
+}
+
+/// `vars.NAME` and `vars["NAME"]` within one tag's contents.
+fn refs_in(code: &str, out: &mut Vec<String>) {
+    let mut rest = code;
     while let Some(i) = rest.find("vars") {
         let after = &rest[i + 4..];
         let before_ok = rest[..i]
@@ -85,7 +106,6 @@ fn var_refs(template: &str) -> Vec<String> {
         }
         rest = after;
     }
-    out
 }
 
 /// Render every template in `s` for benchmark `bench`.
