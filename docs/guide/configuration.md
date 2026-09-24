@@ -161,8 +161,12 @@ run the concurrent fixers lost an edit every time, and were faster for it:
   own `check` replaces the benchmark's.
 - `--export-json` adds `checks` to each result that has one:
   `{"passed": 18, "total": 20, "samples": [true, …]}`, with `samples` in the same order as
-  `times`. The hyperfine fields are unchanged. `--record` stores the timings as usual; the pass
-  count isn't stored in git notes.
+  `times`. The hyperfine fields are unchanged.
+- **Recorded history has no verdicts.** `--record` stores the timings in git notes as usual,
+  but not whether their checks passed, so `tak history` and `tak compare` can show a fast
+  time from a failed sample with nothing marking it. `tak compare` keeps each metric's
+  minimum and treats lower as better, and a pass rate fits neither, so it isn't stored. If
+  you record a benchmark that has a `check`, make sure its checks pass before recording.
 
 ## Comparing several programs
 

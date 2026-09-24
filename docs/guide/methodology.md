@@ -61,11 +61,19 @@ spaced rounds rather than only the early ones.
 A `prepare` step can reset state before each sample without being timed. It runs directly
 before its sample, so the reset is as fresh for the last round as for the first.
 
-A `check` step verifies each timed sample's result, also untimed, directly after it. The
-verdict belongs to the same sample as the time, so a program that is fast because it
-sometimes does the work wrong can't post that time without also posting its failures. A
+A `check` step verifies each timed sample's result, also untimed, directly after it. A
 failure that only happens under the timing conditions, such as a race, is seen in the
-samples that were timed rather than in separate verification runs.
+samples that were timed rather than in separate verification runs. In a run's live results,
+the terminal summary and `--export-json`, each verdict sits next to the time it belongs to,
+so a program that is fast because it sometimes does the work wrong can't post that time
+there without also posting its failures.
+
+Recorded history doesn't carry the verdicts. `--record` stores the timings in git notes
+without them, so `tak history` and `tak compare` can show a fast time from a sample whose
+check failed with nothing marking it. The verdict isn't stored because it doesn't fit how
+recorded metrics are read: `tak compare` keeps each metric's minimum and treats lower as
+better, and a pass rate is neither. A project that records a benchmark with a `check`
+should make sure its checks pass before recording.
 
 The seed makes an order repeatable. It does not make the timings repeatable: wall-clock
 comparisons between programs are still subject to the noise described above, and are never
