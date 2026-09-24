@@ -26,12 +26,14 @@ only one representative path moves, the change is more likely inside that path.
 The measured command must not depend on the network, the clock, a floating version, or mutable
 machine state. Verify that claim rather than assuming it: point network configuration at a
 dead port, run the benchmark, and confirm that it still succeeds with identical output. Use an
-offline mode when the subject provides one. Prepare caches and stores before `tak run`, outside
-the measured command. When every sample needs a reset, such as an empty `node_modules`, declare it
-as [`prepare`](/guide/configuration#resetting-state-before-each-sample), which runs untimed
-before each sample. When a command's result can come out wrong, such as fixers that may race on
-the same files, declare a [`check`](/guide/configuration#checking-every-sample) that verifies
-it after every timed sample.
+offline mode when the subject provides one. Prepare caches and stores outside the measured
+command: before `tak run`, or in an untimed [`setup`](/guide/configuration#setting-up-once-before-measuring),
+which runs once for each subject before sampling starts. When every sample needs a reset, such
+as an empty `node_modules`, declare it as
+[`prepare`](/guide/configuration#resetting-state-before-each-sample), which runs untimed before
+each sample. When a command's result can come out wrong, such as fixers that may
+race on the same files, declare a [`check`](/guide/configuration#checking-every-sample) that
+verifies it after every timed sample.
 
 The comments in mise's [benchmark configuration](https://github.com/jdx/mise/blob/main/tak.toml)
 and aube's [benchmark configuration](https://github.com/jdx/aube/blob/main/tak.toml) explain
@@ -281,7 +283,7 @@ Before treating the comparison as a required check:
 
 - `tak doctor` reports Valgrind and the runner class you intended;
 - every measured command succeeds with its network pointed at a dead port;
-- setup and cache warming happen before `tak run` or in an untimed `prepare`;
+- setup and cache warming happen before `tak run` or in an untimed `setup` or `prepare`;
 - only main push tips are pushed into `refs/notes/tak`;
 - main and pull requests use the same build inputs and runner class; and
 - only instruction counts gate CI; timing remains report-only.

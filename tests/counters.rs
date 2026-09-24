@@ -182,6 +182,8 @@ fn a_subject_is_prepared_before_every_counted_run() {
                 .map(String::from)
                 .to_vec(),
         ),
+        setup: None,
+        setup_dir: None,
         // Never run under cachegrind: those runs are not samples anyone
         // reports, so the log below has no `check` line.
         check: Some(

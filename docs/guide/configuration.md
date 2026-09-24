@@ -61,6 +61,57 @@ the measurement. `dir` is relative to `tak.toml` and only sets the working direc
 the ones in `env.deny`, so a variable written here reaches the command even when it is denied
 by default.
 
+## Setting up once before measuring
+
+`setup` runs once for each subject of a benchmark, before that benchmark takes its first
+sample, and is not timed. Use it for work every sample needs but that only has to happen once,
+such as cloning a fixture and committing each tool's configuration to it, or priming a cache:
+
+```toml
+[defaults]
+dir = ".work/{{ subject }}"
+setup = ["./bench/setup.sh", "{{ subject }}", ".work/{{ subject }}"]
+prepare = ["sh", "-c", "git reset -q --hard && git clean -qfd"]
+
+[subject.hk]
+cmd = ["hk", "check", "--all"]
+
+[subject.lefthook]
+cmd = ["lefthook", "run", "check", "--all-files"]
+
+[bench.check-all]
+subjects = ["hk", "lefthook"]
+```
+
+Here `setup.sh` clones the fixture into `.work/hk` or `.work/lefthook`, commits that tool's
+configuration and runs the tool once to fill its cache. `prepare` then only has to reset the
+checkout before each sample.
+
+- **It runs in the directory holding `tak.toml`, not in `dir`.** Setup usually creates or
+  recreates `dir`, and it can't start inside a directory that doesn't exist yet or that it's
+  about to delete. `dir` is written relative to `tak.toml` too, so the same path works as an
+  argument to `setup`, as above. To run something inside `dir`, `cd` into it:
+  `["sh", "-c", "cd .work/hk && hk check --all"]`. Otherwise `setup` is like `prepare`: the same
+  syntax, templates, the subject's `env`, and no implicit shell.
+- **It runs before the benchmark's sampling starts.** Every subject's setup runs, in name
+  order, before the benchmark's first warmup, so no sample shares the machine with a setup. It doesn't count
+  toward `budget` or `runs = "auto"`'s sizing or the progress estimate. Progress shows which
+  subject is being set up.
+- **It runs once per benchmark.** A shared subject listed by two benchmarks is set up again
+  for the second one, because the first benchmark's samples may have changed its state. Make
+  an expensive setup reuse what it built before when that is safe.
+- **It only runs for subjects that will be measured.** A subject left out with `--subject` or
+  switched off by `when` isn't set up, and `--dry-run` prints `setup` without running it.
+- **A failing setup drops the subject**, as a failing `prepare` does: tak measures the rest,
+  exits non-zero, and `--record` writes nothing.
+- **Its output is hidden.** When it fails, tak reports the last line of its stderr. Run the
+  command by hand to see the rest.
+
+Settings stack the same way as `prepare`: a subject's own `setup` replaces the benchmark's,
+which replaces the one in `[defaults]`. There is no matching `teardown`. The next run's setup
+can clean up whatever the last one left, and keeping it around lets you inspect a subject's
+directory after a run.
+
 ## Checking every sample
 
 A fast time is only worth reporting if the command did the right work. `check` runs after every
@@ -139,9 +190,9 @@ tak interleaves the samples: every round takes one sample of each subject in a f
 order, rather than every sample of one subject and then the next. See
 [methodology](/guide/methodology#comparing-programs) for why.
 
-- Subjects inherit the benchmark's `runs`, `warmup`, `prepare`, `check`, `dir` and `env`. A
-  subject's own `prepare` or `check` replaces the benchmark's, and its `env` entries override
-  matching keys.
+- Subjects inherit the benchmark's `runs`, `warmup`, `setup`, `prepare`, `check`, `dir` and
+  `env`. A subject's own `setup`, `prepare` or `check` replaces the benchmark's, and its `env`
+  entries override matching keys.
 - A subject with fewer `runs` than the others is spread evenly across the run.
 - Each subject is recorded as its own series, with the subject name as the tool. Instruction
   counts are off for subjects unless they set `counters = true`, so another program's upgrade
@@ -158,7 +209,7 @@ leaves the fast one under-sampled. `runs = "auto"` lets tak decide per subject:
 ```toml
 [bench.install]
 runs = "auto"
-budget = "30s"   # wall time to spend per subject, prepare included (default 30s)
+budget = "30s"   # wall time to spend per subject, prepare included, setup not (default 30s)
 min_runs = 5     # never fewer (default 5)
 max_runs = 50    # never more (default 50)
 ```
@@ -246,15 +297,15 @@ Settings stack from least to most specific: `[defaults]`, then the benchmark, th
 shared `[subject.NAME]`, then the benchmark's own `[bench.B.subject.NAME]`. Each layer's
 setting replaces the one before, except `env` and `vars`, which merge key by key. `[defaults]`
 takes every benchmark setting (`runs`, `warmup`, `budget`, `min_runs`, `max_runs`,
-`prepare`, `check`, `dir`, `env`, `vars`). It is a separate table because `[env]` already holds
-`env.deny` and `env.allow`.
+`setup`, `prepare`, `check`, `dir`, `env`, `vars`). It is a separate table because `[env]`
+already holds `env.deny` and `env.allow`.
 
 ## Templates
 
 <!-- tera syntax looks like Vue interpolation; v-pre stops VitePress evaluating it. -->
 ::: v-pre
-Values in `cmd`, `prepare`, `check`, `dir`, `env` and `vars` are [tera](https://keats.github.io/tera/)
-templates, the same syntax mise uses. tak renders them itself before anything runs, so a
+Values in `cmd`, `setup`, `prepare`, `check`, `dir`, `env` and `vars` are
+[tera](https://keats.github.io/tera/) templates, the same syntax mise uses. tak renders them itself before anything runs, so a
 command can use a path that only exists at run time and still be a plain argument list,
 without a shell:
 
