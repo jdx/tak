@@ -70,6 +70,9 @@ struct Layer {
     /// Untimed command run once per benchmark and subject, before its first
     /// sample, in the directory holding `tak.toml`.
     setup: Option<Cmd>,
+    /// Untimed command run after every timed sample; its exit status says
+    /// whether that sample did the right work.
+    check: Option<Cmd>,
     /// Command whose output names the subject's version, run once after
     /// `setup` and before sampling, and reported in `--export-json`.
     version_cmd: Option<Cmd>,
@@ -298,6 +301,8 @@ pub struct Subject {
     /// Where `setup` runs: set by [`Subject::anchor`] to the directory holding
     /// `tak.toml`. `None` runs it in tak's own working directory.
     pub setup_dir: Option<PathBuf>,
+    /// Run after every timed sample, untimed. Exit 0 means the sample passed.
+    pub check: Option<Vec<String>>,
     /// Run once, untimed, after `setup` and before the first warmup; its first
     /// line of output is the version exported for this subject. See
     /// [`crate::measure::interleaved_with_versions`].
@@ -347,6 +352,9 @@ impl Subject {
         }
         if let Some(setup) = &mut self.setup {
             program(setup);
+        }
+        if let Some(check) = &mut self.check {
+            program(check);
         }
         if let Some(version) = &mut self.version_cmd {
             program(version);
@@ -465,6 +473,9 @@ impl Config {
             if let Some(p) = &l.setup {
                 cmd(out, &format!("{at}.setup"), p);
             }
+            if let Some(c) = &l.check {
+                cmd(out, &format!("{at}.check"), c);
+            }
             if let Some(v) = &l.version_cmd {
                 cmd(out, &format!("{at}.version_cmd"), v);
             }
@@ -511,8 +522,8 @@ impl Config {
 /// Stack `layers`, least specific first, into one subject. A later layer's
 /// setting replaces an earlier one's — a subject's own prepare replaces the
 /// benchmark's rather than running after it, since the two usually reset the
-/// same state, and `setup` likewise — except `env` and `vars`, which merge key
-/// by key.
+/// same state, and `setup` and `check` likewise — except `env` and `vars`,
+/// which merge key by key.
 fn resolve(
     name: &str,
     cmd: &Cmd,
@@ -563,6 +574,10 @@ fn resolve(
             .transpose()
             .context("setup")?,
         setup_dir: None,
+        check: last(layers, |l| l.check.as_ref())
+            .map(Cmd::argv)
+            .transpose()
+            .context("check")?,
         version_cmd: last(layers, |l| l.version_cmd.as_ref())
             .map(Cmd::argv)
             .transpose()
@@ -826,6 +841,85 @@ cmd = "mycli 'two words'""#,
     }
 
     #[test]
+    fn an_empty_check_is_rejected() {
+        let err = Config::parse("[bench.a]\ncmd = \"x\"\ncheck = []").unwrap_err();
+        assert!(format!("{err:#}").contains("check"), "{err:#}");
+    }
+
+    /// `check` stacks like `prepare`: the most specific layer that sets one
+    /// wins, and one that says nothing inherits.
+    #[test]
+    fn check_stacks_like_prepare() {
+        let c = Config::parse(
+            r#"
+            [defaults]
+            check = "git diff --quiet"
+
+            [subject.a]
+            cmd = ["a"]
+
+            [subject.b]
+            cmd = ["b"]
+            check = ["./verify", "b"]
+
+            [bench.plain]
+            cmd = "x"
+
+            [bench.cmp]
+            subjects = ["a", "b"]
+            [bench.cmp.subject.c]
+            cmd = ["c"]
+            check = ["./verify", "{{ subject }}"]
+
+            [bench.own]
+            subjects = ["a", "b"]
+            check = ["./bench-check"]
+            [bench.own.subject.b]
+            check = "./local-check"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(only(&c, "plain").check.unwrap(), ["git", "diff", "--quiet"]);
+        let cmp = c.subjects("cmp").unwrap();
+        assert_eq!(
+            cmp[0].check.as_deref().unwrap(),
+            ["git", "diff", "--quiet"],
+            "inherited from defaults"
+        );
+        assert_eq!(cmp[1].check.as_deref().unwrap(), ["./verify", "b"]);
+        assert_eq!(
+            cmp[2].check.as_deref().unwrap(),
+            ["./verify", "{{ subject }}"],
+            "rendered later"
+        );
+        let own = c.subjects("own").unwrap();
+        assert_eq!(
+            own[0].check.as_deref().unwrap(),
+            ["./bench-check"],
+            "bench over defaults"
+        );
+        assert_eq!(
+            own[1].check.as_deref().unwrap(),
+            ["./local-check"],
+            "bench's own subject table over the shared subject"
+        );
+        assert!(
+            Config::parse("[bench.a]\ncmd = \"x\"")
+                .unwrap()
+                .subjects("a")
+                .unwrap()[0]
+                .check
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_broken_check_template_is_rejected_at_parse_time() {
+        let err = Config::parse("[bench.a]\ncmd = \"x\"\ncheck = [\"{{ env.X \"]").unwrap_err();
+        assert!(format!("{err:#}").contains("check"), "{err:#}");
+    }
+
+    #[test]
     fn zero_runs_is_rejected_at_parse_time() {
         assert!(Config::parse("[bench.a.subject.b]\ncmd = \"x\"\nruns = 0").is_err());
     }
@@ -842,7 +936,7 @@ cmd = "mycli 'two words'""#,
     fn a_relative_program_path_is_anchored_at_the_config() {
         let root = Path::new("/repo");
         let mut s = Config::parse(
-            "[bench.a]\ncmd = [\"./target/x\", \"./arg\"]\nprepare = \"bin/reset\"\ndir = \"fix\"",
+            "[bench.a]\ncmd = [\"./target/x\", \"./arg\"]\nprepare = \"bin/reset\"\ncheck = \"./bin/verify ./out\"\ndir = \"fix\"",
         )
         .unwrap()
         .subjects("a")
@@ -855,6 +949,7 @@ cmd = "mycli 'two words'""#,
             "arguments are left alone"
         );
         assert_eq!(s.prepare.unwrap(), ["/repo/bin/reset"]);
+        assert_eq!(s.check.unwrap(), ["/repo/./bin/verify", "./out"]);
         assert_eq!(s.dir.unwrap(), Path::new("/repo/fix"));
 
         let mut bare = Config::parse("[bench.a]\ncmd = \"mycli --version\"")

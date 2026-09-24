@@ -114,6 +114,119 @@ which replaces the one in `[defaults]`. There is no matching `teardown`. The nex
 can clean up whatever the last one left, and keeping it around lets you inspect a subject's
 directory after a run.
 
+## Recording each program's version
+
+A comparison has to say which version of each program it measured. `version_cmd` names a
+command that prints a subject's version:
+
+```toml
+[defaults]
+runs = "auto"
+
+[subject.mycli]
+cmd = ["./target/release/mycli", "run", "pre-commit"]
+version_cmd = ["./target/release/mycli", "--version"]
+
+[subject.othertool]
+cmd = ["othertool", "run", "pre-commit"]
+version_cmd = "othertool version"
+
+[bench.hooks]
+subjects = ["mycli", "othertool"]
+```
+
+Before sampling, tak runs each subject's `version_cmd` once, untimed, in the subject's `dir`
+and `env`. It runs after every subject's `setup` and before any warmup, so a `setup` that
+installs or builds the program is done before tak asks for its version. A subject whose
+`setup` fails isn't asked. The command runs with the same variables removed, so it sees what
+the measured command sees. The first non-empty line it prints becomes that subject's `version`
+in `--export-json`. tak reads stdout, or stderr when stdout is empty, as with `java -version`. `--record` stores the same
+string as the measurement's `version`.
+
+::: v-pre
+`version_cmd` [layers](#sharing-settings-between-benchmarks) like `prepare`, and it's a
+[template](#templates), so one line in `[defaults]` can cover subjects that answer the same
+flag:
+
+```toml
+[defaults]
+version_cmd = ["{{ env.BIN_DIR }}/{{ subject }}", "--version"]
+```
+:::
+
+A `version_cmd` that exits non-zero, prints nothing, or takes longer than 10 seconds doesn't
+drop the subject. tak stops one that runs too long, prints a warning, measures the subject as
+usual, and exports its `version` as `null`. On Linux and macOS, stopping it also stops any
+processes it started, so nothing it left behind runs during the samples. On Windows only the
+command itself is stopped. A non-zero exit always means `null`, even when the
+command printed something that looks like a version: a failing command's output is an error or
+a usage message. Only the first 8 KiB of each output stream is kept; the rest is read and
+discarded, so a long banner doesn't stop the command from finishing. If the command leaves a
+background process holding its output open, tak uses what arrived before the command exited
+instead of waiting for that process. tak doesn't stop a background process left by a command
+that finished in time, because a tool may start a daemon on purpose. A subject without
+`version_cmd` has no `version` key. `--dry-run` lists each subject's `version_cmd`.
+
+## Checking every sample
+
+A fast time is only worth reporting if the command did the right work. `check` runs after every
+timed sample, untimed, in the same directory and environment as the command. Exit status 0 means
+the sample passed; anything else means it failed. Use it when a command's output can be wrong
+some of the time, such as formatters that race when run concurrently on the same files:
+
+```toml
+[bench.fix]
+runs = 20
+warmup = 1
+dir = "fixture"   # a git repository with tags `dirty` (unformatted) and `clean` (the expected result)
+prepare = ["git", "reset", "--hard", "--quiet", "dirty"]
+check = ["git", "diff", "--quiet", "clean"]
+
+# Two fixers one after the other.
+[bench.fix.subject.serial]
+cmd = ["sh", "-c", "sed -i 's/foo/bar/' a.txt; sed -i 's/ *$//' a.txt"]
+
+# The same two fixers at once, on the same file.
+[bench.fix.subject.parallel]
+cmd = ["sh", "-c", "sed -i 's/foo/bar/' a.txt & sed -i 's/ *$//' a.txt & wait"]
+```
+
+`git diff --quiet clean` exits 1 when the working tree differs from the `clean` commit. In this
+run the concurrent fixers lost an edit every time, and were faster for it:
+
+```text
+  fix: 2 subjects, interleaved (--seed 1)
+  warning: fix (parallel): check failed after 20 of 20 samples (sample 1, 2, 3, 4, 5, 6, 7, 8, …); first: check `git` exited with exit status: 1
+    parallel  min      1.96  p50      2.13  mean      2.15 ± 0.15     max      2.47 ms  n=20  checks 0/20
+    serial    min      2.49  p50      2.72  mean      2.78 ± 0.21     max      3.24 ms  n=20  checks 20/20
+```
+
+- A failing check doesn't drop the subject, and without `--record` it doesn't fail the run.
+  Every sample is kept, and the pass count is the result: a race that loses one sample in
+  twenty shows up as `checks 19/20` on the subject's summary line. tak warns on stderr, listing
+  the failed sample numbers and the last line the first failing check wrote to stderr. The
+  summary doesn't say which time came from which sample, so it can't tell you whether the
+  minimum is from a failed one. The export can.
+- A check that can't be started at all, such as a mistyped program, is a mistake in `tak.toml`
+  rather than a result. That drops the subject like a failing `cmd`.
+- Warmups aren't checked, because they aren't kept. The check isn't counted toward a
+  `runs = "auto"` budget, which is sized from prepare and the command alone.
+- The instruction-count runs of a subject with `counters = true` are separate from the timed
+  samples, and the check doesn't run after them.
+- `check` uses the same syntax as `cmd` and `prepare`: no implicit shell, and a program path
+  containing a `/` is found relative to `tak.toml`. It stacks like `prepare`, so a subject's
+  own `check` replaces the benchmark's.
+- `--export-json` adds `checks` to each result that has one:
+  `{"passed": 18, "total": 20, "samples": [true, …]}`, with `samples` in the same order as
+  `times`, so each verdict can be matched to its time. The hyperfine fields are unchanged.
+- **`--record` writes nothing if any check failed.** Git notes keep timings but not
+  verdicts, so the timings of a run with a failed check would be stored as if it had
+  passed. `tak compare` keeps each metric's minimum and treats lower as better, and a pass
+  rate fits neither rule, so it isn't stored alongside them. Instead, tak names each subject
+  whose check failed and how many of its samples failed, writes no notes, and exits
+  non-zero, as it does when a subject is dropped. `--export-json` is still written, with the
+  verdicts.
+
 ## Comparing several programs
 
 To compare programs against each other, declare them as subjects of one benchmark instead of
@@ -140,9 +253,9 @@ tak interleaves the samples: every round takes one sample of each subject in a f
 order, rather than every sample of one subject and then the next. See
 [methodology](/guide/methodology#comparing-programs) for why.
 
-- Subjects inherit the benchmark's `runs`, `warmup`, `setup`, `prepare`, `dir` and `env`. A
-  subject's own `setup` or `prepare` replaces the benchmark's, and its `env` entries override
-  matching keys.
+- Subjects inherit the benchmark's `runs`, `warmup`, `setup`, `prepare`, `check`, `dir` and
+  `env`. A subject's own `setup`, `prepare` or `check` replaces the benchmark's, and its `env`
+  entries override matching keys.
 - A subject with fewer `runs` than the others is spread evenly across the run.
 - Each subject is recorded as its own series, with the subject name as the tool. Instruction
   counts are off for subjects unless they set `counters = true`, so another program's upgrade
@@ -264,8 +377,14 @@ JavaScript and jq, and `runner` is the class `--record` would store the run unde
 A value tak can't read is `null` rather than an error. None of this is stored by `--record`:
 series are partitioned by `runner`, and a kernel update shouldn't split one.
 
-Each result has `bench` and `subject`, and `version` when the subject declares a
-`version_cmd` (see [below](#recording-each-program-s-version)). `user` and `system` are absent because tak doesn't measure CPU time.
+Each result has `bench` and `subject`. Two more keys appear only when the subject asks for them:
+
+- `version`, for a subject with a [`version_cmd`](#recording-each-program-s-version): the first
+  line it printed, or `null` if it failed.
+- `checks`, for a subject with a [`check`](#checking-every-sample): how many samples passed,
+  out of how many, and each sample's verdict in the same order as `times`.
+
+`user` and `system` are absent because tak doesn't measure CPU time.
 
 ## Sharing settings between benchmarks
 
@@ -302,15 +421,15 @@ Settings stack from least to most specific: `[defaults]`, then the benchmark, th
 shared `[subject.NAME]`, then the benchmark's own `[bench.B.subject.NAME]`. Each layer's
 setting replaces the one before, except `env` and `vars`, which merge key by key. `[defaults]`
 takes every benchmark setting (`runs`, `warmup`, `budget`, `min_runs`, `max_runs`,
-`setup`, `prepare`, `version_cmd`, `dir`, `env`, `vars`). It is a separate table because `[env]` already holds
-`env.deny` and `env.allow`.
+`setup`, `prepare`, `check`, `version_cmd`, `dir`, `env`, `vars`). It is a separate table
+because `[env]` already holds `env.deny` and `env.allow`.
 
 ## Templates
 
 <!-- tera syntax looks like Vue interpolation; v-pre stops VitePress evaluating it. -->
 ::: v-pre
-Values in `cmd`, `setup`, `prepare`, `version_cmd`, `dir`, `env` and `vars` are [tera](https://keats.github.io/tera/)
-templates, the same syntax mise uses. tak renders them itself before anything runs, so a
+Values in `cmd`, `setup`, `prepare`, `check`, `version_cmd`, `dir`, `env` and `vars` are
+[tera](https://keats.github.io/tera/) templates, the same syntax mise uses. tak renders them itself before anything runs, so a
 command can use a path that only exists at run time and still be a plain argument list,
 without a shell:
 
@@ -340,58 +459,6 @@ that sends a command to the wrong path. Template syntax is checked for the whole
 front; values are rendered only for the benchmarks being run, so a variable needed by one
 benchmark doesn't have to be set to run another.
 :::
-
-## Recording each program's version
-
-A comparison has to say which version of each program it measured. `version_cmd` names a
-command that prints a subject's version:
-
-```toml
-[defaults]
-runs = "auto"
-
-[subject.mycli]
-cmd = ["./target/release/mycli", "run", "pre-commit"]
-version_cmd = ["./target/release/mycli", "--version"]
-
-[subject.othertool]
-cmd = ["othertool", "run", "pre-commit"]
-version_cmd = "othertool version"
-
-[bench.hooks]
-subjects = ["mycli", "othertool"]
-```
-
-Before sampling, tak runs each subject's `version_cmd` once, untimed, in the subject's `dir`
-and `env`. It runs after every subject's `setup` and before any warmup, so a `setup` that
-installs or builds the program is done before tak asks for its version. A subject whose
-`setup` fails isn't asked. The command runs with the same variables removed, so it sees what
-the measured command sees. The first non-empty line it prints becomes that subject's `version`
-in `--export-json`. tak reads stdout, or stderr when stdout is empty, as with `java -version`. `--record` stores the same
-string as the measurement's `version`.
-
-::: v-pre
-`version_cmd` layers like `prepare`, and it's a template, so one line in `[defaults]` can cover
-subjects that answer the same flag:
-
-```toml
-[defaults]
-version_cmd = ["{{ env.BIN_DIR }}/{{ subject }}", "--version"]
-```
-:::
-
-A `version_cmd` that exits non-zero, prints nothing, or takes longer than 10 seconds doesn't
-drop the subject. tak stops one that runs too long, prints a warning, measures the subject as
-usual, and exports its `version` as `null`. On Linux and macOS, stopping it also stops any
-processes it started, so nothing it left behind runs during the samples. On Windows only the
-command itself is stopped. A non-zero exit always means `null`, even when the
-command printed something that looks like a version: a failing command's output is an error or
-a usage message. Only the first 8 KiB of each output stream is kept; the rest is read and
-discarded, so a long banner doesn't stop the command from finishing. If the command leaves a
-background process holding its output open, tak uses what arrived before the command exited
-instead of waiting for that process. tak doesn't stop a background process left by a command
-that finished in time, because a tool may start a daemon on purpose. A subject without
-`version_cmd` has no `version` key. `--dry-run` lists each subject's `version_cmd`.
 
 ## Conditions
 

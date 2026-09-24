@@ -236,8 +236,8 @@
           {
             "name": "dry-run",
             "usage": "--dry-run",
-            "help": "Print what would run — every subject's command, setup, prepare, directory, environment and run count, templates rendered — without running any of it.",
-            "help_first_line": "Print what would run — every subject's command, setup, prepare, directory, environment and run count, templates rendered — without running any of it.",
+            "help": "Print what would run — every subject's command, setup, prepare, check, directory, environment and run count, templates rendered — without running any of it.",
+            "help_first_line": "Print what would run — every subject's command, setup, prepare, check, directory, environment and run count, templates rendered — without running any of it.",
             "short": [],
             "long": [
               "dry-run"

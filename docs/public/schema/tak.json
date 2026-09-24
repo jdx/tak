@@ -130,6 +130,10 @@
         "description": "Untimed command run before every sample, warmups included.",
         "$ref": "#/definitions/cmd"
       },
+      "check": {
+        "description": "Untimed command run after every timed sample, not after warmups. Exit 0 means the sample passed; a failure is counted and reported, and does not drop the subject.",
+        "$ref": "#/definitions/cmd"
+      },
       "setup": {
         "description": "Untimed command run once per benchmark and subject, before any subject's first sample, from the directory holding tak.toml (not `dir`), so it can create `dir`.",
         "$ref": "#/definitions/cmd"
@@ -179,6 +183,9 @@
         "prepare": {
           "$ref": "#/definitions/layerProperties/prepare"
         },
+        "check": {
+          "$ref": "#/definitions/layerProperties/check"
+        },
         "setup": {
           "$ref": "#/definitions/layerProperties/setup"
         },
@@ -224,6 +231,9 @@
         },
         "prepare": {
           "$ref": "#/definitions/layerProperties/prepare"
+        },
+        "check": {
+          "$ref": "#/definitions/layerProperties/check"
         },
         "setup": {
           "$ref": "#/definitions/layerProperties/setup"
@@ -286,6 +296,9 @@
         },
         "prepare": {
           "$ref": "#/definitions/layerProperties/prepare"
+        },
+        "check": {
+          "$ref": "#/definitions/layerProperties/check"
         },
         "setup": {
           "$ref": "#/definitions/layerProperties/setup"

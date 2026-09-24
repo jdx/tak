@@ -163,6 +163,11 @@ pub fn render(mut s: Subject, bench: &str, env: &BTreeMap<String, String>) -> Re
             *a = one(&ctx, "setup", a)?;
         }
     }
+    if let Some(check) = &mut s.check {
+        for a in check {
+            *a = one(&ctx, "check", a)?;
+        }
+    }
     if let Some(version) = &mut s.version_cmd {
         for a in version {
             *a = one(&ctx, "version_cmd", a)?;
@@ -206,6 +211,7 @@ mod tests {
             cmd = ["{{ env.AUBE_BIN }}", "install", "--lockfile={{ vars.lockfile }}"]
             prepare = ["cp", "{{ vars.saved }}", "."]
             setup = ["./clone", "{{ env.BENCH_DIR }}/project-{{ subject }}"]
+            check = ["{{ env.BENCH_DIR }}/verify", "{{ bench }}", "{{ subject }}"]
             dir = "{{ env.BENCH_DIR }}/project-{{ subject }}"
             env = { HOME = "{{ env.BENCH_DIR }}/home-{{ subject }}", TAG = "{{ bench }}" }
             vars = { lockfile = "aube-lock.yaml", saved = "{{ env.BENCH_DIR }}/saved-{{ subject }}" }
@@ -223,6 +229,7 @@ mod tests {
         assert_eq!(r.cmd, ["/bin/aube", "install", "--lockfile=aube-lock.yaml"]);
         assert_eq!(r.prepare.unwrap(), ["cp", "/tmp/x/saved-aube", "."]);
         assert_eq!(r.setup.unwrap(), ["./clone", "/tmp/x/project-aube"]);
+        assert_eq!(r.check.unwrap(), ["/tmp/x/verify", "b", "aube"]);
         assert_eq!(r.dir.unwrap(), std::path::Path::new("/tmp/x/project-aube"));
         assert_eq!(r.env["HOME"], "/tmp/x/home-aube");
         assert_eq!(r.env["TAG"], "b");

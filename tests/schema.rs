@@ -30,6 +30,7 @@ min_runs = 5
 max_runs = 50
 prepare = ["true"]
 setup = ["true"]
+check = ["true"]
 version_cmd = ["true", "--version"]
 dir = "."
 env = { A = "1" }
@@ -46,6 +47,7 @@ min_runs = 1
 max_runs = 2
 prepare = "true"
 setup = "true"
+check = "true"
 version_cmd = "true --version"
 dir = "."
 env = { B = "2" }
@@ -61,6 +63,7 @@ min_runs = 1
 max_runs = 3
 prepare = ["true"]
 setup = "true"
+check = ["true"]
 version_cmd = ["true"]
 dir = "."
 env = { C = "3" }
