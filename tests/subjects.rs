@@ -662,7 +662,7 @@ cmd = ["true"]
     let hidden = p.run(&["--no-progress", "--subject", "hidden"]);
     assert!(!hidden.status.success());
     assert!(
-        stderr(&hidden).contains("benchmark `off` has a false `when`"),
+        stderr(&hidden).contains("`when` is false for it in benchmark `off`"),
         "{}",
         stderr(&hidden)
     );
@@ -671,4 +671,28 @@ cmd = ["true"]
     assert!(none.status.success(), "{}", stderr(&none));
     assert!(String::from_utf8_lossy(&none.stdout).contains("nothing to run"));
     assert!(stderr(&none).contains("skipping off"), "{}", stderr(&none));
+}
+
+/// A subject switched off in one benchmark is still measured by another
+/// that runs it; --subject does not abort over the first.
+#[test]
+fn a_subject_off_in_one_benchmark_still_runs_in_another() {
+    let p = Project::new(
+        "when-across",
+        r#"
+[defaults]
+warmup = 0
+runs = 1
+
+[bench.a.subject.x]
+when = "false"
+cmd = ["sh", "-c", "echo a >> log"]
+
+[bench.b.subject.x]
+cmd = ["sh", "-c", "echo b >> log"]
+"#,
+    );
+    let out = p.run(&["--no-progress", "--subject", "x"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(p.log(), ["b"]);
 }

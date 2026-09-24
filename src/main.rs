@@ -393,8 +393,9 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
     let mut seen = std::collections::BTreeSet::new();
     let env = tak_cli::template::env();
     let mut skipped = Vec::new();
-    // Subjects of benchmarks a `when` switched off, so a --subject naming
-    // one is told why it will not run rather than that it does not exist.
+    // Subjects a `when` switched off — their own, or their benchmark's — so
+    // a --subject naming one is told why it will not run, rather than that
+    // it does not exist.
     let mut hidden: std::collections::BTreeMap<String, (String, String)> = Default::default();
     for (name, b) in selected {
         // `when` is decided before anything is rendered, so a skipped
@@ -425,14 +426,12 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
                     if !tak_cli::condition::eval(when, &env, &name, Some(&s.name))
                         .with_context(|| format!("benchmark `{name}`, subject `{}`", s.name))? =>
                 {
-                    // Asked for by name, and switched off by its own `when`:
-                    // say so rather than silently measuring nothing.
-                    if opts.subjects.contains(&s.name) {
-                        bail!(
-                            "subject `{}` in benchmark `{name}` was asked for, but its `when` is false: {when}",
-                            s.name
-                        );
-                    }
+                    // Remembered rather than fatal: another benchmark may
+                    // still measure a subject this one switches off. Only a
+                    // requested subject no benchmark runs is an error, below.
+                    hidden
+                        .entry(s.name.clone())
+                        .or_insert_with(|| (name.clone(), when.clone()));
                     skipped.push((name.clone(), Some(s.name.clone()), when.clone()));
                 }
                 _ => kept.push(s),
@@ -466,12 +465,22 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
         }
         plans.push((name, b.is_multi(), subjects));
     }
+    // A requested subject that no benchmark will measure: say why.
+    let planned: std::collections::BTreeSet<&str> = plans
+        .iter()
+        .flat_map(|(_, _, subjects)| subjects.iter().map(|s| s.name.as_str()))
+        .collect();
+    if let Some(off) = opts
+        .subjects
+        .iter()
+        .find(|s| !planned.contains(s.as_str()) && hidden.contains_key(*s))
+    {
+        let (bench, when) = &hidden[off];
+        bail!(
+            "subject `{off}` was asked for, but `when` is false for it in benchmark `{bench}`: {when}"
+        );
+    }
     if let Some(missing) = opts.subjects.iter().find(|s| !seen.contains(*s)) {
-        if let Some((bench, when)) = hidden.get(missing) {
-            bail!(
-                "subject `{missing}` was asked for, but its benchmark `{bench}` has a false `when`: {when}"
-            );
-        }
         bail!(
             "no subject `{missing}` in the selected benchmarks (found: {})",
             seen.into_iter().collect::<Vec<_>>().join(", ")
