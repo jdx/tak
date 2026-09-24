@@ -338,7 +338,15 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
 fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let found = match &opts.config {
-        Some(path) => Some((path.clone(), Config::load(path)?)),
+        // Absolute, so the directory commands are anchored to is too: a
+        // relative one would be re-resolved from each subject's own `dir`,
+        // and a bare `tak.toml` would have no parent at all.
+        Some(path) => {
+            let path = std::path::absolute(path)
+                .with_context(|| format!("could not resolve {}", path.display()))?;
+            let cfg = Config::load(&path)?;
+            Some((path, cfg))
+        }
         None => Config::find(&cwd)?,
     };
     let Some((path, cfg)) = found else {

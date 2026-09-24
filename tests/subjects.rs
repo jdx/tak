@@ -454,6 +454,31 @@ fn config_names_the_file_to_read() {
     let where_ = std::fs::read_to_string(p.path("sub/where")).unwrap();
     assert!(where_.trim_end().ends_with("sub"), "{where_}");
 
+    // A relative program path in a config named relatively, from its own
+    // directory: the bare-filename case, whose parent is empty.
+    std::fs::create_dir(p.path("sub/bin")).unwrap();
+    std::fs::write(p.path("sub/bin/probe"), "#!/bin/sh\npwd > where2\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            p.path("sub/bin/probe"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        p.path("sub/rel.toml"),
+        "[bench.rel]\nwarmup = 0\nruns = 1\ncmd = [\"./bin/probe\"]\n",
+    )
+    .unwrap();
+    let rel = Command::new(env!("CARGO_BIN_EXE_tak"))
+        .args(["run", "--no-progress", "--config", "rel.toml"])
+        .current_dir(p.path("sub"))
+        .output()
+        .unwrap();
+    assert!(rel.status.success(), "{}", stderr(&rel));
+    assert!(p.path("sub/where2").exists());
+
     let missing = p.run(&["--config", "nope.toml"]);
     assert!(!missing.status.success());
     assert!(
