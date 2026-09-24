@@ -669,6 +669,14 @@ cmd = ["true"]
 
     let none = p.run(&["--no-progress", "--bench", "off"]);
     assert!(none.status.success(), "{}", stderr(&none));
+    // Recording or exporting nothing is a failure, so CI notices.
+    let export = p.run(&["--no-progress", "--bench", "off", "--export-json", "r.json"]);
+    assert!(!export.status.success());
+    assert!(
+        stderr(&export).contains("nothing to export"),
+        "{}",
+        stderr(&export)
+    );
     assert!(String::from_utf8_lossy(&none.stdout).contains("nothing to run"));
     assert!(stderr(&none).contains("skipping off"), "{}", stderr(&none));
 }

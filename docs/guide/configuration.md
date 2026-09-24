@@ -129,8 +129,9 @@ remaining is estimated separately for each subject from its own samples so far, 
 subject's remaining samples are counted at its own speed. Pass `--no-progress` to turn it off.
 
 tak also warns on stderr when a subject's samples look suspect:
-- **Slow outliers** (a modified z-score above 3.5): something else ran, or the command's work
-  varies. These don't change the minimum.
+- **Slow outliers** (a modified z-score above 3.5; when over half the samples are identical,
+  anything more than 25% away from them): something else ran, or the command's work varies.
+  These don't change the minimum.
 - **Fast outliers:** these can *be* the minimum, so check the command did the same work every
   time before trusting the headline number.
 - **A slow first sample:** the first timed sample took over twice the median of the rest, so
@@ -250,8 +251,9 @@ A condition can use `env` (tak's environment), `os` and `arch` (as Rust names th
 `macos`, `x86_64`, `aarch64`), `ci` (whether `CI` is set to anything but empty or `false`),
 `bench`, and `subject`. It must evaluate to `true` or `false`. Conditions are decided before
 templates are rendered, so a skipped subject's variables don't need to be set. tak prints each
-skipped benchmark or subject on stderr, and a subject asked for with `--subject` whose `when` is
-false is an error. A `when` in a benchmark's own subject table replaces the shared subject's; a table without one keeps the shared condition, like every other setting. Conditions are only evaluated for the benchmarks and subjects being run, so an unrelated subject's condition can't stop a `--subject` run.
+skipped benchmark or subject on stderr. A subject asked for with `--subject` that no selected
+benchmark will run is an error. If `when` switches off everything selected, `--record` and
+`--export-json` fail rather than succeed with nothing written. A `when` in a benchmark's own subject table replaces the shared subject's; a table without one keeps the shared condition, like every other setting. Conditions are only evaluated for the benchmarks and subjects being run, so an unrelated subject's condition can't stop a `--subject` run.
 Conditions are syntax-checked when `tak.toml` is loaded.
 
 ## Environment and runner settings

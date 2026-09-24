@@ -56,7 +56,25 @@ pub fn eval(
         .with_context(|| format!("could not evaluate `when`: {when:?}"))?;
     match value.as_bool() {
         Some(b) => Ok(b),
-        None => bail!("`when` must be true or false, but {when:?} gave {value}"),
+        // The value itself is not printed: a condition like `env.API_TOKEN`
+        // would put a credential into CI logs.
+        None => bail!(
+            "`when` must be true or false, but {when:?} returned a {}",
+            kind(&value)
+        ),
+    }
+}
+
+/// A value's type, for errors that must not show the value.
+fn kind(v: &Value) -> &'static str {
+    match v {
+        Value::String(_) => "string",
+        Value::Integer(_) => "integer",
+        Value::Float(_) => "number",
+        Value::Array(_) => "list",
+        Value::Map(_) | Value::KeyedMap(_) => "map",
+        Value::Nil => "nil",
+        _ => "non-boolean value",
     }
 }
 
@@ -86,6 +104,16 @@ mod tests {
     fn a_non_boolean_result_is_an_error() {
         let err = eval(r#""yes""#, &env(&[]), "b", None).unwrap_err();
         assert!(format!("{err:#}").contains("true or false"), "{err:#}");
+    }
+
+    /// A condition that evaluates to an environment value must not echo it:
+    /// the error goes to stderr, and from there into CI logs.
+    #[test]
+    fn a_non_boolean_error_does_not_leak_the_value() {
+        let e = env(&[("API_TOKEN", "sekrit-value")]);
+        let err = format!("{:#}", eval("env.API_TOKEN", &e, "b", None).unwrap_err());
+        assert!(!err.contains("sekrit-value"), "{err}");
+        assert!(err.contains("returned a string"), "{err}");
     }
 
     #[test]

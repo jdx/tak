@@ -428,19 +428,22 @@ pub fn warnings(samples: &[f64]) -> Vec<String> {
     let med = median(&mut samples.to_vec());
     let mad = median(&mut samples.iter().map(|x| (x - med).abs()).collect());
     // The modified z-score needs a spread to divide by. When over half the
-    // samples equal the median, the median deviation is zero and would hide
-    // any spike; fall back to the mean deviation (scaled to match), which is
-    // zero only when every sample is identical.
-    let scale = if mad > 0.0 {
-        mad / 0.6745
-    } else {
-        let mean_ad = samples.iter().map(|x| (x - med).abs()).sum::<f64>() / n as f64;
-        mean_ad * 1.253_314
+    // samples equal the median the median deviation is zero, and any
+    // stand-in computed from all the samples would be inflated by the very
+    // spikes it should catch. With a flat majority there is no noise to
+    // measure against, so anything over a quarter away from the median
+    // counts. Identical samples still raise nothing.
+    let outlier = |x: f64| {
+        if mad > 0.0 {
+            0.6745 * (x - med).abs() / mad > 3.5
+        } else {
+            med > 0.0 && (x - med).abs() > 0.25 * med
+        }
     };
-    if scale > 0.0 {
+    {
         let (fast, slow) = samples
             .iter()
-            .filter(|&&x| (x - med).abs() / scale > 3.5)
+            .filter(|&&x| outlier(x))
             .fold(
                 (0, 0),
                 |(f, s), &x| if x < med { (f + 1, s) } else { (f, s + 1) },
@@ -1015,6 +1018,22 @@ mod tests {
             w.iter()
                 .any(|m| m.contains("fast outliers") && m.contains("minimum")),
             "{w:?}"
+        );
+    }
+
+    /// Several identical spikes over a flat majority are all caught, not
+    /// hidden by a spread they themselves inflate.
+    #[test]
+    fn several_spikes_over_a_flat_majority_are_caught() {
+        let w = warnings(&[10.0, 10.0, 10.0, 10.0, 40.0, 45.0]);
+        assert!(
+            w.iter()
+                .any(|m| m.starts_with("2 of 6 samples are slow outliers")),
+            "{w:?}"
+        );
+        assert!(
+            warnings(&[10.0, 10.0, 10.0, 11.0, 10.0]).is_empty(),
+            "10% is not a spike"
         );
     }
 }

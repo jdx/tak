@@ -497,9 +497,18 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
     if plans.is_empty() {
         if skipped.is_empty() {
             println!("{} declares no benchmarks", path.display());
-        } else {
-            println!("nothing to run: every selected benchmark or subject has a false `when`");
+            return Ok(());
         }
+        // Asked to leave a result behind and producing none is a failure: a
+        // CI job recording or exporting must not look like it measured
+        // something when every benchmark was switched off.
+        if opts.record || opts.export_json.is_some() {
+            bail!(
+                "nothing to {}: every selected benchmark or subject has a false `when`",
+                if opts.record { "record" } else { "export" }
+            );
+        }
+        println!("nothing to run: every selected benchmark or subject has a false `when`");
         return Ok(());
     }
 
