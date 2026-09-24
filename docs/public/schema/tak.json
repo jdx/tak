@@ -130,6 +130,10 @@
         "description": "Untimed command run before every sample, warmups included.",
         "$ref": "#/definitions/cmd"
       },
+      "setup": {
+        "description": "Untimed command run once per benchmark and subject, before any subject's first sample, from the directory holding tak.toml (not `dir`), so it can create `dir`.",
+        "$ref": "#/definitions/cmd"
+      },
       "dir": {
         "description": "Directory to run in, relative to tak.toml. May be a tera template.",
         "type": "string"
@@ -171,6 +175,9 @@
         "prepare": {
           "$ref": "#/definitions/layerProperties/prepare"
         },
+        "setup": {
+          "$ref": "#/definitions/layerProperties/setup"
+        },
         "dir": {
           "$ref": "#/definitions/layerProperties/dir"
         },
@@ -210,6 +217,9 @@
         },
         "prepare": {
           "$ref": "#/definitions/layerProperties/prepare"
+        },
+        "setup": {
+          "$ref": "#/definitions/layerProperties/setup"
         },
         "dir": {
           "$ref": "#/definitions/layerProperties/dir"
@@ -266,6 +276,9 @@
         },
         "prepare": {
           "$ref": "#/definitions/layerProperties/prepare"
+        },
+        "setup": {
+          "$ref": "#/definitions/layerProperties/setup"
         },
         "dir": {
           "$ref": "#/definitions/layerProperties/dir"
