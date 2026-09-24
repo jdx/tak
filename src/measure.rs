@@ -133,6 +133,13 @@ fn check_once(cmd: &[String], site: &Site) -> Result<Option<String>> {
     untimed("check", cmd, site)
 }
 
+/// How long to keep reading an untimed step's stderr after the step has
+/// exited. Normally the pipe closes with the process and this is never waited
+/// out; it only runs down when something the step left behind still holds the
+/// pipe open, and then it is enough for what the step wrote before exiting to
+/// be read.
+const UNTIMED_STDERR_GRACE: Duration = Duration::from_millis(500);
+
 /// Run an untimed step — `prepare`, `setup` or `check`, named by `step` in
 /// messages. `Ok(Some(why))` when it exits non-zero, naming the step and the
 /// last line of its stderr.
@@ -140,8 +147,20 @@ fn check_once(cmd: &[String], site: &Site) -> Result<Option<String>> {
 /// Its output is not passed through: on a terminal it would tear up the
 /// progress bar, and in a log a setup that clones a fixture could bury the
 /// results. The tail of stderr is kept for the message.
+///
+/// The step is done when its process exits, not when its stderr closes. A
+/// step that starts something in the background — `sleep 600 &`, a daemon, a
+/// build server — leaves that process holding the pipe, and waiting for EOF
+/// hung the whole run. tak neither waits for nor kills such processes: a
+/// fixture server started by `setup` may be exactly the point. One still
+/// running while samples are timed competes with them, and the timings show
+/// it.
+///
+/// There is deliberately no overall deadline: a setup that builds or clones a
+/// fixture can legitimately take minutes.
 fn untimed(step: &str, cmd: &[String], site: &Site) -> Result<Option<String>> {
     use std::io::Read;
+    use std::sync::{Arc, Mutex, mpsc};
 
     let mut c = command(cmd, site)?;
     let bin = &cmd[0];
@@ -152,29 +171,45 @@ fn untimed(step: &str, cmd: &[String], site: &Site) -> Result<Option<String>> {
         .spawn()
         .with_context(|| format!("failed to spawn {step} `{bin}`"))?;
     // Keep only the tail, reading as it arrives so the child never blocks on a
-    // full pipe.
-    let mut tail: Vec<u8> = Vec::new();
+    // full pipe. The reader runs on its own thread so that a pipe held open
+    // after the step exits cannot keep us from noticing that it did.
+    let tail: Arc<Mutex<Vec<u8>>> = Arc::default();
+    let (done_tx, done) = mpsc::channel::<()>();
     if let Some(mut err) = child.stderr.take() {
-        let mut buf = [0u8; 8192];
-        loop {
-            let n = err.read(&mut buf).unwrap_or(0);
-            if n == 0 {
-                break;
+        let tail = Arc::clone(&tail);
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            loop {
+                let n = err.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                let mut tail = tail.lock().unwrap_or_else(|e| e.into_inner());
+                tail.extend_from_slice(&buf[..n]);
+                if tail.len() > UNTIMED_STDERR_TAIL {
+                    let excess = tail.len() - UNTIMED_STDERR_TAIL;
+                    tail.drain(..excess);
+                }
             }
-            tail.extend_from_slice(&buf[..n]);
-            if tail.len() > UNTIMED_STDERR_TAIL {
-                tail.drain(..tail.len() - UNTIMED_STDERR_TAIL);
-            }
-        }
+            // The receiver is gone if the grace ran out first; nothing to tell.
+            let _ = done_tx.send(());
+        });
+    } else {
+        drop(done_tx);
     }
     let status = child
         .wait()
         .with_context(|| format!("failed to wait for {step} `{bin}`"))?;
+    // Not joined: if a leftover process still holds the pipe, the thread
+    // ends whenever that process closes it, and until then it only reads
+    // into a tail nobody looks at again.
+    let _ = done.recv_timeout(UNTIMED_STDERR_GRACE);
     if status.success() {
         return Ok(None);
     }
     // A check like `git diff --quiet` says nothing on failure by design, so
     // silence is reported as the status alone.
+    let tail = tail.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let stderr = String::from_utf8_lossy(&tail);
     Ok(Some(match stderr.lines().rfind(|l| !l.trim().is_empty()) {
         Some(last) => format!("{step} `{bin}` exited with {status}: {}", last.trim()),

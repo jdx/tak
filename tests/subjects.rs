@@ -1154,3 +1154,77 @@ check = ["false"]
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(!git(&["notes", "--ref=tak", "list"]).is_empty());
 }
+
+/// A step that leaves something running in the background which holds its
+/// stderr open. `sleep 30 >&2 &` outlives the step by far more than the run
+/// is allowed to take, so a tak waiting for stderr to close would hang here.
+const LEAVES_STDERR_OPEN: &str = r#"["sh", "-c", "sleep 30 >&2 & exit 0"]"#;
+
+/// Runs a one-subject benchmark with `step` set to [`LEAVES_STDERR_OPEN`],
+/// returning tak's output once it finishes well before the sleep would.
+fn run_with_background_step(name: &str, step: &str) -> Output {
+    let p = Project::new(
+        name,
+        &format!(
+            "[bench.cmp]\nwarmup = 0\nruns = 1\n[bench.cmp.subject.a]\ncmd = [\"sh\", \"-c\", \"echo run:a >> log\"]\n{step} = {LEAVES_STDERR_OPEN}\n"
+        ),
+    );
+    let start = std::time::Instant::now();
+    let out = p.run(&["--no-progress"]);
+    let took = start.elapsed();
+    assert!(
+        took < std::time::Duration::from_secs(10),
+        "{step} with a background process took {took:?}: {}",
+        stderr(&out)
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(p.log(), ["run:a"]);
+    out
+}
+
+/// A prepare whose background process keeps its stderr open is done when the
+/// prepare itself exits.
+#[test]
+fn a_prepare_leaving_stderr_open_does_not_hang() {
+    run_with_background_step("bg-prepare", "prepare");
+}
+
+/// Likewise a setup — which tak does not kill, since starting a fixture
+/// server is a reasonable thing for one to do.
+#[test]
+fn a_setup_leaving_stderr_open_does_not_hang() {
+    run_with_background_step("bg-setup", "setup");
+}
+
+/// Likewise a check, which passes on its exit status.
+#[test]
+fn a_check_leaving_stderr_open_does_not_hang() {
+    let out = run_with_background_step("bg-check", "check");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("n=1  checks 1/1"), "{stdout}");
+}
+
+/// A failing step that backgrounds a process still reports what it wrote to
+/// stderr before exiting.
+#[test]
+fn a_failing_step_leaving_stderr_open_keeps_its_message() {
+    let p = Project::new(
+        "bg-fails",
+        &format!(
+            "[bench.cmp]\nwarmup = 0\n{}\n[bench.cmp.subject.broken]\ncmd = [\"sh\", \"-c\", \"echo run:broken >> log\"]\nsetup = [\"sh\", \"-c\", \"echo no fixture >&2; sleep 30 >&2 & exit 1\"]\n",
+            logging_subject("a", 1)
+        ),
+    );
+    let start = std::time::Instant::now();
+    let out = p.run(&["--no-progress"]);
+    let took = start.elapsed();
+    assert!(took < std::time::Duration::from_secs(10), "took {took:?}");
+    assert!(!out.status.success());
+    let err = stderr(&out);
+    assert!(
+        err.contains("cmp (broken) dropped")
+            && err.contains("setup `sh` exited with")
+            && err.contains(": no fixture"),
+        "{err}"
+    );
+}
