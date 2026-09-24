@@ -333,6 +333,7 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         },
         warmup: opts.warmup.unwrap_or(DEFAULT_WARMUP),
         counters: true,
+        ok_exit_codes: config::DEFAULT_OK_EXIT_CODES.to_vec(),
     };
     let seed = opts.seed.unwrap_or_else(random_seed);
     if opts.dry_run {
@@ -471,6 +472,24 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
             })
             .collect::<Result<Vec<_>>>()?;
         for s in &mut subjects {
+            // Only for what runs, after `when`, --bench and --subject, and
+            // before anything is set up or sampled: a portable tak.toml may
+            // hold a Windows-only subject, or list Windows codes next to Unix
+            // ones. A list with no possible code at all fails the run here,
+            // dry run included, rather than dropping the subject at its
+            // first sample.
+            let impossible = config::check_platform_exit_codes(&s.ok_exit_codes, cfg!(unix))
+                .with_context(|| format!("benchmark `{name}`, subject `{}`", s.name))?;
+            if !impossible.is_empty() {
+                let range = config::exit_code_range(cfg!(unix)).expect("narrowed");
+                eprintln!(
+                    "  warning: {name} ({}): ok_exit_codes {} can never match here: exit codes on this platform are {} to {}",
+                    s.name,
+                    config::join_codes(&impossible),
+                    range.start(),
+                    range.end()
+                );
+            }
             s.anchor(&root);
             // An explicit flag beats the file; the file beats the default.
             s.runs = opts.runs.unwrap_or(s.runs);
@@ -597,6 +616,11 @@ fn print_plan(bench: &str, multi: bool, subjects: &[Subject], no_counters: bool)
             ),
         };
         println!("{pad}runs     {runs}, warmup {}", s.warmup);
+        // Only when it differs from the default, which every subject has.
+        if s.ok_exit_codes != config::DEFAULT_OK_EXIT_CODES {
+            let codes: Vec<String> = s.ok_exit_codes.iter().map(i32::to_string).collect();
+            println!("{pad}ok exit  {}", codes.join(", "));
+        }
         // As the run would do it: --no-counters overrides the file.
         if s.counters && !no_counters {
             println!("{pad}counters on");
@@ -642,7 +666,8 @@ fn finish(
                 } else {
                     &m.subject.name
                 };
-                let mut r = ExportResult::new(&m.bench, &m.subject.name, command, &m.samples.times);
+                let mut r = ExportResult::new(&m.bench, &m.subject.name, command, &m.samples.times)
+                    .with_exit_codes(&m.samples.exit_codes);
                 r.version = m.version.clone();
                 if m.subject.check.is_some() {
                     r.with_checks(&m.samples.checks)
