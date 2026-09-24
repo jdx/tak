@@ -1,12 +1,15 @@
 name: perf-pr
 
 # Measures this pull request and compares it against the commit it branched
-# from, then says so in a comment and fails if an instruction count rose beyond
-# the gate.
+# from, and says so in a comment and a check on the pull request.
 #
-# The gate is the point. A chart on a dashboard is something nobody opens; a
-# failing check on the pull request that caused the regression is read by the
-# person who can still do something about it.
+# For tak itself the comparison reports and does not fail. Its benchmarks are
+# `--version` and `--help`, around 450k instructions each, three quarters of
+# which is the dynamic loader relocating the binary before `main` runs. Any new
+# dependency grows that, so a 1% gate there measures binary size in
+# microseconds rather than a regression in tak. A rise shows as a neutral check
+# and a warning; a comparison that never ran still fails, since that is broken
+# CI rather than a number.
 #
 # Nothing here writes to refs/notes/tak. A pull request's measurements are
 # recorded locally, used for the comparison, and discarded with the runner. Only
@@ -198,17 +201,28 @@ jobs:
           echo "comparing against $base on $BASE_REF"
 
       # Deliberately not `continue-on-error`. That would hide a compare that
-      # died for an unrelated reason behind a green check. The exit code is
-      # captured, the comment is posted either way, and a later step re-raises
-      # it — so a regression always arrives with the table that explains it.
+      # died for an unrelated reason behind a green check.
+      #
+      # `--no-gate`, so the exit code means only "did the comparison run": a
+      # plain `tak compare` exits 1 for a regression and for an error alike,
+      # and here a rise is reported while an error must still fail. Whether
+      # counts rose comes from the report's own gate line instead. Status:
+      # 0 clean, 1 rose beyond the gate (reported), 2 the comparison failed.
       - name: Compare against the base
         env:
           BASE_SHA: ${{ steps.base.outputs.sha }}
         run: |
           set +e
-          ./target/release/tak compare "$BASE_SHA" > /tmp/tak-report.md
-          echo $? > /tmp/tak-gate-status
+          ./target/release/tak compare --no-gate "$BASE_SHA" > /tmp/tak-report.md
+          ran=$?
           set -e
+          if [ "$ran" -ne 0 ]; then
+            echo 2 > /tmp/tak-gate-status
+          elif grep -q 'benchmark(s) above the .*% gate' /tmp/tak-report.md; then
+            echo 1 > /tmp/tak-gate-status
+          else
+            echo 0 > /tmp/tak-gate-status
+          fi
           cat /tmp/tak-report.md
           cat /tmp/tak-report.md >> "$GITHUB_STEP_SUMMARY"
 
@@ -310,13 +324,21 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           status=$(cat /tmp/tak-out/status 2>/dev/null || echo 2)
-          if [ "$status" -eq 0 ]; then
-            conclusion=success
-            title='Instruction counts passed'
-          else
-            conclusion=failure
-            title='Instruction-count regression or measurement failure'
-          fi
+          case "$status" in
+            0)
+              conclusion=success
+              title='Instruction counts passed'
+              ;;
+            2)
+              conclusion=failure
+              title='The comparison did not run or failed'
+              ;;
+            *)
+              # Reported, not failed: see the note at the top of this file.
+              conclusion=neutral
+              title='Instruction counts rose beyond the gate (report only)'
+              ;;
+          esac
           test -f /tmp/tak-out/report.md || echo 'The comparison did not produce a report.' > /tmp/tak-out/report.md
           jq -n --arg head_sha "$HEAD_SHA" --arg conclusion "$conclusion" \
             --arg title "$title" --arg details_url "$RUN_URL" \
@@ -324,18 +346,17 @@ jobs:
             '{name:"perf / instruction-count",head_sha:$head_sha,status:"completed",conclusion:$conclusion,details_url:$details_url,output:{title:$title,summary:$summary}}' \
             | gh api --method POST "repos/$GH_REPO/check-runs" --input -
 
-      - name: Fail on a regression
+      - name: Fail if the comparison never ran
         if: always()
         run: |
           status=$(cat /tmp/tak-out/status)
           case "$status" in
             0) ;;
             2)
-              echo "::error::the comparison never ran — an earlier step failed, so nothing was gated"
+              echo "::error::the comparison never ran or failed, so nothing was compared — see the job log"
               exit 1
               ;;
             *)
-              echo "::error::an instruction count rose beyond the gate — see the comment or the job summary"
-              exit "$status"
+              echo "::warning::an instruction count rose beyond the gate — reported only; see the comment or the job summary"
               ;;
           esac
