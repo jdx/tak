@@ -720,15 +720,44 @@ fn keep_prefix(mut r: impl std::io::Read, cap: usize, kept: &Mutex<Vec<u8>>) {
     }
 }
 
+/// Stop a timed-out `version_cmd` and everything it started, then reap it.
+///
+/// On Unix that is its whole process group, so a helper it spawned cannot go
+/// on using CPU through the samples that follow, or hold the output pipes
+/// open. Elsewhere only the command itself is stopped.
+///
+/// Only on a timeout: a command that exits on its own may have started a
+/// daemon on purpose — a version check that launches a language server or
+/// build daemon — and that is the tool's business, not tak's to kill.
+fn stop_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // The child leads its own group (`process_group(0)`), so its pid is
+        // the group id. SAFETY: killpg only sends a signal.
+        let pgid = child.id() as libc::pid_t;
+        if unsafe { libc::killpg(pgid, libc::SIGKILL) } != 0 {
+            let _ = child.kill();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn version_once(argv: &[String], site: &Site, timeout: Duration) -> Result<String> {
     let bin = argv
         .first()
         .map(String::as_str)
         .unwrap_or("(empty command)");
-    let mut child = command(argv, site)?
-        .stdin(Stdio::null())
+    let mut cmd = command(argv, site)?;
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Its own process group, so a timeout can stop everything it started:
+    // a helper left running would compete with the samples that follow.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut child = cmd
         .spawn()
         .with_context(|| format!("failed to spawn `{bin}`"))?;
 
@@ -761,16 +790,14 @@ fn version_once(argv: &[String], site: &Site, timeout: Duration) -> Result<Strin
                 std::thread::sleep(Duration::from_millis(5));
             }
             Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                stop_group(&mut child);
                 bail!(
                     "`{bin}` did not finish within {}, so it was stopped",
                     crate::progress::fmt(timeout)
                 );
             }
             Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                stop_group(&mut child);
                 return Err(e).with_context(|| format!("failed to wait for `{bin}`"));
             }
         }
@@ -1186,6 +1213,32 @@ mod tests {
             "{:?}",
             began.elapsed()
         );
+    }
+
+    /// A timeout stops what the command started too, not just the command:
+    /// a helper left running would compete with the samples that follow.
+    #[cfg(unix)]
+    #[test]
+    fn a_timeout_stops_the_whole_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let script = format!("sleep 30 & echo $! > '{}'; wait", pidfile.display());
+        let err = version_sh(&script, &[], Duration::from_millis(300)).unwrap_err();
+        assert!(format!("{err:#}").contains("did not finish"), "{err:#}");
+        let pid = std::fs::read_to_string(&pidfile).unwrap();
+        let pid = pid.trim();
+        let alive = || {
+            Command::new("kill")
+                .args(["-0", pid])
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        let until = Instant::now() + Duration::from_secs(2);
+        while alive() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(), "the background sleep {pid} outlived the timeout");
     }
 
     /// A background process that inherits the pipes keeps them open after
