@@ -1228,3 +1228,266 @@ fn a_failing_step_leaving_stderr_open_keeps_its_message() {
         "{err}"
     );
 }
+
+/// A subject that exits 1 by design, like pre-commit after a hook modified
+/// files, is kept when `ok_exit_codes` allows it, warmups included, and its
+/// real exit codes are exported. Without the setting the same command is
+/// dropped, and a code the list leaves out still drops it.
+#[test]
+fn ok_exit_codes_keep_a_subject_that_exits_non_zero_by_design() {
+    let p = Project::new(
+        "ok-exit",
+        r#"
+[bench.cmp]
+runs = 3
+warmup = 1
+
+[bench.cmp.subject.allowed]
+cmd = ["sh", "-c", "echo run:allowed >> log; exit 1"]
+ok_exit_codes = [0, 1]
+
+[bench.cmp.subject.default]
+cmd = ["sh", "-c", "exit 1"]
+
+[bench.cmp.subject.other]
+cmd = ["sh", "-c", "exit 2"]
+ok_exit_codes = [0, 1]
+"#,
+    );
+    let out = p.run(&["--export-json", "results.json", "--no-progress"]);
+    assert!(!out.status.success(), "two subjects failed");
+    let err = stderr(&out);
+    assert!(
+        err.contains("cmp (default) dropped") && err.contains("exited with exit status: 1"),
+        "{err}"
+    );
+    assert!(
+        err.contains("cmp (other) dropped")
+            && err.contains("exit status: 2, and ok_exit_codes is 0, 1"),
+        "{err}"
+    );
+    assert!(!err.contains("cmp (allowed) dropped"), "{err}");
+
+    let runs = p.log().iter().filter(|l| *l == "run:allowed").count();
+    assert_eq!(runs, 1 + 3, "the warmup and every timed run");
+
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("results.json")).unwrap()).unwrap();
+    let results = json["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["subject"], "allowed");
+    assert_eq!(results[0]["exit_codes"], serde_json::json!([1, 1, 1]));
+}
+
+/// `ok_exit_codes` describes the program being measured, not its reset: a
+/// prepare step that fails still drops the subject.
+#[test]
+fn ok_exit_codes_do_not_excuse_a_failing_prepare() {
+    let p = Project::new(
+        "ok-exit-prepare",
+        r#"
+[bench.one]
+cmd = ["sh", "-c", "exit 1"]
+prepare = ["sh", "-c", "exit 1"]
+ok_exit_codes = [0, 1]
+runs = 1
+warmup = 0
+"#,
+    );
+    let out = p.run(&["--no-progress"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("prepare"), "{}", stderr(&out));
+}
+
+/// A single-command benchmark takes the setting too, and it may leave 0 out:
+/// `grep` for something that must not be there.
+#[test]
+fn ok_exit_codes_may_require_a_non_zero_code() {
+    let p = Project::new(
+        "ok-exit-single",
+        r#"
+[bench.nomatch]
+cmd = ["sh", "-c", "exit 1"]
+ok_exit_codes = [1]
+runs = 2
+warmup = 0
+
+[bench.match]
+cmd = ["true"]
+ok_exit_codes = [1]
+runs = 1
+warmup = 0
+"#,
+    );
+    let out = p.run(&["--bench", "nomatch", "--no-progress"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = p.run(&["--bench", "match", "--no-progress"]);
+    assert!(!out.status.success(), "exit 0 is not in the list");
+}
+
+/// --dry-run shows `ok_exit_codes` only where it differs from the default.
+#[test]
+fn dry_run_shows_non_default_ok_exit_codes() {
+    let p = Project::new(
+        "ok-exit-dry-run",
+        r#"
+[bench.cmp.subject.lenient]
+cmd = ["true"]
+ok_exit_codes = [1, 0]
+
+[bench.cmp.subject.strict]
+cmd = ["true"]
+"#,
+    );
+    let out = p.run(&["--dry-run"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.matches("ok exit").count(), 1, "{stdout}");
+    assert!(stdout.contains("ok exit  0, 1"), "{stdout}");
+}
+
+/// Like `prepare`, `setup` must exit 0 whatever `ok_exit_codes` allow: it
+/// builds the state every sample starts from.
+#[test]
+fn ok_exit_codes_do_not_excuse_a_failing_setup() {
+    let p = Project::new(
+        "ok-exit-setup",
+        r#"
+[bench.one]
+cmd = ["sh", "-c", "echo ran >> log; exit 1"]
+setup = ["sh", "-c", "exit 1"]
+ok_exit_codes = [0, 1]
+runs = 1
+warmup = 0
+"#,
+    );
+    let out = p.run(&["--no-progress"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("setup"), "{}", stderr(&out));
+    assert!(p.log().is_empty(), "no sample ran");
+}
+
+/// A portable list may name a Windows code next to Unix ones: on Unix it is
+/// warned about, and the run goes on with the codes that can match.
+#[test]
+fn an_ok_exit_code_impossible_here_is_warned_about() {
+    let p = Project::new(
+        "ok-exit-portable",
+        r#"
+[bench.one]
+cmd = ["sh", "-c", "exit 1"]
+ok_exit_codes = [0, 1, -1073741819]
+runs = 1
+warmup = 0
+"#,
+    );
+    let out = p.run(&["--no-progress"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("ok_exit_codes -1073741819 can never match here"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// A Windows-only benchmark whose codes are all impossible on Unix neither
+/// stops the file loading nor blocks another benchmark, because `when` keeps
+/// it from running. Selected without a `when`, the same subject fails before
+/// its setup or any sample runs, in a dry run too; left out with
+/// `--subject`, it is not checked.
+#[test]
+fn ok_exit_codes_impossible_here_are_only_checked_for_what_runs() {
+    let p = Project::new(
+        "ok-exit-platform",
+        r#"
+[bench.windows]
+when = 'os == "windows"'
+cmd = ["cmd", "/C", "exit 1"]
+ok_exit_codes = [-1073741819]
+
+[bench.unix]
+cmd = ["sh", "-c", "echo ran:unix >> log"]
+runs = 1
+warmup = 0
+
+[bench.cmp]
+runs = 1
+warmup = 0
+
+[bench.cmp.subject.win]
+cmd = ["sh", "-c", "echo ran:win >> log"]
+setup = ["sh", "-c", "echo setup:win >> log"]
+ok_exit_codes = [-1073741819]
+
+[bench.cmp.subject.ok]
+cmd = ["sh", "-c", "echo ran:ok >> log"]
+"#,
+    );
+
+    // (a) The Windows-only benchmark is skipped and the Unix one runs.
+    // --no-counters: a single-command benchmark counts instructions, and
+    // where valgrind exists that runs the command three more times.
+    let out = p.run(&["--bench", "unix", "--no-progress", "--no-counters"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = p.run(&["--bench", "windows", "--no-progress"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(p.log(), ["ran:unix"]);
+
+    // (b) Selected on Unix, it fails before setup or any sample.
+    for args in [
+        &["--bench", "cmp", "--no-progress"][..],
+        &["--bench", "cmp", "--dry-run"][..],
+    ] {
+        let out = p.run(args);
+        assert!(!out.status.success(), "{args:?}");
+        let err = stderr(&out);
+        assert!(
+            err.contains("benchmark `cmp`, subject `win`")
+                && err.contains("-1073741819 can never match")
+                && err.contains("0 to 255"),
+            "{err}"
+        );
+    }
+    assert_eq!(p.log(), ["ran:unix"], "nothing of cmp ran");
+
+    // (c) Left out with --subject, it is not checked.
+    let out = p.run(&["--bench", "cmp", "--subject", "ok", "--no-progress"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(p.log(), ["ran:unix", "ran:ok"]);
+}
+
+/// `ok_exit_codes` keep a command that exits 1, but its `check` still has
+/// to exit 0 to pass: the export shows the kept exit codes and the failed
+/// checks side by side.
+#[test]
+fn ok_exit_codes_do_not_pass_a_failing_check() {
+    let p = Project::new(
+        "ok-exit-check",
+        r#"
+[bench.cmp]
+runs = 2
+warmup = 0
+
+[bench.cmp.subject.lint]
+cmd = ["sh", "-c", "exit 1"]
+check = ["sh", "-c", "exit 1"]
+ok_exit_codes = [0, 1]
+"#,
+    );
+    let out = p.run(&["--no-progress", "--export-json", "r.json"]);
+    assert!(
+        out.status.success(),
+        "a failed check alone doesn't fail the run: {}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("check failed after 2 of 2"),
+        "{}",
+        stderr(&out)
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    let r = &json["results"][0];
+    assert_eq!(r["exit_codes"], serde_json::json!([1, 1]));
+    assert_eq!(r["checks"]["passed"], 0);
+}

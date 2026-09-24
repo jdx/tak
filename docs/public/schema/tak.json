@@ -126,6 +126,16 @@
         "type": "integer",
         "minimum": 1
       },
+      "ok_exit_codes": {
+        "description": "Exit codes that count as a successful sample, timed or warmup, and under valgrind. Default [0]. Unix reports 0-255; Windows codes are 32-bit, with an NTSTATUS such as 0xC0000005 written as the negative -1073741819. A death by signal always fails, and setup and prepare must still exit 0.",
+        "type": "array",
+        "items": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "minItems": 1
+      },
       "prepare": {
         "description": "Untimed command run before every sample, warmups included.",
         "$ref": "#/definitions/cmd"
@@ -176,6 +186,9 @@
         "max_runs": {
           "$ref": "#/definitions/layerProperties/max_runs"
         },
+        "ok_exit_codes": {
+          "$ref": "#/definitions/layerProperties/ok_exit_codes"
+        },
         "prepare": {
           "$ref": "#/definitions/layerProperties/prepare"
         },
@@ -221,6 +234,9 @@
         },
         "max_runs": {
           "$ref": "#/definitions/layerProperties/max_runs"
+        },
+        "ok_exit_codes": {
+          "$ref": "#/definitions/layerProperties/ok_exit_codes"
         },
         "prepare": {
           "$ref": "#/definitions/layerProperties/prepare"
@@ -283,6 +299,9 @@
         },
         "max_runs": {
           "$ref": "#/definitions/layerProperties/max_runs"
+        },
+        "ok_exit_codes": {
+          "$ref": "#/definitions/layerProperties/ok_exit_codes"
         },
         "prepare": {
           "$ref": "#/definitions/layerProperties/prepare"

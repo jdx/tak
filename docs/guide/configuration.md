@@ -112,11 +112,45 @@ which replaces the one in `[defaults]`. There is no matching `teardown`. The nex
 can clean up whatever the last one left, and keeping it around lets you inspect a subject's
 directory after a run.
 
+## Accepting other exit codes
+
+tak drops a subject when its command exits with anything but 0, because a failed run usually
+didn't do the work being measured. Some programs exit non-zero by design: pre-commit exits 1
+whenever a hook modifies files, linters and test runners exit 1 when they find problems, and
+`grep` exits 1 when nothing matches. List the codes that count as success with `ok_exit_codes`:
+
+```toml
+[bench.pre-commit]
+cmd = ["pre-commit", "run", "--all-files"]
+prepare = ["git", "checkout", "--", "."]
+ok_exit_codes = [0, 1]   # 1: a hook modified files, which is the case being measured
+```
+
+- The default is `[0]`. A list replaces the default rather than adding to it, so leave 0 out to
+  require a non-zero code, such as `[1]` for a `grep` that must not match.
+- It applies to warmups, timed samples and the instruction-count run under valgrind. Any other
+  code still drops the subject, and so does a command killed by a signal, whatever the list
+  holds.
+- `setup` and `prepare` must still exit 0. A failed setup or reset would leave every later
+  sample starting from the wrong state. A [`check`](#checking-every-sample) passes only when it
+  exits 0, too.
+- `--export-json` records each sample's real exit code in `exit_codes`.
+- The list can't be empty, and duplicates are ignored. Unix only ever reports codes 0 to 255.
+  Windows passes a program's 32-bit exit code through as a signed number, so write an NTSTATUS
+  such as `0xC0000005` as its negative decimal value, `-1073741819`.
+- A `tak.toml` shared between platforms can list both, such as `[0, 1, -1073741819]`. On Unix,
+  tak warns about the codes that can never match there and runs with the rest. If none of a
+  subject's codes can match on the current platform, `tak run` fails before any `setup` or
+  sample runs, naming the benchmark and subject. `--dry-run` reports the same warning or
+  error. Both checks only cover the subjects being run, after `when`, `--bench` and `--subject`
+  are applied, so a Windows-only subject switched off with `when = 'os == "windows"'` doesn't
+  stop the rest of the file from running on Unix.
+
 ## Checking every sample
 
 A fast time is only worth reporting if the command did the right work. `check` runs after every
 timed sample, untimed, in the same directory and environment as the command. Exit status 0 means
-the sample passed; anything else means it failed. Use it when a command's output can be wrong
+the sample passed; anything else means it failed, whatever `ok_exit_codes` allows the command. Use it when a command's output can be wrong
 some of the time, such as formatters that race when run concurrently on the same files:
 
 ```toml
@@ -198,9 +232,9 @@ tak interleaves the samples: every round takes one sample of each subject in a f
 order, rather than every sample of one subject and then the next. See
 [methodology](/guide/methodology#comparing-programs) for why.
 
-- Subjects inherit the benchmark's `runs`, `warmup`, `setup`, `prepare`, `check`, `dir` and
-  `env`. A subject's own `setup`, `prepare` or `check` replaces the benchmark's, and its `env`
-  entries override matching keys.
+- Subjects inherit the benchmark's `runs`, `warmup`, `setup`, `prepare`, `check`, `dir`, `env`
+  and `ok_exit_codes`. A subject's own `setup`, `prepare` or `check` replaces the benchmark's,
+  and its `env` entries override matching keys.
 - A subject with fewer `runs` than the others is spread evenly across the run.
 - Each subject is recorded as its own series, with the subject name as the tool. Instruction
   counts are off for subjects unless they set `counters = true`, so another program's upgrade
@@ -305,8 +339,8 @@ Settings stack from least to most specific: `[defaults]`, then the benchmark, th
 shared `[subject.NAME]`, then the benchmark's own `[bench.B.subject.NAME]`. Each layer's
 setting replaces the one before, except `env` and `vars`, which merge key by key. `[defaults]`
 takes every benchmark setting (`runs`, `warmup`, `budget`, `min_runs`, `max_runs`,
-`setup`, `prepare`, `check`, `dir`, `env`, `vars`). It is a separate table because `[env]`
-already holds `env.deny` and `env.allow`.
+`ok_exit_codes`, `setup`, `prepare`, `check`, `dir`, `env`, `vars`). It is a separate table
+because `[env]` already holds `env.deny` and `env.allow`.
 
 ## Templates
 

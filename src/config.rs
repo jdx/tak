@@ -31,6 +31,10 @@ pub const DEFAULT_BUDGET: Duration = Duration::from_secs(30);
 pub const DEFAULT_MIN_RUNS: u32 = 5;
 pub const DEFAULT_MAX_RUNS: u32 = 50;
 
+/// Exit codes a sample may end with and still count, unless `ok_exit_codes`
+/// says otherwise: success, and nothing else, as a shell would judge it.
+pub const DEFAULT_OK_EXIT_CODES: [i32; 1] = [0];
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
     /// Benchmarks by name. A BTreeMap so runs are ordered and reproducible
@@ -65,6 +69,9 @@ struct Layer {
     min_runs: Option<u32>,
     /// `runs = "auto"`: most runs any subject gets.
     max_runs: Option<u32>,
+    /// Exit codes that count as a successful sample. Replaces, not merges:
+    /// a subject listing `[0, 1]` means exactly those.
+    ok_exit_codes: Option<Vec<i64>>,
     /// Untimed command run before every sample.
     prepare: Option<Cmd>,
     /// Untimed command run once per benchmark and subject, before its first
@@ -312,6 +319,10 @@ pub struct Subject {
     pub auto: AutoRuns,
     pub warmup: u32,
     pub counters: bool,
+    /// Exit codes a timed or warmup sample may end with and still count.
+    /// Never empty. A death by signal fails whatever this holds, and
+    /// `setup` and `prepare` are always held to exit 0.
+    pub ok_exit_codes: Vec<i32>,
 }
 
 impl Subject {
@@ -430,6 +441,21 @@ impl Config {
 }
 
 impl Config {
+    /// Every settings layer in the file, with where it is.
+    fn layers(&self) -> Vec<(String, &Layer)> {
+        let mut out = vec![("defaults".to_string(), &self.defaults)];
+        for (n, d) in &self.subject {
+            out.push((format!("subject.{n}"), &d.layer));
+        }
+        for (b, bench) in &self.bench {
+            out.push((format!("bench.{b}"), &bench.layer));
+            for (n, d) in &bench.subject {
+                out.push((format!("bench.{b}.subject.{n}"), &d.layer));
+            }
+        }
+        out
+    }
+
     /// Every `when` in the file, with where it is.
     fn conditions(&self) -> Vec<(String, &str)> {
         let mut out = Vec::new();
@@ -576,7 +602,94 @@ fn resolve(
             .copied()
             .unwrap_or(DEFAULT_WARMUP),
         counters,
+        ok_exit_codes: match last(layers, |l| l.ok_exit_codes.as_ref()) {
+            Some(codes) => ok_exit_codes(codes)?,
+            None => DEFAULT_OK_EXIT_CODES.to_vec(),
+        },
     })
+}
+
+/// The range of exit codes a platform can report, when narrower than `i32`:
+/// Unix keeps only the low 8 bits of a process's status. `None` where the
+/// whole `i32` range is possible, as on Windows.
+pub fn exit_code_range(unix: bool) -> Option<std::ops::RangeInclusive<i32>> {
+    unix.then_some(0..=255)
+}
+
+/// The codes in `codes` that a platform can never report, so can never match.
+///
+/// A `tak.toml` shared between platforms may list a Windows code next to
+/// Unix ones, such as `[0, 1, -1073741819]`, so some impossible codes are
+/// only worth a warning. A list with *no* possible code would drop the
+/// subject at its first sample, which is a mistake to catch before it runs.
+pub fn impossible_exit_codes(codes: &[i32], unix: bool) -> Vec<i32> {
+    match exit_code_range(unix) {
+        Some(range) => codes
+            .iter()
+            .copied()
+            .filter(|c| !range.contains(c))
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Check a subject's resolved `ok_exit_codes` against a platform: fail when
+/// none of them is possible there, otherwise return the ones that are not,
+/// for a warning.
+///
+/// Not part of loading `tak.toml`. A shared file may hold a Windows-only
+/// subject, switched off elsewhere by `when`, whose codes are all impossible
+/// on Unix; checking it at load would stop every other benchmark from
+/// running there. `tak run` calls this only for the subjects it will measure.
+pub fn check_platform_exit_codes(codes: &[i32], unix: bool) -> Result<Vec<i32>> {
+    let impossible = impossible_exit_codes(codes, unix);
+    if !impossible.is_empty() && impossible.len() == codes.len() {
+        let range = exit_code_range(unix).expect("only a narrowed range rules codes out");
+        bail!(
+            "ok_exit_codes {} can never match: exit codes on this platform are {} to {}",
+            join_codes(&impossible),
+            range.start(),
+            range.end()
+        );
+    }
+    Ok(impossible)
+}
+
+/// Exit codes for a message: `0, 1`.
+pub fn join_codes(codes: &[i32]) -> String {
+    codes
+        .iter()
+        .map(i32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Check `ok_exit_codes` as written, returning it sorted and deduplicated.
+///
+/// The range is whatever `ExitStatus::code()` can report, which is an `i32`.
+/// Unix only ever reports 0–255, but Windows passes a program's 32-bit exit
+/// code through, and an NTSTATUS such as 0xC0000005 arrives negative
+/// (-1073741819); limiting the list to 0–255 would make those unlistable.
+/// An empty list would fail every sample, so it is an error here rather than
+/// a confusing run.
+fn ok_exit_codes(codes: &[i64]) -> Result<Vec<i32>> {
+    if codes.is_empty() {
+        bail!("ok_exit_codes must list at least one exit code");
+    }
+    let mut out = codes
+        .iter()
+        .map(|&c| match i32::try_from(c) {
+            Ok(c) => Ok(c),
+            Err(_) => bail!(
+                "ok_exit_codes: {c} is not an exit code ({} to {})",
+                i32::MIN,
+                i32::MAX
+            ),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
 }
 
 impl Config {
@@ -590,6 +703,13 @@ impl Config {
         }
         for (place, when) in cfg.conditions() {
             crate::condition::check(when).with_context(|| format!("in {place}"))?;
+        }
+        // Likewise every `ok_exit_codes`, including one in a layer that
+        // nothing resolves through yet.
+        for (place, l) in cfg.layers() {
+            if let Some(codes) = &l.ok_exit_codes {
+                ok_exit_codes(codes).with_context(|| format!("in {place}"))?;
+            }
         }
         // Every declared benchmark is validated up front rather than failing
         // partway through a run that has already spent minutes measuring.
@@ -1213,6 +1333,126 @@ cmd = "mycli 'two words'""#,
         let c = Config::parse("[bench.b]\nsubjects = [\"x\"]\n[bench.b.subject.x]\ncmd = [\"x\"]")
             .unwrap();
         assert_eq!(c.subjects("b").unwrap()[0].cmd, ["x"]);
+    }
+
+    /// Only exit 0 counts unless a layer says otherwise, and the most specific
+    /// layer's list replaces the others' rather than adding to them.
+    #[test]
+    fn ok_exit_codes_default_to_zero_and_stack_by_replacing() {
+        let c = Config::parse(
+            r#"
+            [defaults]
+            ok_exit_codes = [0, 1]
+
+            [subject.grep]
+            cmd = ["grep", "x", "file"]
+            ok_exit_codes = [1, 0, 1]
+
+            [subject.lint]
+            cmd = ["lint"]
+
+            [bench.plain]
+            cmd = "x"
+
+            [bench.cmp]
+            subjects = ["grep", "lint"]
+            ok_exit_codes = [0, 2]
+
+            [bench.strict]
+            subjects = ["grep"]
+            [bench.strict.subject.grep]
+            ok_exit_codes = [0]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(only(&c, "plain").ok_exit_codes, [0, 1], "from defaults");
+        let cmp = c.subjects("cmp").unwrap();
+        assert_eq!(
+            cmp[0].ok_exit_codes,
+            [0, 1],
+            "shared subject, sorted and deduplicated"
+        );
+        assert_eq!(cmp[1].ok_exit_codes, [0, 2], "bench over defaults");
+        assert_eq!(
+            only(&c, "strict").ok_exit_codes,
+            [0],
+            "bench's own subject table"
+        );
+
+        let bare = Config::parse("[bench.a]\ncmd = \"x\"").unwrap();
+        assert_eq!(only(&bare, "a").ok_exit_codes, DEFAULT_OK_EXIT_CODES);
+    }
+
+    /// Windows reports exit codes beyond 0–255, and an NTSTATUS such as
+    /// 0xC0000005 as a negative `i32`, so the whole `i32` range is accepted.
+    #[test]
+    fn ok_exit_codes_take_any_i32() {
+        let c = Config::parse(
+            "[bench.a]\ncmd = \"x\"\nok_exit_codes = [0, 256, -1073741819, 2147483647]",
+        )
+        .unwrap();
+        assert_eq!(
+            only(&c, "a").ok_exit_codes,
+            [-1073741819, 0, 256, 2147483647]
+        );
+    }
+
+    /// On Unix only 0–255 can be reported. A list with no such code is an
+    /// error naming the subject; one with some is kept, and the rest are
+    /// reported for a warning. Elsewhere the whole `i32` range is possible.
+    #[test]
+    fn ok_exit_codes_impossible_on_this_platform() {
+        assert_eq!(
+            impossible_exit_codes(&[0, 1, -1073741819, 256], true),
+            [-1073741819, 256]
+        );
+        assert!(impossible_exit_codes(&[0, 1, -1073741819, 256], false).is_empty());
+
+        assert!(
+            check_platform_exit_codes(&[0, 256], true).is_ok(),
+            "some possible"
+        );
+        let err = check_platform_exit_codes(&[256, -1], true).unwrap_err();
+        assert!(format!("{err:#}").contains("0 to 255"), "{err:#}");
+        assert!(
+            check_platform_exit_codes(&[256, -1], false).is_ok(),
+            "fine on Windows"
+        );
+        assert!(check_platform_exit_codes(&[i32::MIN, i32::MAX], false).is_ok());
+    }
+
+    /// Only the platform-independent checks run at load: a Windows-only
+    /// subject whose codes are all impossible on Unix still loads, since
+    /// `when` may keep it from ever running there.
+    #[test]
+    fn a_list_impossible_here_still_loads() {
+        Config::parse("[bench.b.subject.win]\ncmd = \"x\"\nok_exit_codes = [-1073741819]").unwrap();
+    }
+
+    /// A list that could never match a real exit status would fail every
+    /// sample, so it is rejected before anything runs — even in a layer no
+    /// benchmark uses yet.
+    #[test]
+    fn bad_ok_exit_codes_are_rejected_at_parse_time() {
+        for bad in [
+            "ok_exit_codes = []",
+            "ok_exit_codes = [2147483648]",
+            "ok_exit_codes = [-2147483649]",
+            "ok_exit_codes = [0xC0000005]",
+            "ok_exit_codes = [\"1\"]",
+            "ok_exit_codes = 1",
+        ] {
+            let toml = format!("[bench.a]\ncmd = \"x\"\n{bad}");
+            assert!(Config::parse(&toml).is_err(), "accepted: {bad}");
+        }
+        let unused =
+            "[subject.spare]\ncmd = \"y\"\nok_exit_codes = [4294967296]\n[bench.a]\ncmd = \"x\"";
+        let err = Config::parse(unused).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("subject.spare") && msg.contains("4294967296"),
+            "{msg}"
+        );
     }
 
     /// The syntax check covers the whole file, not only what some benchmark
