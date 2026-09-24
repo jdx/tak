@@ -566,19 +566,25 @@ fn resolve(
 
 /// Check `ok_exit_codes` as written, returning it sorted and deduplicated.
 ///
-/// An exit status is 0–255 on Unix: a process's code is taken modulo 256, so
-/// `256` or `-1` could never match what `exit(256)` or `exit(-1)` actually
-/// reports, and would silently fail every sample. An empty list would fail
-/// every sample too, so it is an error here rather than a confusing run.
+/// The range is whatever `ExitStatus::code()` can report, which is an `i32`.
+/// Unix only ever reports 0–255, but Windows passes a program's 32-bit exit
+/// code through, and an NTSTATUS such as 0xC0000005 arrives negative
+/// (-1073741819); limiting the list to 0–255 would make those unlistable.
+/// An empty list would fail every sample, so it is an error here rather than
+/// a confusing run.
 fn ok_exit_codes(codes: &[i64]) -> Result<Vec<i32>> {
     if codes.is_empty() {
         bail!("ok_exit_codes must list at least one exit code");
     }
     let mut out = codes
         .iter()
-        .map(|&c| match u8::try_from(c) {
-            Ok(c) => Ok(i32::from(c)),
-            Err(_) => bail!("ok_exit_codes: {c} is not an exit code (0 to 255)"),
+        .map(|&c| match i32::try_from(c) {
+            Ok(c) => Ok(c),
+            Err(_) => bail!(
+                "ok_exit_codes: {c} is not an exit code ({} to {})",
+                i32::MIN,
+                i32::MAX
+            ),
         })
         .collect::<Result<Vec<_>>>()?;
     out.sort_unstable();
@@ -1114,6 +1120,20 @@ cmd = "mycli 'two words'""#,
         assert_eq!(only(&bare, "a").ok_exit_codes, DEFAULT_OK_EXIT_CODES);
     }
 
+    /// Windows reports exit codes beyond 0–255, and an NTSTATUS such as
+    /// 0xC0000005 as a negative `i32`, so the whole `i32` range is accepted.
+    #[test]
+    fn ok_exit_codes_take_any_i32() {
+        let c = Config::parse(
+            "[bench.a]\ncmd = \"x\"\nok_exit_codes = [0, 256, -1073741819, 2147483647]",
+        )
+        .unwrap();
+        assert_eq!(
+            only(&c, "a").ok_exit_codes,
+            [-1073741819, 0, 256, 2147483647]
+        );
+    }
+
     /// A list that could never match a real exit status would fail every
     /// sample, so it is rejected before anything runs — even in a layer no
     /// benchmark uses yet.
@@ -1121,20 +1141,21 @@ cmd = "mycli 'two words'""#,
     fn bad_ok_exit_codes_are_rejected_at_parse_time() {
         for bad in [
             "ok_exit_codes = []",
-            "ok_exit_codes = [-1]",
-            "ok_exit_codes = [256]",
-            "ok_exit_codes = [0, 1000]",
+            "ok_exit_codes = [2147483648]",
+            "ok_exit_codes = [-2147483649]",
+            "ok_exit_codes = [0xC0000005]",
             "ok_exit_codes = [\"1\"]",
             "ok_exit_codes = 1",
         ] {
             let toml = format!("[bench.a]\ncmd = \"x\"\n{bad}");
             assert!(Config::parse(&toml).is_err(), "accepted: {bad}");
         }
-        let unused = "[subject.spare]\ncmd = \"y\"\nok_exit_codes = [300]\n[bench.a]\ncmd = \"x\"";
+        let unused =
+            "[subject.spare]\ncmd = \"y\"\nok_exit_codes = [4294967296]\n[bench.a]\ncmd = \"x\"";
         let err = Config::parse(unused).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("subject.spare") && msg.contains("300"),
+            msg.contains("subject.spare") && msg.contains("4294967296"),
             "{msg}"
         );
     }

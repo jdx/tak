@@ -83,7 +83,9 @@ ok_exit_codes = [0, 1]   # 1: a hook modified files, which is the case being mea
 - `prepare` must still exit 0. A reset that failed would leave every later sample starting from
   the wrong state.
 - `--export-json` records each sample's real exit code in `exit_codes`.
-- Codes are 0 to 255, and the list can't be empty.
+- The list can't be empty, and duplicates are ignored. Unix only ever reports codes 0 to 255.
+  Windows passes a program's 32-bit exit code through as a signed number, so write an NTSTATUS
+  such as `0xC0000005` as its negative decimal value, `-1073741819`.
 
 ## Comparing several programs
 
