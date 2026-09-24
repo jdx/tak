@@ -855,7 +855,10 @@ cmd = ["sh", "-c", "echo ran >> log"]
     let out = p.run(&["--dry-run"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let verify = p.path("./bin/verify");
+    // tak anchors paths at the directory it found tak.toml in, which it
+    // reaches through the resolved working directory: on macOS the temp dir
+    // under /var is really /private/var, so compare against the canonical path.
+    let verify = p.dir.canonicalize().unwrap().join("./bin/verify");
     assert!(
         stdout.contains(&format!("check    {} a", verify.display())),
         "{stdout}"
