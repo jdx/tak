@@ -407,8 +407,9 @@ pub fn stats(samples: &[f64]) -> BTreeMap<String, f64> {
 /// - **A slow first sample**, over twice the median of the rest: a cache the
 ///   warmup did not fill. The first timed sample should look like the others.
 ///
-/// Nothing is dropped or corrected — the minimum is already robust to both —
-/// the point is to say when a comparison deserves a second run.
+/// Nothing is dropped or corrected; the point is to say when a comparison
+/// deserves a second run. Slow outliers leave the minimum alone, but a fast
+/// one may be the minimum, so the two are reported apart.
 pub fn warnings(samples: &[f64]) -> Vec<String> {
     let mut out = Vec::new();
     let n = samples.len();
@@ -426,15 +427,36 @@ pub fn warnings(samples: &[f64]) -> Vec<String> {
     };
     let med = median(&mut samples.to_vec());
     let mad = median(&mut samples.iter().map(|x| (x - med).abs()).collect());
-    if mad > 0.0 {
-        let outliers = samples
+    // The modified z-score needs a spread to divide by. When over half the
+    // samples equal the median, the median deviation is zero and would hide
+    // any spike; fall back to the mean deviation (scaled to match), which is
+    // zero only when every sample is identical.
+    let scale = if mad > 0.0 {
+        mad / 0.6745
+    } else {
+        let mean_ad = samples.iter().map(|x| (x - med).abs()).sum::<f64>() / n as f64;
+        mean_ad * 1.253_314
+    };
+    if scale > 0.0 {
+        let (fast, slow) = samples
             .iter()
-            .filter(|&&x| 0.6745 * (x - med).abs() / mad > 3.5)
-            .count();
-        if outliers > 0 {
+            .filter(|&&x| (x - med).abs() / scale > 3.5)
+            .fold(
+                (0, 0),
+                |(f, s), &x| if x < med { (f + 1, s) } else { (f, s + 1) },
+            );
+        if slow > 0 {
             out.push(format!(
-                "{outliers} of {n} samples are outliers; something else was running, or the command's \
-                 work varies. The minimum is unaffected, but consider a quieter machine or more runs."
+                "{slow} of {n} samples are slow outliers; something else was running, or the \
+                 command's work varies. Consider a quieter machine or more runs."
+            ));
+        }
+        // A fast outlier is not harmless the way a slow one is: it is the
+        // minimum tak reports, so the headline number may rest on it.
+        if fast > 0 {
+            out.push(format!(
+                "{fast} of {n} samples are fast outliers, and the reported minimum may be one of \
+                 them; check the command did the same work every time."
             ));
         }
     }
@@ -957,7 +979,10 @@ mod tests {
     fn a_spike_is_an_outlier() {
         let w = warnings(&[10.0, 10.2, 9.9, 10.1, 40.0, 10.0, 10.1]);
         assert_eq!(w.len(), 1, "{w:?}");
-        assert!(w[0].starts_with("1 of 7 samples are outliers"), "{w:?}");
+        assert!(
+            w[0].starts_with("1 of 7 samples are slow outliers"),
+            "{w:?}"
+        );
     }
 
     #[test]
@@ -965,6 +990,30 @@ mod tests {
         let w = warnings(&[35.0, 10.0, 10.2, 9.9, 10.1, 10.0]);
         assert!(
             w.iter().any(|m| m.contains("first sample took 3.5x")),
+            "{w:?}"
+        );
+    }
+
+    /// With most samples identical the median deviation is zero; a spike
+    /// must still be reported.
+    #[test]
+    fn a_spike_among_identical_samples_is_still_an_outlier() {
+        let w = warnings(&[10.0, 10.0, 10.0, 100.0, 10.0]);
+        assert!(w.iter().any(|m| m.contains("slow outliers")), "{w:?}");
+        assert!(
+            warnings(&[10.0; 6]).is_empty(),
+            "identical samples are fine"
+        );
+    }
+
+    /// A fast outlier is the minimum, so it is reported as such rather than
+    /// reassured away.
+    #[test]
+    fn a_fast_outlier_is_flagged_as_possibly_the_minimum() {
+        let w = warnings(&[100.0, 101.0, 99.0, 102.0, 10.0, 100.0]);
+        assert!(
+            w.iter()
+                .any(|m| m.contains("fast outliers") && m.contains("minimum")),
             "{w:?}"
         );
     }

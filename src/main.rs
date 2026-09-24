@@ -393,6 +393,9 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
     let mut seen = std::collections::BTreeSet::new();
     let env = tak_cli::template::env();
     let mut skipped = Vec::new();
+    // Subjects of benchmarks a `when` switched off, so a --subject naming
+    // one is told why it will not run rather than that it does not exist.
+    let mut hidden: std::collections::BTreeMap<String, (String, String)> = Default::default();
     for (name, b) in selected {
         // `when` is decided before anything is rendered, so a skipped
         // benchmark or subject never needs the variables it would have used.
@@ -400,6 +403,11 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
             && !tak_cli::condition::eval(when, &env, &name, None)
                 .with_context(|| format!("benchmark `{name}`"))?
         {
+            for s in cfg.subjects(&name)? {
+                hidden
+                    .entry(s.name)
+                    .or_insert_with(|| (name.clone(), when.to_string()));
+            }
             skipped.push((name.clone(), None, when.to_string()));
             continue;
         }
@@ -407,6 +415,11 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
         seen.extend(subjects.iter().map(|s| s.name.clone()));
         let mut kept = Vec::with_capacity(subjects.len());
         for s in subjects {
+            // Only the subjects being run are decided on: one --subject left
+            // out cannot fail the run, whatever its condition evaluates to.
+            if !opts.subjects.is_empty() && !opts.subjects.contains(&s.name) {
+                continue;
+            }
             match &s.when {
                 Some(when)
                     if !tak_cli::condition::eval(when, &env, &name, Some(&s.name))
@@ -454,15 +467,15 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
         plans.push((name, b.is_multi(), subjects));
     }
     if let Some(missing) = opts.subjects.iter().find(|s| !seen.contains(*s)) {
+        if let Some((bench, when)) = hidden.get(missing) {
+            bail!(
+                "subject `{missing}` was asked for, but its benchmark `{bench}` has a false `when`: {when}"
+            );
+        }
         bail!(
             "no subject `{missing}` in the selected benchmarks (found: {})",
             seen.into_iter().collect::<Vec<_>>().join(", ")
         );
-    }
-
-    if plans.is_empty() {
-        println!("{} declares no benchmarks", path.display());
-        return Ok(());
     }
 
     for (bench, subject, when) in &skipped {
@@ -470,6 +483,15 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
             .as_ref()
             .map_or(bench.to_string(), |s| format!("{bench} ({s})"));
         eprintln!("  skipping {what}: `when` is false: {when}");
+    }
+
+    if plans.is_empty() {
+        if skipped.is_empty() {
+            println!("{} declares no benchmarks", path.display());
+        } else {
+            println!("nothing to run: every selected benchmark or subject has a false `when`");
+        }
+        return Ok(());
     }
 
     if opts.dry_run {

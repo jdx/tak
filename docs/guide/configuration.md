@@ -128,11 +128,15 @@ every tenth of the way (or every 30 seconds) anywhere else, such as CI logs. The
 remaining is estimated separately for each subject from its own samples so far, so a slow
 subject's remaining samples are counted at its own speed. Pass `--no-progress` to turn it off.
 
-tak also warns on stderr when a subject's samples look suspect: when some are outliers (a
-modified z-score above 3.5, meaning something else ran or the command's work varies), or when
-the first timed sample took over twice the median of the rest (the warmup didn't fill some
-cache). Nothing is dropped; the minimum already isn't affected by either. The warning means
-the comparison may be worth running again.
+tak also warns on stderr when a subject's samples look suspect:
+- **Slow outliers** (a modified z-score above 3.5): something else ran, or the command's work
+  varies. These don't change the minimum.
+- **Fast outliers:** these can *be* the minimum, so check the command did the same work every
+  time before trusting the headline number.
+- **A slow first sample:** the first timed sample took over twice the median of the rest, so
+  the warmup didn't fill some cache.
+
+Nothing is dropped or adjusted. A warning means the comparison may be worth running again.
 A multi-subject benchmark prints one summary line per subject. This is the output of a real run
 comparing `sleep 0.1` (`fast`) with `sleep 0.8` (`slow`), using `runs = "auto"`, `budget = "3s"`
 and `min_runs = 3`:
@@ -247,7 +251,7 @@ A condition can use `env` (tak's environment), `os` and `arch` (as Rust names th
 `bench`, and `subject`. It must evaluate to `true` or `false`. Conditions are decided before
 templates are rendered, so a skipped subject's variables don't need to be set. tak prints each
 skipped benchmark or subject on stderr, and a subject asked for with `--subject` whose `when` is
-false is an error. A benchmark's own subject table replaces a shared subject's `when`.
+false is an error. A `when` in a benchmark's own subject table replaces the shared subject's; a table without one keeps the shared condition, like every other setting. Conditions are only evaluated for the benchmarks and subjects being run, so an unrelated subject's condition can't stop a `--subject` run.
 Conditions are syntax-checked when `tak.toml` is loaded.
 
 ## Environment and runner settings

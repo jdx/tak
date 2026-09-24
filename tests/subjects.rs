@@ -627,3 +627,45 @@ fn dry_run_honours_no_counters() {
     let off = p.run(&["--dry-run", "--no-counters"]);
     assert!(!String::from_utf8_lossy(&off.stdout).contains("counters on"));
 }
+
+/// Only the subjects being run have their conditions evaluated, a subject
+/// in a switched-off benchmark is reported as such, and a run where every
+/// selected benchmark is switched off says so.
+#[test]
+fn when_is_decided_only_for_what_runs() {
+    let p = Project::new(
+        "when-scope",
+        r#"
+[defaults]
+warmup = 0
+runs = 1
+
+[bench.cmp.subject.here]
+cmd = ["true"]
+
+[bench.cmp.subject.odd]
+when = '"not a boolean"'
+cmd = ["true"]
+
+[bench.off]
+when = "false"
+[bench.off.subject.hidden]
+cmd = ["true"]
+"#,
+    );
+    let out = p.run(&["--no-progress", "--subject", "here"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let hidden = p.run(&["--no-progress", "--subject", "hidden"]);
+    assert!(!hidden.status.success());
+    assert!(
+        stderr(&hidden).contains("benchmark `off` has a false `when`"),
+        "{}",
+        stderr(&hidden)
+    );
+
+    let none = p.run(&["--no-progress", "--bench", "off"]);
+    assert!(none.status.success(), "{}", stderr(&none));
+    assert!(String::from_utf8_lossy(&none.stdout).contains("nothing to run"));
+    assert!(stderr(&none).contains("skipping off"), "{}", stderr(&none));
+}
