@@ -1090,7 +1090,9 @@ cmd = ["sh", "-c", "echo ran:ok >> log"]
     );
 
     // (a) The Windows-only benchmark is skipped and the Unix one runs.
-    let out = p.run(&["--bench", "unix", "--no-progress"]);
+    // --no-counters: a single-command benchmark counts instructions, and
+    // where valgrind exists that runs the command three more times.
+    let out = p.run(&["--bench", "unix", "--no-progress", "--no-counters"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let out = p.run(&["--bench", "windows", "--no-progress"]);
     assert!(out.status.success(), "{}", stderr(&out));
