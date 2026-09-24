@@ -282,26 +282,53 @@
         {
           "required": [
             "subjects"
-          ]
+          ],
+          "properties": {
+            "subjects": {
+              "minItems": 1
+            }
+          }
         },
         {
           "required": [
             "subject"
-          ]
+          ],
+          "properties": {
+            "subject": {
+              "minProperties": 1
+            }
+          }
         }
       ],
       "not": {
-        "anyOf": [
+        "allOf": [
           {
             "required": [
-              "cmd",
-              "subjects"
+              "cmd"
             ]
           },
           {
-            "required": [
-              "cmd",
-              "subject"
+            "anyOf": [
+              {
+                "required": [
+                  "subjects"
+                ],
+                "properties": {
+                  "subjects": {
+                    "minItems": 1
+                  }
+                }
+              },
+              {
+                "required": [
+                  "subject"
+                ],
+                "properties": {
+                  "subject": {
+                    "minProperties": 1
+                  }
+                }
+              }
             ]
           }
         ]

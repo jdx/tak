@@ -25,7 +25,10 @@ pub struct Export {
 pub struct Meta {
     pub tak_version: String,
     /// The run's seed: `tak run --seed` with it repeats the sample order, as
-    /// long as `runs = "auto"` settles on the same counts.
+    /// long as `runs = "auto"` settles on the same counts. A string, because
+    /// a seed given with `--seed` can exceed 2^53, and a JSON number that
+    /// large is rounded by JavaScript and jq — silently naming another order.
+    #[serde(serialize_with = "as_string")]
     pub seed: u64,
     /// The runner class the run would be recorded under.
     pub runner: String,
@@ -84,6 +87,10 @@ impl ExportResult {
             times,
         }
     }
+}
+
+fn as_string<S: serde::Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&v.to_string())
 }
 
 pub fn write(path: &Path, meta: Meta, results: Vec<ExportResult>) -> Result<()> {

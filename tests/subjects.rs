@@ -544,7 +544,10 @@ fn the_export_records_version_seed_and_runner() {
     assert!(out.status.success(), "{}", stderr(&out));
     let json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
-    assert_eq!(json["seed"], 77);
+    assert_eq!(
+        json["seed"], "77",
+        "a string, so large seeds survive JSON readers"
+    );
     assert_eq!(json["runner"], "test-class");
     assert_eq!(json["tak_version"], env!("CARGO_PKG_VERSION"));
     assert!(json["time"].as_str().unwrap().ends_with('Z'));
