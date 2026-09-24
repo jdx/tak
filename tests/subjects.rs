@@ -880,10 +880,14 @@ setup = ["sh", "-c", "echo setup:{{ subject }} >> log"]
     let out = p.run(&["--dry-run"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let stdout = String::from_utf8_lossy(&out.stdout);
+    // tak finds tak.toml from its working directory, which the OS reports
+    // with symlinks resolved: on macOS the temp dir is under /var, a link to
+    // /private/var.
+    let root = p.dir.canonicalize().unwrap();
     assert!(
         stdout.contains(&format!(
             "setup    sh -c 'echo setup:a >> log'  (in {})",
-            p.dir.display()
+            root.display()
         )),
         "{stdout}"
     );
