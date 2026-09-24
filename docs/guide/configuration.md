@@ -96,7 +96,9 @@ checkout before each sample.
 - **It runs before the benchmark's sampling starts.** Every subject's setup runs, in name
   order, before the benchmark's first warmup, so no sample shares the machine with a setup. It doesn't count
   toward `budget` or `runs = "auto"`'s sizing or the progress estimate. Progress shows which
-  subject is being set up.
+  subject is being set up. A subject's
+  [`version_cmd`](#recording-each-program-s-version) runs after all the setups, so it
+  reports on what `setup` installed.
 - **It runs once per benchmark.** A shared subject listed by two benchmarks is set up again
   for the second one, because the first benchmark's samples may have changed its state. Make
   an expensive setup reuse what it built before when that is safe.
@@ -111,6 +113,60 @@ Settings stack the same way as `prepare`: a subject's own `setup` replaces the b
 which replaces the one in `[defaults]`. There is no matching `teardown`. The next run's setup
 can clean up whatever the last one left, and keeping it around lets you inspect a subject's
 directory after a run.
+
+## Recording each program's version
+
+A comparison has to say which version of each program it measured. `version_cmd` names a
+command that prints a subject's version:
+
+```toml
+[defaults]
+runs = "auto"
+
+[subject.mycli]
+cmd = ["./target/release/mycli", "run", "pre-commit"]
+version_cmd = ["./target/release/mycli", "--version"]
+
+[subject.othertool]
+cmd = ["othertool", "run", "pre-commit"]
+version_cmd = "othertool version"
+
+[bench.hooks]
+subjects = ["mycli", "othertool"]
+```
+
+Before sampling, tak runs each subject's `version_cmd` once, untimed, in the subject's `dir`
+and `env`. It runs after every subject's `setup` and before any warmup, so a `setup` that
+installs or builds the program is done before tak asks for its version. A subject whose
+`setup` fails isn't asked. The command runs with the same variables removed, so it sees what
+the measured command sees. The first non-empty line it prints becomes that subject's `version`
+in `--export-json`. tak reads stdout, or stderr when stdout is empty, as with `java -version`. `--record` stores the same
+string as the measurement's `version`.
+
+::: v-pre
+`version_cmd` [layers](#sharing-settings-between-benchmarks) like `prepare`, and it's a
+[template](#templates), so one line in `[defaults]` can cover subjects that answer the same
+flag:
+
+```toml
+[defaults]
+version_cmd = ["{{ env.BIN_DIR }}/{{ subject }}", "--version"]
+```
+:::
+
+A `version_cmd` that exits non-zero, prints nothing, or takes longer than 10 seconds doesn't
+drop the subject. tak stops one that runs too long, prints a warning, measures the subject as
+usual, and exports its `version` as `null`. On Linux and macOS, stopping it also stops any
+processes it started, so nothing it left behind runs during the samples. The same happens if
+tak is interrupted (Ctrl-C, or SIGTERM or SIGHUP) while a `version_cmd` runs. On Windows only
+the command itself is stopped. A non-zero exit always means `null`, even when the
+command printed something that looks like a version: a failing command's output is an error or
+a usage message. [`ok_exit_codes`](#accepting-other-exit-codes) doesn't apply to `version_cmd`. Only the first 8 KiB of each output stream is kept; the rest is read and
+discarded, so a long banner doesn't stop the command from finishing. If the command leaves a
+background process holding its output open, tak uses what arrived before the command exited
+instead of waiting for that process. tak doesn't stop a background process left by a command
+that finished in time, because a tool may start a daemon on purpose. A subject without
+`version_cmd` has no `version` key. `--dry-run` lists each subject's `version_cmd`.
 
 ## Accepting other exit codes
 
@@ -133,7 +189,8 @@ ok_exit_codes = [0, 1]   # 1: a hook modified files, which is the case being mea
   holds.
 - `setup` and `prepare` must still exit 0. A failed setup or reset would leave every later
   sample starting from the wrong state. A [`check`](#checking-every-sample) passes only when it
-  exits 0, too.
+  exits 0, too, and a [`version_cmd`](#recording-each-program-s-version) that exits non-zero
+  always exports a `null` version.
 - `--export-json` records each sample's real exit code in `exit_codes`.
 - The list can't be empty, and duplicates are ignored. Unix only ever reports codes 0 to 255.
   Windows passes a program's 32-bit exit code through as a signed number, so write an NTSTATUS
@@ -295,14 +352,75 @@ and `min_runs = 3`:
 ```
 
 Every multi-subject run prints its seed. Pass it back with `--seed` to repeat an order.
-`--subject NAME` limits a run to the named subjects, and `--export-json PATH` writes every sample
-in hyperfine's `--export-json` shape, with `bench` and `subject` fields added to each result
-(and `checks`, for a subject with a [`check`](#checking-every-sample)).
-The file also records how the run was made: `tak_version`, `seed`, `runner` and `time`.
+`--subject NAME` limits a run to the named subjects.
+
+### Exported results
+
+`--export-json PATH` writes every sample in hyperfine's `--export-json` shape, so scripts that
+read hyperfine's file can read tak's. tak only adds keys; none of hyperfine's change meaning.
 
 ```sh
 tak run --bench install --seed 1234 --export-json results.json
 ```
+
+```json
+{
+  "tak_version": "0.0.12",
+  "seed": "1234",
+  "runner": "local-linux-x86_64",
+  "time": "2026-09-24T19:40:38Z",
+  "machine": {
+    "os": "linux",
+    "os_version": "Ubuntu 24.04.4 LTS",
+    "kernel": "6.8.0-45-generic",
+    "arch": "x86_64",
+    "cpu": "AMD Ryzen 9 7950X3D 16-Core Processor",
+    "cpus": 2,
+    "memory_bytes": 100294041600
+  },
+  "results": [
+    {
+      "command": "mycli",
+      "bench": "install",
+      "subject": "mycli",
+      "version": "mycli 2.4.0",
+      "mean": 0.412,
+      "stddev": 0.006,
+      "median": 0.411,
+      "min": 0.404,
+      "max": 0.425,
+      "times": [0.411, 0.404, 0.425],
+      "exit_codes": [0, 0, 0]
+    }
+  ]
+}
+```
+
+The top-level keys record how the run was made. `seed` is a string so large seeds survive
+JavaScript and jq, and `runner` is the class `--record` would store the run under.
+
+`machine` describes what the run was measured on, so a results page can state it:
+
+| key | value |
+|---|---|
+| `os`, `arch` | as Rust names them: `linux`, `macos`, `windows`; `x86_64`, `aarch64` |
+| `os_version` | `PRETTY_NAME` from `/etc/os-release` on Linux, the product version on macOS; `null` on Windows |
+| `kernel` | the kernel release on Linux, the Darwin release on macOS, `10.0.<build>` on Windows |
+| `cpu` | the CPU model name; `null` where the OS does not report one, as on most arm64 Linux kernels |
+| `cpus` | logical CPUs tak could run on, which is what the subjects could use. On Linux it honours the affinity mask (`taskset`, a container cpuset) and cgroup CPU quotas, so it can be fewer than the machine has |
+| `memory_bytes` | total physical memory |
+
+A value tak can't read is `null` rather than an error. None of this is stored by `--record`:
+series are partitioned by `runner`, and a kernel update shouldn't split one.
+
+Each result has `bench` and `subject`. Two more keys appear only when the subject asks for them:
+
+- `version`, for a subject with a [`version_cmd`](#recording-each-program-s-version): the first
+  line it printed, or `null` if it failed.
+- `checks`, for a subject with a [`check`](#checking-every-sample): how many samples passed,
+  out of how many, and each sample's verdict in the same order as `times`.
+
+`user` and `system` are absent because tak doesn't measure CPU time.
 
 ## Sharing settings between benchmarks
 
@@ -339,14 +457,14 @@ Settings stack from least to most specific: `[defaults]`, then the benchmark, th
 shared `[subject.NAME]`, then the benchmark's own `[bench.B.subject.NAME]`. Each layer's
 setting replaces the one before, except `env` and `vars`, which merge key by key. `[defaults]`
 takes every benchmark setting (`runs`, `warmup`, `budget`, `min_runs`, `max_runs`,
-`ok_exit_codes`, `setup`, `prepare`, `check`, `dir`, `env`, `vars`). It is a separate table
-because `[env]` already holds `env.deny` and `env.allow`.
+`ok_exit_codes`, `setup`, `prepare`, `check`, `version_cmd`, `dir`, `env`, `vars`). It is a
+separate table because `[env]` already holds `env.deny` and `env.allow`.
 
 ## Templates
 
 <!-- tera syntax looks like Vue interpolation; v-pre stops VitePress evaluating it. -->
 ::: v-pre
-Values in `cmd`, `setup`, `prepare`, `check`, `dir`, `env` and `vars` are
+Values in `cmd`, `setup`, `prepare`, `check`, `version_cmd`, `dir`, `env` and `vars` are
 [tera](https://keats.github.io/tera/) templates, the same syntax mise uses. tak renders them itself before anything runs, so a
 command can use a path that only exists at run time and still be a plain argument list,
 without a shell:

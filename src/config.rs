@@ -80,6 +80,9 @@ struct Layer {
     /// Untimed command run after every timed sample; its exit status says
     /// whether that sample did the right work.
     check: Option<Cmd>,
+    /// Command whose output names the subject's version, run once after
+    /// `setup` and before sampling, and reported in `--export-json`.
+    version_cmd: Option<Cmd>,
     /// Directory to run in, relative to `tak.toml`.
     dir: Option<PathBuf>,
     /// Variables set for the command.
@@ -307,6 +310,10 @@ pub struct Subject {
     pub setup_dir: Option<PathBuf>,
     /// Run after every timed sample, untimed. Exit 0 means the sample passed.
     pub check: Option<Vec<String>>,
+    /// Run once, untimed, after `setup` and before the first warmup; its first
+    /// line of output is the version exported for this subject. See
+    /// [`crate::measure::interleaved_with_versions`].
+    pub version_cmd: Option<Vec<String>>,
     /// Relative to `tak.toml`; the caller resolves it.
     pub dir: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
@@ -359,6 +366,9 @@ impl Subject {
         }
         if let Some(check) = &mut self.check {
             program(check);
+        }
+        if let Some(version) = &mut self.version_cmd {
+            program(version);
         }
         self.dir = Some(match &self.dir {
             Some(d) => root.join(d),
@@ -492,6 +502,9 @@ impl Config {
             if let Some(c) = &l.check {
                 cmd(out, &format!("{at}.check"), c);
             }
+            if let Some(v) = &l.version_cmd {
+                cmd(out, &format!("{at}.version_cmd"), v);
+            }
             if let Some(d) = l.dir.as_ref().and_then(|d| d.to_str()) {
                 out.push((format!("{at}.dir"), d));
             }
@@ -591,6 +604,10 @@ fn resolve(
             .map(Cmd::argv)
             .transpose()
             .context("check")?,
+        version_cmd: last(layers, |l| l.version_cmd.as_ref())
+            .map(Cmd::argv)
+            .transpose()
+            .context("version_cmd")?,
         dir: last(layers, |l| l.dir.as_ref()).cloned(),
         env: merged(|l| &l.env),
         vars: merged(|l| &l.vars),
@@ -1306,6 +1323,54 @@ cmd = "mycli 'two words'""#,
         assert_eq!(test[1].cmd, ["pnpm", "install-test"]);
         assert_eq!(test[1].vars["kind"], "local");
         assert!(test[1].counters, "an override keeps the shared setting");
+    }
+
+    /// `version_cmd` stacks like `prepare`, and its program is found the
+    /// same way `cmd`'s is.
+    #[test]
+    fn version_cmd_stacks_and_is_anchored() {
+        let c = Config::parse(
+            r#"
+            [defaults]
+            version_cmd = ["{{ subject }}", "--version"]
+
+            [subject.lefthook]
+            cmd = ["lefthook", "run", "pre-commit"]
+            version_cmd = "lefthook version"
+
+            [subject.mine]
+            cmd = ["./target/release/mine", "check"]
+            version_cmd = ["./target/release/mine", "--version"]
+
+            [bench.hooks]
+            subjects = ["lefthook", "mine", "pre-commit"]
+            [bench.hooks.subject.pre-commit]
+            cmd = ["pre-commit", "run"]
+            "#,
+        )
+        .unwrap();
+        let s = c.subjects("hooks").unwrap();
+        let by = |n: &str| s.iter().find(|x| x.name == n).unwrap().clone();
+        assert_eq!(
+            by("lefthook").version_cmd.unwrap(),
+            ["lefthook", "version"],
+            "subject over defaults"
+        );
+        assert_eq!(
+            by("pre-commit").version_cmd.unwrap(),
+            ["{{ subject }}", "--version"],
+            "inherited, rendered later"
+        );
+        let mut mine = by("mine");
+        mine.anchor(Path::new("/repo"));
+        assert_eq!(
+            mine.version_cmd.unwrap(),
+            ["/repo/./target/release/mine", "--version"]
+        );
+        assert!(
+            Config::parse("[bench.a]\ncmd = \"x\"\nversion_cmd = []").is_err(),
+            "an empty version_cmd is rejected like an empty prepare"
+        );
     }
 
     #[test]

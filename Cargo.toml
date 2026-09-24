@@ -50,6 +50,18 @@ tera = { version = "2", default-features = false }
 expr-lang = { version = "2", default-features = false }
 indexmap = "2"
 
+# Machine details for `--export-json` (src/machine.rs), and on Unix stopping a
+# timed-out `version_cmd`'s whole process group (src/measure.rs). Both are
+# already in the dependency tree through tempfile, so neither adds a crate.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+] }
+
 [profile.release]
 lto = true
 codegen-units = 1

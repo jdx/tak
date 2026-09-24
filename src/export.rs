@@ -6,8 +6,9 @@
 //! rewriting what consumes it. `bench` and `subject` are extra keys, which
 //! hyperfine consumers ignore; they are what tell entries apart once one file
 //! holds several benchmarks. `user` and `system` are omitted because tak does
-//! not measure CPU time. `checks` is present only for a subject with a
-//! `check`, and leaves every hyperfine field as it would otherwise be.
+//! not measure CPU time. Everything tak adds is an extra key, and none of
+//! hyperfine's changes meaning: `checks` is present only for a subject with a
+//! `check`, and `version` only for one with a `version_cmd`.
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -35,6 +36,8 @@ pub struct Meta {
     pub runner: String,
     /// When the run finished, RFC 3339.
     pub time: String,
+    /// What the run was measured on, for a results page to state.
+    pub machine: crate::machine::Machine,
 }
 
 #[derive(Debug, Serialize)]
@@ -44,6 +47,11 @@ pub struct ExportResult {
     pub command: String,
     pub bench: String,
     pub subject: String,
+    /// What the subject's `version_cmd` printed. Absent when it has none,
+    /// `null` when it failed — a subject is still measured and exported
+    /// without its version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<Option<String>>,
     /// Seconds, like hyperfine, not the milliseconds tak records.
     pub mean: f64,
     /// `null` for a single sample, as hyperfine writes it.
@@ -105,6 +113,7 @@ impl ExportResult {
             command: command.to_string(),
             bench: bench.to_string(),
             subject: subject.to_string(),
+            version: None,
             mean,
             stddev,
             median,
@@ -169,6 +178,17 @@ mod tests {
             serde_json::json!({"passed": 2, "total": 3, "samples": [true, false, true]})
         );
         assert_eq!(checked["exit_codes"], serde_json::json!([0, 0, 0]));
+    }
+
+    #[test]
+    fn a_version_is_absent_unless_asked_for_and_null_when_it_failed() {
+        let mut r = ExportResult::new("b", "s", "s", &[5.0]);
+        let json = serde_json::to_value(&r).unwrap();
+        assert!(json.get("version").is_none());
+        r.version = Some(None);
+        assert!(serde_json::to_value(&r).unwrap()["version"].is_null());
+        r.version = Some(Some("tool 1.2.3".into()));
+        assert_eq!(serde_json::to_value(&r).unwrap()["version"], "tool 1.2.3");
     }
 
     #[test]

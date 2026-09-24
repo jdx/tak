@@ -19,6 +19,7 @@ use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::Instant;
 
@@ -350,6 +351,26 @@ pub fn interleaved(
     settings: &Settings,
     observer: &mut dyn Observer,
 ) -> Vec<Result<Samples>> {
+    interleaved_with_versions(subjects, seed, settings, observer).0
+}
+
+/// A subject's `version_cmd` result: `None` when it declares none or never
+/// got that far, otherwise what it printed or why it could not tell.
+pub type Version = Option<Result<String>>;
+
+/// [`interleaved`], also returning each subject's version.
+///
+/// Versions are asked for after every `setup` and before any warmup: setup
+/// may be what installs or builds the subject, so asking earlier would name
+/// the wrong program or none, and a tool that warms a cache or checks for
+/// updates on `--version` does so before the first sample rather than
+/// between samples. A subject whose setup failed is not asked.
+pub fn interleaved_with_versions(
+    subjects: &[Subject],
+    seed: u64,
+    settings: &Settings,
+    observer: &mut dyn Observer,
+) -> (Vec<Result<Samples>>, Vec<Version>) {
     let mut rng = fastrand::Rng::with_seed(seed);
     let mut results: Vec<Result<Samples>> = subjects
         .iter()
@@ -400,6 +421,12 @@ pub fn interleaved(
         }
     }
 
+    let versions: Vec<Version> = subjects
+        .iter()
+        .zip(&results)
+        .map(|(s, r)| r.as_ref().ok().and_then(|_| subject_version(s, settings)))
+        .collect();
+
     let mut first = rounds(&warmups, false, &mut rng);
     first.extend(rounds(&pilots, true, &mut rng));
     run_slots(
@@ -433,7 +460,7 @@ pub fn interleaved(
         &mut fastest,
         observer,
     );
-    results
+    (results, versions)
 }
 
 /// An auto subject's run count. One that was never timed — its every sample
@@ -619,6 +646,7 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
         setup_dir: None,
         check: None,
         dir: plan.dir.clone(),
+        version_cmd: None,
         env: BTreeMap::new(),
         vars: BTreeMap::new(),
         when: None,
@@ -739,6 +767,461 @@ pub fn subject_instructions(s: &Subject, settings: &Settings) -> Result<Option<C
         },
         &s.ok_exit_codes,
     )
+}
+
+/// Run a subject's `version_cmd` once and return the version it reports, or
+/// `None` when the subject declares none.
+///
+/// It runs where the subject does — its directory, its environment, the same
+/// scrub — because that decides which binary a bare name resolves to, and the
+/// point is to name the program that was measured. The result is the first
+/// non-empty line of stdout, or of stderr when stdout has none: `java
+/// -version` and some older tools print only there. Only one line, because a
+/// version is a label on a results page, and several tools follow it with a
+/// licence or build banner.
+pub fn subject_version(s: &Subject, settings: &Settings) -> Option<Result<String>> {
+    let argv = s.version_cmd.as_ref()?;
+    let site = Site {
+        dir: s.dir.as_deref(),
+        env: &s.env,
+        settings,
+    };
+    Some(version_once(argv, &site, VERSION_TIMEOUT))
+}
+
+/// How much of each stream a `version_cmd` keeps. A version is its first
+/// non-empty line; a tool that follows it with a banner, or a help dump,
+/// must not be held in memory for the rest.
+const VERSION_OUTPUT_CAP: usize = 8192;
+
+/// How long a `version_cmd` may take. Asking a tool its version should be
+/// instant; one that stalls on a network or licence check must cost a
+/// warning, not hang the run before its first sample with nothing on
+/// screen. Fixed rather than a setting until a real tool needs longer.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// After the command exits, how long to wait for its output to finish
+/// arriving. Anything it wrote is already in the pipe by then, so this only
+/// ends up mattering when a process it started in the background still
+/// holds the pipe open — and that must not hold up the run.
+const VERSION_OUTPUT_GRACE: Duration = Duration::from_millis(500);
+
+/// Read `r` to the end, keeping the first `cap` bytes in `kept` and
+/// discarding the rest. Draining it all means the writer never blocks on a
+/// full pipe, so the command can finish and report its real exit status.
+fn keep_prefix(mut r: impl std::io::Read, cap: usize, kept: &Mutex<Vec<u8>>) {
+    let mut buf = [0u8; 8192];
+    loop {
+        match r.read(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => {
+                let Ok(mut k) = kept.lock() else { return };
+                let room = cap.saturating_sub(k.len());
+                k.extend_from_slice(&buf[..n.min(room)]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
+}
+
+/// Passing a fatal signal on to a running `version_cmd`'s process group.
+///
+/// The group is what lets a timeout stop everything the command started,
+/// but it also takes the command out of the terminal's foreground group, so
+/// a Ctrl-C — or a SIGTERM from CI cancelling the job — would stop tak and
+/// leave the command running, however long it would otherwise have hung.
+/// While a guard is alive, SIGINT, SIGTERM and SIGHUP kill that group and
+/// then stop tak exactly as they would have without the handler. The
+/// previous handlers come back when the guard drops, so the rest of a run
+/// behaves as before: the measured commands share tak's group and get the
+/// terminal's signals directly.
+#[cfg(unix)]
+mod forward_signals {
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering::SeqCst};
+
+    const SIGNALS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+
+    /// What the handler knows, as atomics alone: nothing else is safe to
+    /// touch from a signal handler.
+    ///
+    /// A handler can run on any thread and be preempted anywhere, so every
+    /// path that records a signal in `pending` must end with someone acting
+    /// on it. All accesses are `SeqCst`, which puts them in one order:
+    ///
+    /// - The handler writes `pending`, then reads `done` and `pgid`.
+    ///   [`State::spawned`] writes `pgid` and then takes `pending`;
+    ///   [`State::end`] writes `done` and then takes `pending`. Either a take
+    ///   comes after the handler's write, and the spawning thread acts on the
+    ///   signal, or every take that could have collected it came before, and
+    ///   so did the store preceding it, which the handler's later read sees,
+    ///   so the handler acts on the signal itself.
+    /// - The handler reads `spawning` before `pgid`, and `spawned` writes
+    ///   them in the opposite order, so a handler that sees `spawning`
+    ///   cleared also sees the group.
+    ///
+    /// A handler that starts after [`State::end`] sees `spawning` cleared and
+    /// never writes `pending`; one that started earlier and was preempted
+    /// sees `done` and stops tak itself, without killing a group whose id may
+    /// have been reused by then.
+    pub(super) struct State {
+        /// Between installing the handlers and recording the group: a
+        /// command may exist whose group the handler cannot know yet.
+        spawning: AtomicBool,
+        /// The group to kill, or 0 when there is none.
+        pgid: AtomicI32,
+        /// A signal that arrived while `spawning`, for the spawning thread
+        /// to act on once the group is known.
+        pending: AtomicI32,
+        /// The version step is over and nothing will look at `pending`
+        /// again, so a late handler must act on its signal itself.
+        done: AtomicBool,
+    }
+
+    /// What the handler should do with a signal.
+    #[derive(Debug, PartialEq, Eq)]
+    pub(super) enum Act {
+        /// Leave it for [`State::spawned`] or [`State::end`].
+        Defer,
+        /// Kill this group (0 for none) and stop tak.
+        Die { pgid: i32 },
+    }
+
+    impl State {
+        pub(super) const fn new() -> State {
+            State {
+                spawning: AtomicBool::new(false),
+                pgid: AtomicI32::new(0),
+                pending: AtomicI32::new(0),
+                done: AtomicBool::new(true),
+            }
+        }
+
+        pub(super) fn begin(&self) {
+            self.pending.store(0, SeqCst);
+            self.pgid.store(0, SeqCst);
+            self.done.store(false, SeqCst);
+            self.spawning.store(true, SeqCst);
+        }
+
+        /// The handler's decision.
+        pub(super) fn on_signal(&self, sig: libc::c_int) -> Act {
+            if self.wants_to_defer() {
+                self.defer(sig)
+            } else {
+                Act::Die {
+                    pgid: self.pgid.load(SeqCst),
+                }
+            }
+        }
+
+        /// First half of [`State::on_signal`]: still spawning, group not yet
+        /// known. Separate so a test can pause a handler between the halves.
+        fn wants_to_defer(&self) -> bool {
+            let spawning = self.spawning.load(SeqCst);
+            spawning && self.pgid.load(SeqCst) == 0
+        }
+
+        /// Second half: record the signal, then check whether whoever would
+        /// have collected it already has.
+        fn defer(&self, sig: libc::c_int) -> Act {
+            self.pending.store(sig, SeqCst);
+            if self.done.load(SeqCst) {
+                return Act::Die { pgid: 0 };
+            }
+            match self.pgid.load(SeqCst) {
+                0 => Act::Defer,
+                pgid => Act::Die { pgid },
+            }
+        }
+
+        /// Record the group once the spawn returns (`None` if it failed),
+        /// and hand back any signal that arrived meanwhile with the group
+        /// to kill for it.
+        pub(super) fn spawned(&self, pid: Option<u32>) -> Option<(libc::c_int, i32)> {
+            let pgid = pid.map_or(0, |p| p as i32);
+            self.pgid.store(pgid, SeqCst);
+            self.spawning.store(false, SeqCst);
+            let sig = self.pending.swap(0, SeqCst);
+            (sig != 0).then_some((sig, pgid))
+        }
+
+        /// The step is over. Returns a signal a late handler deferred, which
+        /// the caller must still act on; its group is not killed, since the
+        /// command has been reaped and the id may be reused.
+        pub(super) fn end(&self) -> Option<libc::c_int> {
+            self.spawning.store(false, SeqCst);
+            self.done.store(true, SeqCst);
+            self.pgid.store(0, SeqCst);
+            let sig = self.pending.swap(0, SeqCst);
+            (sig != 0).then_some(sig)
+        }
+    }
+
+    static STATE: State = State::new();
+
+    /// Kill the group, then stop tak the way `sig` would have. The signal is
+    /// blocked while a handler runs, so from there the raise takes effect —
+    /// with the default action — as soon as the handler returns.
+    fn die(sig: libc::c_int, pgid: i32) {
+        // SAFETY: killpg, signal and raise are async-signal-safe.
+        unsafe {
+            if pgid > 0 {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+
+    extern "C" fn forward(sig: libc::c_int) {
+        if let Act::Die { pgid } = STATE.on_signal(sig) {
+            die(sig, pgid);
+        }
+    }
+
+    pub struct Guard {
+        previous: Vec<(libc::c_int, libc::sigaction)>,
+    }
+
+    impl Guard {
+        /// Install the handlers, before spawning: a signal between here and
+        /// [`Guard::spawned`] is held until the group is known.
+        pub fn install() -> Guard {
+            STATE.begin();
+            let mut previous = Vec::new();
+            for sig in SIGNALS {
+                // SAFETY: plain-data structs, filled in before use; the
+                // handler is an `extern "C" fn(c_int)`, as sa_sigaction
+                // expects without SA_SIGINFO.
+                unsafe {
+                    let mut new: libc::sigaction = std::mem::zeroed();
+                    new.sa_sigaction = forward as extern "C" fn(libc::c_int) as libc::sighandler_t;
+                    libc::sigemptyset(&mut new.sa_mask);
+                    let mut old: libc::sigaction = std::mem::zeroed();
+                    if libc::sigaction(sig, &new, &mut old) == 0 {
+                        previous.push((sig, old));
+                    }
+                }
+            }
+            Guard { previous }
+        }
+
+        /// The spawn returned: `pid` leads the new group, or `None` if the
+        /// spawn failed. A signal that arrived during it is acted on now.
+        pub fn spawned(pid: Option<u32>) {
+            if let Some((sig, pgid)) = STATE.spawned(pid) {
+                die(sig, pgid);
+            }
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            // Before the previous handlers come back, so a signal one of ours
+            // deferred late is still acted on.
+            if let Some(sig) = STATE.end() {
+                die(sig, 0);
+            }
+            for (sig, old) in &self.previous {
+                // SAFETY: restores the action saved by `install`.
+                unsafe {
+                    libc::sigaction(*sig, old, std::ptr::null_mut());
+                }
+            }
+        }
+    }
+
+    /// Driven on a private `State`, so no real signal is sent and the
+    /// handler's own state is untouched: every way a handler and the version
+    /// step can interleave ends with the signal acted on.
+    #[cfg(test)]
+    mod tests {
+        use super::{Act, SeqCst, State};
+
+        #[test]
+        fn a_signal_during_the_spawn_is_held_until_the_group_is_known() {
+            let s = State::new();
+            s.begin();
+            assert_eq!(s.on_signal(libc::SIGTERM), Act::Defer, "no group yet");
+            assert_eq!(s.spawned(Some(42)), Some((libc::SIGTERM, 42)));
+            assert_eq!(s.on_signal(libc::SIGINT), Act::Die { pgid: 42 });
+            assert_eq!(s.end(), None);
+
+            s.begin();
+            assert_eq!(s.spawned(Some(7)), None, "nothing arrived");
+            assert_eq!(s.end(), None);
+
+            s.begin();
+            assert_eq!(s.on_signal(libc::SIGINT), Act::Defer);
+            assert_eq!(
+                s.spawned(None),
+                Some((libc::SIGINT, 0)),
+                "a failed spawn still stops tak"
+            );
+            assert_eq!(s.end(), None);
+
+            assert_eq!(
+                s.on_signal(libc::SIGHUP),
+                Act::Die { pgid: 0 },
+                "after the step"
+            );
+            assert!(!s.wants_to_defer(), "and it never defers there");
+        }
+
+        /// A handler that decided to defer, then was preempted: whenever it
+        /// resumes, its signal is acted on.
+        #[test]
+        fn a_handler_preempted_past_the_step_still_acts() {
+            let s = State::new();
+
+            // Until after the step ended: it sees `done` and stops tak,
+            // without killing a group whose id may be reused.
+            s.begin();
+            assert!(s.wants_to_defer());
+            assert_eq!(s.spawned(Some(42)), None);
+            assert_eq!(s.end(), None);
+            assert_eq!(s.defer(libc::SIGTERM), Act::Die { pgid: 0 });
+
+            // Until after the spawn: it sees the group. Its write is also
+            // left for `end`; acting twice on a signal is harmless.
+            s.begin();
+            assert!(s.wants_to_defer());
+            assert_eq!(s.spawned(Some(42)), None);
+            assert_eq!(s.defer(libc::SIGINT), Act::Die { pgid: 42 });
+            assert_eq!(s.end(), Some(libc::SIGINT));
+
+            // Its write landed before `end` took `pending` (and it read the
+            // group before `spawned` stored it): `end` acts on it.
+            s.begin();
+            assert_eq!(s.spawned(Some(42)), None);
+            s.pending.store(libc::SIGHUP, SeqCst);
+            assert_eq!(s.end(), Some(libc::SIGHUP), "acted on at teardown");
+        }
+    }
+}
+
+/// Stop a timed-out `version_cmd` and everything it started, then reap it.
+///
+/// On Unix that is its whole process group, so a helper it spawned cannot go
+/// on using CPU through the samples that follow, or hold the output pipes
+/// open. Elsewhere only the command itself is stopped.
+///
+/// Only on a timeout: a command that exits on its own may have started a
+/// daemon on purpose — a version check that launches a language server or
+/// build daemon — and that is the tool's business, not tak's to kill.
+fn stop_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // The child leads its own group (`process_group(0)`), so its pid is
+        // the group id. SAFETY: killpg only sends a signal.
+        let pgid = child.id() as libc::pid_t;
+        if unsafe { libc::killpg(pgid, libc::SIGKILL) } != 0 {
+            let _ = child.kill();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn version_once(argv: &[String], site: &Site, timeout: Duration) -> Result<String> {
+    let bin = argv
+        .first()
+        .map(String::as_str)
+        .unwrap_or("(empty command)");
+    let mut cmd = command(argv, site)?;
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Its own process group, so a timeout can stop everything it started:
+    // a helper left running would compete with the samples that follow.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    // Being in its own group, it no longer gets the terminal's Ctrl-C; this
+    // passes a fatal signal on to it until the guard drops.
+    #[cfg(unix)]
+    let _forward = forward_signals::Guard::install();
+    let spawned = cmd.spawn();
+    // Also when the spawn failed, so a signal held during it still stops tak.
+    #[cfg(unix)]
+    forward_signals::Guard::spawned(spawned.as_ref().ok().map(std::process::Child::id));
+    let mut child = spawned.with_context(|| format!("failed to spawn `{bin}`"))?;
+
+    // One thread per stream, so neither pipe can fill while the other is
+    // read. They are never joined: a background process the command started
+    // may hold a pipe open long after it exits, and the run must not wait on
+    // that. Each thread ends when its pipe finally closes.
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let spawn_reader = |r: Option<Box<dyn std::io::Read + Send>>| {
+        let kept = Arc::new(Mutex::new(Vec::new()));
+        if let Some(r) = r {
+            let (kept, tx) = (Arc::clone(&kept), done_tx.clone());
+            std::thread::spawn(move || {
+                keep_prefix(r, VERSION_OUTPUT_CAP, &kept);
+                let _ = tx.send(());
+            });
+        } else {
+            let _ = done_tx.send(());
+        }
+        kept
+    };
+    let stdout = spawn_reader(child.stdout.take().map(|o| Box::new(o) as _));
+    let stderr = spawn_reader(child.stderr.take().map(|e| Box::new(e) as _));
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(None) => {
+                stop_group(&mut child);
+                bail!(
+                    "`{bin}` did not finish within {}, so it was stopped",
+                    crate::progress::fmt(timeout)
+                );
+            }
+            Err(e) => {
+                stop_group(&mut child);
+                return Err(e).with_context(|| format!("failed to wait for `{bin}`"));
+            }
+        }
+    };
+    let grace = Instant::now() + VERSION_OUTPUT_GRACE;
+    for _ in 0..2 {
+        let left = grace.saturating_duration_since(Instant::now());
+        if done_rx.recv_timeout(left).is_err() {
+            break;
+        }
+    }
+    let take = |kept: &Mutex<Vec<u8>>| kept.lock().map(|k| k.clone()).unwrap_or_default();
+    let (stdout, stderr) = (take(&stdout), take(&stderr));
+
+    // A failing command's output is an error message or a usage dump, not a
+    // version, however much of it there is.
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
+        bail!(
+            "`{bin}` exited with {status}: {}",
+            stderr
+                .lines()
+                .map(str::trim)
+                .rfind(|l| !l.is_empty())
+                .unwrap_or("(no output)")
+        );
+    }
+    let first = |bytes: &[u8]| {
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(str::to_string)
+    };
+    first(&stdout)
+        .or_else(|| first(&stderr))
+        .with_context(|| format!("`{bin}` printed nothing"))
 }
 
 /// `ok` applies to the subject under valgrind: cachegrind exits with its
@@ -1006,6 +1489,7 @@ mod tests {
             setup_dir: None,
             check: None,
             dir: None,
+            version_cmd: None,
             env: BTreeMap::new(),
             vars: BTreeMap::new(),
             when: None,
@@ -1029,6 +1513,169 @@ mod tests {
         assert!(format!("{:#}", res[1].as_ref().unwrap_err()).contains("exited with"));
     }
 
+    /// Runs `sh -c script` as a `version_cmd` with the given deadline.
+    #[cfg(unix)]
+    fn version_sh(script: &str, env: &[(&str, &str)], timeout: Duration) -> Result<String> {
+        let settings = Settings::default();
+        let env: BTreeMap<String, String> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let site = Site {
+            dir: None,
+            env: &env,
+            settings: &settings,
+        };
+        version_once(&["sh".into(), "-c".into(), script.into()], &site, timeout)
+    }
+
+    /// The first non-empty line, from stdout or else stderr; a failure is an
+    /// error naming the command, which the caller turns into a warning.
+    #[cfg(unix)]
+    #[test]
+    fn a_version_is_the_first_line_printed() {
+        let sh = |script: &str| version_sh(script, &[("V", "9.9")], VERSION_TIMEOUT);
+        assert_eq!(
+            sh("printf '\\n  tool %s  \\nbuilt today\\n' \"$V\"").unwrap(),
+            "tool 9.9",
+            "first non-empty line, trimmed, in the subject's env"
+        );
+        assert_eq!(sh("echo 'java 21' >&2").unwrap(), "java 21");
+        let err = format!("{:#}", sh("echo nope >&2; exit 2").unwrap_err());
+        assert!(err.contains("`sh`") && err.contains("nope"), "{err}");
+        assert!(sh("true").is_err(), "no output is no version");
+    }
+
+    /// Output past the cap is read and dropped, so a command that prints a
+    /// lot still finishes, and its first line is what counts.
+    #[cfg(unix)]
+    #[test]
+    fn a_version_is_read_from_a_capped_prefix() {
+        let sh = |script: &str| version_sh(script, &[], VERSION_TIMEOUT);
+        assert_eq!(sh("yes 'tool 1.0' | head -c 10000000").unwrap(), "tool 1.0");
+        assert_eq!(
+            sh("yes 'java 21' | head -c 10000000 >&2").unwrap(),
+            "java 21",
+            "a flood on stderr"
+        );
+        let kept = Mutex::new(Vec::new());
+        let mut src = std::io::Cursor::new(vec![7u8; 100]);
+        keep_prefix(&mut src, 10, &kept);
+        assert_eq!(kept.lock().unwrap().len(), 10, "only the cap is kept");
+        assert_eq!(
+            src.position(),
+            100,
+            "the rest is read, not left in the pipe"
+        );
+    }
+
+    /// A failing command that prints a lot — a usage dump after an unknown
+    /// flag — is a failure, not a version, however long its output.
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_version_cmd_is_an_error_even_past_the_cap() {
+        let err = version_sh(
+            "yes 'usage: tool [flags]' | head -c 100000; echo 'unknown flag' >&2; exit 1",
+            &[],
+            VERSION_TIMEOUT,
+        )
+        .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("exited with") && err.contains("unknown flag"),
+            "{err}"
+        );
+    }
+
+    /// One that never finishes, even one that only floods stderr, is stopped
+    /// at the deadline and says so.
+    #[cfg(unix)]
+    #[test]
+    fn a_version_cmd_that_never_finishes_is_stopped() {
+        let t = Duration::from_millis(300);
+        let began = Instant::now();
+        // `exec`, so the process stopped at the deadline is the flood itself.
+        for script in ["exec yes 'tool 2.0' >&2", "exec sleep 30"] {
+            let err = format!("{:#}", version_sh(script, &[], t).unwrap_err());
+            assert!(err.contains("did not finish"), "{script}: {err}");
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            began.elapsed()
+        );
+    }
+
+    /// A timeout stops what the command started too, not just the command:
+    /// a helper left running would compete with the samples that follow.
+    #[cfg(unix)]
+    #[test]
+    fn a_timeout_stops_the_whole_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let script = format!("sleep 30 & echo $! > '{}'; wait", pidfile.display());
+        let err = version_sh(&script, &[], Duration::from_millis(300)).unwrap_err();
+        assert!(format!("{err:#}").contains("did not finish"), "{err:#}");
+        let pid = std::fs::read_to_string(&pidfile).unwrap();
+        let pid = pid.trim();
+        let until = Instant::now() + Duration::from_secs(2);
+        while running(pid) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !running(pid),
+            "the background sleep {pid} outlived the timeout"
+        );
+    }
+
+    /// Whether `pid` is still running. A zombie is not: once the shell that
+    /// started the process is killed with it, only PID 1 can reap it, and in
+    /// a container whose PID 1 does not reap orphans it stays a zombie —
+    /// which `kill -0` still reports as present.
+    #[cfg(unix)]
+    fn running(pid: &str) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            // The state follows the `)` closing the command name, which may
+            // itself contain spaces or parentheses, so look for the last one.
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                return false;
+            };
+            let state = stat
+                .rfind(')')
+                .and_then(|i| stat[i + 1..].trim_start().chars().next());
+            !matches!(state, None | Some('Z' | 'X' | 'x'))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let Ok(out) = Command::new("ps")
+                .args(["-o", "stat=", "-p", pid])
+                .stderr(Stdio::null())
+                .output()
+            else {
+                return false;
+            };
+            let stat = String::from_utf8_lossy(&out.stdout);
+            let stat = stat.trim();
+            out.status.success() && !stat.is_empty() && !stat.starts_with('Z')
+        }
+    }
+
+    /// A background process that inherits the pipes keeps them open after
+    /// the command exits; the version it printed still comes back promptly.
+    #[cfg(unix)]
+    #[test]
+    fn a_background_process_holding_the_pipe_does_not_hold_up_the_version() {
+        let began = Instant::now();
+        let v = version_sh("sleep 5 & echo 'tool 3.0'", &[], VERSION_TIMEOUT).unwrap();
+        assert_eq!(v, "tool 3.0");
+        assert!(
+            began.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            began.elapsed()
+        );
+    }
+
     /// A prepare step that fails stops its subject, and says it was prepare.
     #[cfg(unix)]
     #[test]
@@ -1046,6 +1693,7 @@ mod tests {
                 setup_dir: None,
                 check: None,
                 dir: None,
+                version_cmd: None,
                 env: BTreeMap::new(),
                 vars: BTreeMap::new(),
                 when: None,
@@ -1087,6 +1735,7 @@ mod tests {
                 // Arithmetic strips the padding macOS `wc -l` puts before the count.
                 "echo check >> checked; runs=$(( $(wc -l < n) )); test $(( runs % 2 )) = 1 || { echo \"run $runs is even\" >&2; exit 1; }".into(),
             ]),
+            version_cmd: None,
             dir: Some(dir.to_path_buf()),
             env: BTreeMap::new(),
             vars: BTreeMap::new(),
@@ -1201,6 +1850,7 @@ mod tests {
             setup,
             setup_dir: None,
             check: None,
+            version_cmd: None,
             dir: None,
             env: BTreeMap::new(),
             vars: BTreeMap::new(),
@@ -1251,6 +1901,7 @@ mod tests {
             setup_dir: None,
             check: None,
             dir: None,
+            version_cmd: None,
             env: BTreeMap::new(),
             vars: BTreeMap::new(),
             when: None,
