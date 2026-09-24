@@ -53,6 +53,41 @@ pub fn check_str(value: &str) -> Result<()> {
     Ok(())
 }
 
+/// The names a template refers to as `vars.NAME` or `vars["NAME"]`. A plain
+/// scan rather than a parse: it only decides rendering order, and naming a
+/// var that does not exist just means nothing to wait for.
+fn var_refs(template: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = template;
+    while let Some(i) = rest.find("vars") {
+        let after = &rest[i + 4..];
+        let before_ok = rest[..i]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+        if before_ok {
+            if let Some(tail) = after.strip_prefix('.') {
+                let name: String = tail
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() {
+                    out.push(name);
+                }
+            } else if let Some(tail) = after.strip_prefix('[') {
+                let tail = tail.trim_start();
+                if let Some(q) = tail.chars().next().filter(|c| *c == '"' || *c == '\'')
+                    && let Some(end) = tail[1..].find(q)
+                {
+                    out.push(tail[1..1 + end].to_string());
+                }
+            }
+        }
+        rest = after;
+    }
+    out
+}
+
 /// Render every template in `s` for benchmark `bench`.
 pub fn render(mut s: Subject, bench: &str, env: &BTreeMap<String, String>) -> Result<Subject> {
     let tera = Tera::default();
@@ -70,28 +105,27 @@ pub fn render(mut s: Subject, bench: &str, env: &BTreeMap<String, String>) -> Re
             .with_context(|| format!("could not render {field}: {value:?}"))
     };
 
-    // `vars` may refer to each other, in any order: render in passes, each
-    // with the values finished so far, until a pass makes no progress. What
-    // is left then refers to something undefined, or to itself.
+    // `vars` may refer to each other, in any order. A var is rendered only
+    // once every declared var it names is finished — not merely once it
+    // renders, because a filter like `default` renders happily without the
+    // var it is waiting for and would lock in its fallback. Whatever cannot
+    // become ready refers to itself, directly or around a cycle.
     let mut done: BTreeMap<String, String> = BTreeMap::new();
     let mut pending: Vec<(&String, &String)> = s.vars.iter().collect();
     while !pending.is_empty() {
-        ctx.insert("vars", &done);
-        let before = pending.len();
-        let mut failed = None;
-        pending.retain(|&(k, v)| match one(&ctx, &format!("vars.{k}"), v) {
-            Ok(r) => {
-                done.insert(k.clone(), r);
-                false
-            }
-            Err(e) => {
-                failed.get_or_insert(e);
-                true
-            }
+        let ready = pending.iter().position(|(_, v)| {
+            var_refs(v)
+                .iter()
+                .all(|r| !s.vars.contains_key(r) || done.contains_key(r))
         });
-        if pending.len() == before {
-            return Err(failed.expect("a pass without progress had a failure"));
-        }
+        let Some(i) = ready else {
+            let names: Vec<&str> = pending.iter().map(|(k, _)| k.as_str()).collect();
+            anyhow::bail!("vars refer to each other in a cycle: {}", names.join(", "));
+        };
+        let (k, v) = pending.remove(i);
+        ctx.insert("vars", &done);
+        let rendered = one(&ctx, &format!("vars.{k}"), v)?;
+        done.insert(k.clone(), rendered);
     }
     ctx.insert("vars", &done);
     s.vars = done;
@@ -208,5 +242,23 @@ mod tests {
         assert_eq!(s.cmd, ["mycli", "--lockfile", "{{ vars.lockfile }}"]);
         let r = render(s, "b", &env(&[])).unwrap();
         assert_eq!(r.cmd, ["mycli", "--lockfile", "a.lock"]);
+    }
+
+    /// A fallback does not win over a var that exists but is written later
+    /// in key order: rendering waits for what a var names.
+    #[test]
+    fn a_default_waits_for_the_var_it_names() {
+        let s = subject(
+            "[bench.b]\ncmd = [\"{{ vars.a }}\"]\nvars = { a = \"{{ vars.b | default(value='fallback') }}\", b = \"real\" }",
+        );
+        assert_eq!(render(s, "b", &env(&[])).unwrap().cmd, ["real"]);
+    }
+
+    #[test]
+    fn var_references_are_found_in_both_spellings() {
+        assert_eq!(
+            var_refs("{{ vars.a }}-{{ vars['b'] }}-{{ myvars.c }}"),
+            ["a", "b"]
+        );
     }
 }
