@@ -112,6 +112,66 @@ which replaces the one in `[defaults]`. There is no matching `teardown`. The nex
 can clean up whatever the last one left, and keeping it around lets you inspect a subject's
 directory after a run.
 
+## Checking every sample
+
+A fast time is only worth reporting if the command did the right work. `check` runs after every
+timed sample, untimed, in the same directory and environment as the command. Exit status 0 means
+the sample passed; anything else means it failed. Use it when a command's output can be wrong
+some of the time, such as formatters that race when run concurrently on the same files:
+
+```toml
+[bench.fix]
+runs = 20
+warmup = 1
+dir = "fixture"   # a git repository with tags `dirty` (unformatted) and `clean` (the expected result)
+prepare = ["git", "reset", "--hard", "--quiet", "dirty"]
+check = ["git", "diff", "--quiet", "clean"]
+
+# Two fixers one after the other.
+[bench.fix.subject.serial]
+cmd = ["sh", "-c", "sed -i 's/foo/bar/' a.txt; sed -i 's/ *$//' a.txt"]
+
+# The same two fixers at once, on the same file.
+[bench.fix.subject.parallel]
+cmd = ["sh", "-c", "sed -i 's/foo/bar/' a.txt & sed -i 's/ *$//' a.txt & wait"]
+```
+
+`git diff --quiet clean` exits 1 when the working tree differs from the `clean` commit. In this
+run the concurrent fixers lost an edit every time, and were faster for it:
+
+```text
+  fix: 2 subjects, interleaved (--seed 1)
+  warning: fix (parallel): check failed after 20 of 20 samples (sample 1, 2, 3, 4, 5, 6, 7, 8, …); first: check `git` exited with exit status: 1
+    parallel  min      1.96  p50      2.13  mean      2.15 ± 0.15     max      2.47 ms  n=20  checks 0/20
+    serial    min      2.49  p50      2.72  mean      2.78 ± 0.21     max      3.24 ms  n=20  checks 20/20
+```
+
+- A failing check doesn't drop the subject, and without `--record` it doesn't fail the run.
+  Every sample is kept, and the pass count is the result: a race that loses one sample in
+  twenty shows up as `checks 19/20` on the subject's summary line. tak warns on stderr, listing
+  the failed sample numbers and the last line the first failing check wrote to stderr. The
+  summary doesn't say which time came from which sample, so it can't tell you whether the
+  minimum is from a failed one. The export can.
+- A check that can't be started at all, such as a mistyped program, is a mistake in `tak.toml`
+  rather than a result. That drops the subject like a failing `cmd`.
+- Warmups aren't checked, because they aren't kept. The check isn't counted toward a
+  `runs = "auto"` budget, which is sized from prepare and the command alone.
+- The instruction-count runs of a subject with `counters = true` are separate from the timed
+  samples, and the check doesn't run after them.
+- `check` uses the same syntax as `cmd` and `prepare`: no implicit shell, and a program path
+  containing a `/` is found relative to `tak.toml`. It stacks like `prepare`, so a subject's
+  own `check` replaces the benchmark's.
+- `--export-json` adds `checks` to each result that has one:
+  `{"passed": 18, "total": 20, "samples": [true, …]}`, with `samples` in the same order as
+  `times`, so each verdict can be matched to its time. The hyperfine fields are unchanged.
+- **`--record` writes nothing if any check failed.** Git notes keep timings but not
+  verdicts, so the timings of a run with a failed check would be stored as if it had
+  passed. `tak compare` keeps each metric's minimum and treats lower as better, and a pass
+  rate fits neither rule, so it isn't stored alongside them. Instead, tak names each subject
+  whose check failed and how many of its samples failed, writes no notes, and exits
+  non-zero, as it does when a subject is dropped. `--export-json` is still written, with the
+  verdicts.
+
 ## Comparing several programs
 
 To compare programs against each other, declare them as subjects of one benchmark instead of
@@ -138,9 +198,9 @@ tak interleaves the samples: every round takes one sample of each subject in a f
 order, rather than every sample of one subject and then the next. See
 [methodology](/guide/methodology#comparing-programs) for why.
 
-- Subjects inherit the benchmark's `runs`, `warmup`, `setup`, `prepare`, `dir` and `env`. A
-  subject's own `setup` or `prepare` replaces the benchmark's, and its `env` entries override
-  matching keys.
+- Subjects inherit the benchmark's `runs`, `warmup`, `setup`, `prepare`, `check`, `dir` and
+  `env`. A subject's own `setup`, `prepare` or `check` replaces the benchmark's, and its `env`
+  entries override matching keys.
 - A subject with fewer `runs` than the others is spread evenly across the run.
 - Each subject is recorded as its own series, with the subject name as the tool. Instruction
   counts are off for subjects unless they set `counters = true`, so another program's upgrade
@@ -202,7 +262,8 @@ and `min_runs = 3`:
 
 Every multi-subject run prints its seed. Pass it back with `--seed` to repeat an order.
 `--subject NAME` limits a run to the named subjects, and `--export-json PATH` writes every sample
-in hyperfine's `--export-json` shape, with `bench` and `subject` fields added to each result.
+in hyperfine's `--export-json` shape, with `bench` and `subject` fields added to each result
+(and `checks`, for a subject with a [`check`](#checking-every-sample)).
 The file also records how the run was made: `tak_version`, `seed`, `runner` and `time`.
 
 ```sh
@@ -244,15 +305,15 @@ Settings stack from least to most specific: `[defaults]`, then the benchmark, th
 shared `[subject.NAME]`, then the benchmark's own `[bench.B.subject.NAME]`. Each layer's
 setting replaces the one before, except `env` and `vars`, which merge key by key. `[defaults]`
 takes every benchmark setting (`runs`, `warmup`, `budget`, `min_runs`, `max_runs`,
-`setup`, `prepare`, `dir`, `env`, `vars`). It is a separate table because `[env]` already holds
-`env.deny` and `env.allow`.
+`setup`, `prepare`, `check`, `dir`, `env`, `vars`). It is a separate table because `[env]`
+already holds `env.deny` and `env.allow`.
 
 ## Templates
 
 <!-- tera syntax looks like Vue interpolation; v-pre stops VitePress evaluating it. -->
 ::: v-pre
-Values in `cmd`, `setup`, `prepare`, `dir`, `env` and `vars` are [tera](https://keats.github.io/tera/)
-templates, the same syntax mise uses. tak renders them itself before anything runs, so a
+Values in `cmd`, `setup`, `prepare`, `check`, `dir`, `env` and `vars` are
+[tera](https://keats.github.io/tera/) templates, the same syntax mise uses. tak renders them itself before anything runs, so a
 command can use a path that only exists at run time and still be a plain argument list,
 without a shell:
 

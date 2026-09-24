@@ -30,6 +30,7 @@ min_runs = 5
 max_runs = 50
 prepare = ["true"]
 setup = ["true"]
+check = ["true"]
 dir = "."
 env = { A = "1" }
 vars = { v = "x" }
@@ -45,6 +46,7 @@ min_runs = 1
 max_runs = 2
 prepare = "true"
 setup = "true"
+check = "true"
 dir = "."
 env = { B = "2" }
 vars = { w = "y" }
@@ -59,6 +61,7 @@ min_runs = 1
 max_runs = 3
 prepare = ["true"]
 setup = "true"
+check = ["true"]
 dir = "."
 env = { C = "3" }
 vars = { u = "z" }

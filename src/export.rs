@@ -6,7 +6,8 @@
 //! rewriting what consumes it. `bench` and `subject` are extra keys, which
 //! hyperfine consumers ignore; they are what tell entries apart once one file
 //! holds several benchmarks. `user` and `system` are omitted because tak does
-//! not measure CPU time.
+//! not measure CPU time. `checks` is present only for a subject with a
+//! `check`, and leaves every hyperfine field as it would otherwise be.
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -53,8 +54,32 @@ pub struct ExportResult {
     /// Every timed sample in seconds, in the order taken.
     pub times: Vec<f64>,
     /// Always zero: a sample that fails drops its subject rather than being
-    /// kept, so every exported time is from a successful run.
+    /// kept, so every exported time is from a successful run. A failed
+    /// `check` is not a failed run, and is reported in `checks` instead.
     pub exit_codes: Vec<i32>,
+    /// The outcome of the subject's `check`, when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checks: Option<Checks>,
+}
+
+/// How a subject's timed samples fared against its `check`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Checks {
+    pub passed: usize,
+    pub total: usize,
+    /// Whether each sample passed, aligned with `times`, so a failure can be
+    /// matched to the time it produced.
+    pub samples: Vec<bool>,
+}
+
+impl Checks {
+    pub fn new(samples: &[bool]) -> Self {
+        Checks {
+            passed: samples.iter().filter(|&&ok| ok).count(),
+            total: samples.len(),
+            samples: samples.to_vec(),
+        }
+    }
 }
 
 impl ExportResult {
@@ -85,7 +110,15 @@ impl ExportResult {
             max: sorted[n - 1],
             exit_codes: vec![0; n],
             times,
+            checks: None,
         }
+    }
+
+    /// Attach a subject's check outcomes, one per sample.
+    pub fn with_checks(mut self, samples: &[bool]) -> Self {
+        debug_assert_eq!(samples.len(), self.times.len());
+        self.checks = Some(Checks::new(samples));
+        self
     }
 }
 
@@ -109,6 +142,24 @@ mod tests {
         assert_eq!((r.min, r.max, r.mean, r.median), (1.0, 4.0, 2.5, 2.5));
         assert_eq!(r.exit_codes, [0; 4]);
         assert!(r.stddev.unwrap() > 0.0);
+    }
+
+    /// `checks` is absent without a check, so a subject that has none
+    /// exports exactly the hyperfine shape it did before.
+    #[test]
+    fn checks_are_exported_only_when_there_are_some() {
+        let plain = serde_json::to_value(ExportResult::new("b", "s", "s", &[1.0, 2.0])).unwrap();
+        assert!(plain.get("checks").is_none(), "{plain}");
+
+        let checked = serde_json::to_value(
+            ExportResult::new("b", "s", "s", &[1.0, 2.0, 3.0]).with_checks(&[true, false, true]),
+        )
+        .unwrap();
+        assert_eq!(
+            checked["checks"],
+            serde_json::json!({"passed": 2, "total": 3, "samples": [true, false, true]})
+        );
+        assert_eq!(checked["exit_codes"], serde_json::json!([0, 0, 0]));
     }
 
     #[test]
