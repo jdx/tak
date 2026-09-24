@@ -16,3 +16,4 @@ pub mod notes;
 pub mod progress;
 pub mod record;
 pub mod settings;
+pub mod template;

@@ -39,69 +39,82 @@ pub struct Config {
     /// Settings tables — `[env]`, `[gate]`, `[report]`, `[runner]` — live in
     /// the same file but are not deserialized here: the settings registry
     /// declares their dotted keys, and `settings::TakConfigLayer` reads exactly
-    /// those, so this type never has to be kept in step with it.
+    /// those, so this type never has to be kept in step with it. That is also
+    /// why defaults for every benchmark live under `[defaults]`, not `[env]`.
     #[serde(default)]
     pub bench: BTreeMap<String, Bench>,
+    /// Settings every benchmark starts from.
+    #[serde(default)]
+    defaults: Layer,
+    /// Subjects declared once, for benchmarks to name in `subjects = [...]`.
+    #[serde(default)]
+    subject: BTreeMap<String, SubjectDecl>,
+}
+
+/// The settings that stack: `[defaults]`, a benchmark, a shared subject and a
+/// benchmark's own subject table all carry them, and each overrides the one
+/// before. `env` and `vars` merge key by key rather than replacing.
+#[derive(Debug, Default, Deserialize)]
+struct Layer {
+    /// A count, or `"auto"` to size each subject from its own speed.
+    runs: Option<RunsDecl>,
+    warmup: Option<u32>,
+    /// `runs = "auto"`: wall time to spend per subject, as `30s`, `2m`, `500ms`.
+    budget: Option<String>,
+    /// `runs = "auto"`: fewest runs any subject gets.
+    min_runs: Option<u32>,
+    /// `runs = "auto"`: most runs any subject gets.
+    max_runs: Option<u32>,
+    /// Untimed command run before every sample.
+    prepare: Option<Cmd>,
+    /// Directory to run in, relative to `tak.toml`.
+    dir: Option<PathBuf>,
+    /// Variables set for the command.
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    /// Values for templates, as `{{ vars.name }}`. Not passed to the command.
+    #[serde(default)]
+    vars: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Bench {
     /// The command, for a benchmark of one program. Mutually exclusive with
-    /// `subject`, which declares several programs measured against each other.
+    /// `subjects` and `subject`, which declare several programs measured
+    /// against each other.
     #[serde(default)]
     cmd: Option<Cmd>,
-    /// A count, or `"auto"` to size each subject from its own speed.
-    pub runs: Option<RunsDecl>,
-    pub warmup: Option<u32>,
-    /// `runs = "auto"`: wall time to spend per subject, as `30s`, `2m`, `500ms`.
-    pub budget: Option<String>,
-    /// `runs = "auto"`: fewest runs any subject gets.
-    pub min_runs: Option<u32>,
-    /// `runs = "auto"`: most runs any subject gets.
-    pub max_runs: Option<u32>,
-    /// Untimed command run before every sample. On a multi-subject benchmark
-    /// this is the default for subjects that do not declare their own.
+    #[serde(flatten)]
+    layer: Layer,
+    /// Shared `[subject.NAME]` tables this benchmark measures.
     #[serde(default)]
-    prepare: Option<Cmd>,
-    /// Directory to run in, relative to `tak.toml`.
-    #[serde(default)]
-    dir: Option<PathBuf>,
-    /// Variables set for the command. Subjects inherit these and may override
-    /// individual keys.
-    #[serde(default)]
-    env: BTreeMap<String, String>,
-    /// Programs measured against each other, by name. The name is what their
-    /// measurements are recorded under (`Record::tool`). A BTreeMap for the
-    /// same reason `Config::bench` is one.
+    subjects: Vec<String>,
+    /// Subjects declared here, or overrides of shared ones for this benchmark
+    /// only. The name is what their measurements are recorded under
+    /// (`Record::tool`). A BTreeMap for the same reason `Config::bench` is one.
     #[serde(default)]
     subject: BTreeMap<String, SubjectDecl>,
 }
 
-/// One program in a multi-subject benchmark, as written in `tak.toml`.
+/// One program in a multi-subject benchmark, as written in `tak.toml`: either
+/// a shared `[subject.NAME]` or a benchmark's `[bench.B.subject.NAME]`.
 #[derive(Debug, Deserialize)]
 pub struct SubjectDecl {
-    cmd: Cmd,
+    /// Optional here because a benchmark's table may only override settings of
+    /// a shared subject that already has one.
     #[serde(default)]
-    prepare: Option<Cmd>,
-    #[serde(default)]
-    dir: Option<PathBuf>,
-    #[serde(default)]
-    env: BTreeMap<String, String>,
-    runs: Option<RunsDecl>,
-    warmup: Option<u32>,
-    budget: Option<String>,
-    min_runs: Option<u32>,
-    max_runs: Option<u32>,
+    cmd: Option<Cmd>,
+    #[serde(flatten)]
+    layer: Layer,
     /// Opt in to instruction counting. Off by default because a
     /// multi-subject benchmark usually compares against other people's
     /// programs, whose instruction counts are not this project's to gate on:
     /// a competitor's upgrade would fail the gate.
-    #[serde(default)]
-    counters: bool,
+    counters: Option<bool>,
 }
 
 /// A command, written either as a list or as a plain string.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 enum Cmd {
     Argv(Vec<String>),
@@ -230,6 +243,8 @@ pub struct Subject {
     /// Relative to `tak.toml`; the caller resolves it.
     pub dir: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
+    /// Template values from `vars` tables, used by [`crate::template`].
+    pub vars: BTreeMap<String, String>,
     pub runs: Runs,
     /// The limits `Runs::Auto` works within.
     pub auto: AutoRuns,
@@ -269,90 +284,119 @@ impl Bench {
     /// Whether this benchmark compares several programs rather than measuring
     /// one.
     pub fn is_multi(&self) -> bool {
-        !self.subject.is_empty()
+        !self.subject.is_empty() || !self.subjects.is_empty()
     }
+}
 
-    /// Every subject with the benchmark's defaults applied.
+impl Config {
+    /// Every subject of benchmark `name`, with each layer applied: defaults,
+    /// the benchmark, the shared subject, then the benchmark's own subject
+    /// table. Templates are not rendered yet; see [`crate::template::render`].
     ///
     /// A single-command benchmark is one subject named [`SELF_TOOL`] with
     /// counters on, which is exactly what it measured before subjects existed.
-    pub fn subjects(&self) -> Result<Vec<Subject>> {
-        match (&self.cmd, self.subject.is_empty()) {
-            (Some(_), false) => bail!("declares both `cmd` and `subject`; use one or the other"),
-            (None, true) => bail!("has no command"),
-            (Some(cmd), true) => Ok(vec![Subject {
-                name: SELF_TOOL.to_string(),
-                cmd: cmd.argv()?,
-                prepare: self.prepare.as_ref().map(Cmd::argv).transpose()?,
-                dir: self.dir.clone(),
-                env: self.env.clone(),
-                runs: self.runs()?,
-                auto: self.auto(None, None, None)?,
-                warmup: self.warmup(),
-                counters: true,
-            }]),
-            (None, false) => self
-                .subject
-                .iter()
-                .map(|(name, s)| {
-                    let resolve = || -> Result<Subject> {
-                        // A subject's own prepare replaces the benchmark's rather
-                        // than running after it: the two usually reset the same
-                        // state, and running both would double the untimed cost.
-                        let prepare = s.prepare.as_ref().or(self.prepare.as_ref());
-                        let mut env = self.env.clone();
-                        env.extend(s.env.clone());
-                        Ok(Subject {
-                            name: name.clone(),
-                            cmd: s.cmd.argv()?,
-                            prepare: prepare.map(Cmd::argv).transpose()?,
-                            dir: s.dir.clone().or_else(|| self.dir.clone()),
-                            env,
-                            runs: match &s.runs {
-                                Some(r) => r.resolve()?,
-                                None => self.runs()?,
-                            },
-                            auto: self.auto(s.budget.as_deref(), s.min_runs, s.max_runs)?,
-                            warmup: s.warmup.unwrap_or_else(|| self.warmup()),
-                            counters: s.counters,
-                        })
-                    };
-                    resolve().with_context(|| format!("subject `{name}`"))
-                })
-                .collect(),
+    pub fn subjects(&self, name: &str) -> Result<Vec<Subject>> {
+        let b = self
+            .bench
+            .get(name)
+            .with_context(|| format!("no benchmark `{name}`"))?;
+        if let Some(cmd) = &b.cmd {
+            if b.is_multi() {
+                bail!("declares both `cmd` and subjects; use one or the other");
+            }
+            return Ok(vec![resolve(
+                SELF_TOOL,
+                cmd,
+                true,
+                &[&self.defaults, &b.layer],
+            )?]);
         }
-    }
-
-    pub fn runs(&self) -> Result<Runs> {
-        self.runs
-            .as_ref()
-            .map_or(Ok(Runs::Fixed(DEFAULT_RUNS)), RunsDecl::resolve)
-    }
-
-    /// The auto-run limits, a subject's own values over the benchmark's over
-    /// the defaults.
-    fn auto(&self, budget: Option<&str>, min: Option<u32>, max: Option<u32>) -> Result<AutoRuns> {
-        let budget = match budget.or(self.budget.as_deref()) {
-            Some(b) => parse_duration(b).context("budget")?,
-            None => DEFAULT_BUDGET,
-        };
-        let a = AutoRuns {
-            budget,
-            min: min.or(self.min_runs).unwrap_or(DEFAULT_MIN_RUNS),
-            max: max.or(self.max_runs).unwrap_or(DEFAULT_MAX_RUNS),
-        };
-        if a.min == 0 {
-            bail!("min_runs must be at least 1");
+        // A benchmark's own table can add a subject or override a shared one;
+        // either way it is measured, listed or not.
+        let names: std::collections::BTreeSet<&String> =
+            b.subjects.iter().chain(b.subject.keys()).collect();
+        if names.is_empty() {
+            bail!("has no command");
         }
-        if a.min > a.max {
-            bail!("min_runs ({}) is more than max_runs ({})", a.min, a.max);
-        }
-        Ok(a)
+        names
+            .into_iter()
+            .map(|n| {
+                let shared = self.subject.get(n);
+                let local = b.subject.get(n);
+                if b.subjects.contains(n) && shared.is_none() {
+                    bail!("lists subject `{n}`, but there is no [subject.{n}]");
+                }
+                let cmd = local
+                    .and_then(|d| d.cmd.as_ref())
+                    .or_else(|| shared.and_then(|d| d.cmd.as_ref()))
+                    .with_context(|| format!("subject `{n}` has no command"))?;
+                let counters = local
+                    .and_then(|d| d.counters)
+                    .or_else(|| shared.and_then(|d| d.counters))
+                    .unwrap_or(false);
+                let mut layers = vec![&self.defaults, &b.layer];
+                layers.extend(shared.map(|d| &d.layer));
+                layers.extend(local.map(|d| &d.layer));
+                resolve(n, cmd, counters, &layers).with_context(|| format!("subject `{n}`"))
+            })
+            .collect()
     }
+}
 
-    pub fn warmup(&self) -> u32 {
-        self.warmup.unwrap_or(DEFAULT_WARMUP)
+/// Stack `layers`, least specific first, into one subject. A later layer's
+/// setting replaces an earlier one's — a subject's own prepare replaces the
+/// benchmark's rather than running after it, since the two usually reset the
+/// same state — except `env` and `vars`, which merge key by key.
+fn resolve(name: &str, cmd: &Cmd, counters: bool, layers: &[&Layer]) -> Result<Subject> {
+    fn last<'a, T>(layers: &[&'a Layer], f: impl Fn(&'a Layer) -> Option<&'a T>) -> Option<&'a T> {
+        layers.iter().rev().find_map(|l| f(l))
     }
+    let merged = |f: fn(&Layer) -> &BTreeMap<String, String>| {
+        layers.iter().fold(BTreeMap::new(), |mut m, l| {
+            m.extend(f(l).clone());
+            m
+        })
+    };
+    let budget = match last(layers, |l| l.budget.as_ref()) {
+        Some(b) => parse_duration(b).context("budget")?,
+        None => DEFAULT_BUDGET,
+    };
+    let auto = AutoRuns {
+        budget,
+        min: last(layers, |l| l.min_runs.as_ref())
+            .copied()
+            .unwrap_or(DEFAULT_MIN_RUNS),
+        max: last(layers, |l| l.max_runs.as_ref())
+            .copied()
+            .unwrap_or(DEFAULT_MAX_RUNS),
+    };
+    if auto.min == 0 {
+        bail!("min_runs must be at least 1");
+    }
+    if auto.min > auto.max {
+        bail!(
+            "min_runs ({}) is more than max_runs ({})",
+            auto.min,
+            auto.max
+        );
+    }
+    Ok(Subject {
+        name: name.to_string(),
+        cmd: cmd.argv()?,
+        prepare: last(layers, |l| l.prepare.as_ref())
+            .map(Cmd::argv)
+            .transpose()?,
+        dir: last(layers, |l| l.dir.as_ref()).cloned(),
+        env: merged(|l| &l.env),
+        vars: merged(|l| &l.vars),
+        runs: last(layers, |l| l.runs.as_ref())
+            .map_or(Ok(Runs::Fixed(DEFAULT_RUNS)), RunsDecl::resolve)?,
+        auto,
+        warmup: last(layers, |l| l.warmup.as_ref())
+            .copied()
+            .unwrap_or(DEFAULT_WARMUP),
+        counters,
+    })
 }
 
 impl Config {
@@ -361,8 +405,8 @@ impl Config {
         // Every declared benchmark is validated up front rather than failing
         // partway through a run that has already spent minutes measuring.
         for (name, b) in &cfg.bench {
-            let subjects = b
-                .subjects()
+            let subjects = cfg
+                .subjects(name)
                 .with_context(|| format!("benchmark `{name}`"))?;
             for s in &subjects {
                 // Zero runs leaves nothing to report; catching it here names
@@ -373,6 +417,8 @@ impl Config {
                 if s.name.trim().is_empty() {
                     bail!("benchmark `{name}`: a subject needs a name");
                 }
+                crate::template::check(s)
+                    .with_context(|| format!("benchmark `{name}`, subject `{}`", s.name))?;
                 // `self` is the series a single-command benchmark records
                 // under. A subject taking it would be recorded, printed and
                 // exported as that series instead of as itself.
@@ -410,7 +456,7 @@ mod tests {
 
     /// The single subject of a one-command benchmark.
     fn only(c: &Config, bench: &str) -> Subject {
-        let mut s = c.bench[bench].subjects().unwrap();
+        let mut s = c.subjects(bench).unwrap();
         assert_eq!(s.len(), 1);
         s.remove(0)
     }
@@ -445,15 +491,15 @@ cmd = "mycli 'two words'""#,
     #[test]
     fn defaults_match_the_cli() {
         let c = Config::parse("[bench.a]\ncmd = \"x\"").unwrap();
-        assert_eq!(c.bench["a"].runs().unwrap(), Runs::Fixed(DEFAULT_RUNS));
-        assert_eq!(c.bench["a"].warmup(), DEFAULT_WARMUP);
+        assert_eq!(only(&c, "a").runs, Runs::Fixed(DEFAULT_RUNS));
+        assert_eq!(only(&c, "a").warmup, DEFAULT_WARMUP);
     }
 
     #[test]
     fn per_benchmark_overrides_win() {
         let c = Config::parse("[bench.a]\ncmd = \"x\"\nruns = 5\nwarmup = 1").unwrap();
-        assert_eq!(c.bench["a"].runs().unwrap(), Runs::Fixed(5));
-        assert_eq!(c.bench["a"].warmup(), 1);
+        assert_eq!(only(&c, "a").runs, Runs::Fixed(5));
+        assert_eq!(only(&c, "a").warmup, 1);
     }
 
     /// Validation happens at load, not partway through a run that has already
@@ -527,7 +573,7 @@ cmd = "mycli 'two words'""#,
         .unwrap();
         let b = &c.bench["install"];
         assert!(b.is_multi());
-        let s = b.subjects().unwrap();
+        let s = c.subjects("install").unwrap();
         // BTreeMap order, not file order.
         assert_eq!(s[0].name, "aube");
         assert_eq!(s[1].name, "pnpm");
@@ -603,10 +649,9 @@ cmd = "mycli 'two words'""#,
             "[bench.a]\ncmd = [\"./target/x\", \"./arg\"]\nprepare = \"bin/reset\"\ndir = \"fix\"",
         )
         .unwrap()
-        .bench["a"]
-            .subjects()
-            .unwrap()
-            .remove(0);
+        .subjects("a")
+        .unwrap()
+        .remove(0);
         s.anchor(root);
         assert_eq!(
             s.cmd,
@@ -618,8 +663,7 @@ cmd = "mycli 'two words'""#,
 
         let mut bare = Config::parse("[bench.a]\ncmd = \"mycli --version\"")
             .unwrap()
-            .bench["a"]
-            .subjects()
+            .subjects("a")
             .unwrap()
             .remove(0);
         bare.anchor(root);
@@ -653,7 +697,7 @@ cmd = "mycli 'two words'""#,
             "#,
         )
         .unwrap();
-        let s = c.bench["b"].subjects().unwrap();
+        let s = c.subjects("b").unwrap();
         let by = |n: &str| s.iter().find(|x| x.name == n).unwrap();
         assert_eq!(by("fast").runs, Runs::Auto);
         assert_eq!(
@@ -709,5 +753,99 @@ cmd = "mycli 'two words'""#,
         assert_eq!(a.runs_for(Duration::from_secs(21)), 5);
         assert_eq!(a.runs_for(Duration::from_millis(300)), 50);
         assert_eq!(a.runs_for(Duration::ZERO), 50);
+    }
+
+    /// A subject declared once can be measured by several benchmarks, which
+    /// can still override it for themselves; `[defaults]` is under all of it.
+    #[test]
+    fn shared_subjects_and_defaults_stack_by_specificity() {
+        let c = Config::parse(
+            r#"
+            [defaults]
+            runs = "auto"
+            min_runs = 4
+            prepare = "reset"
+            env = { HOME = "/h", CI = "1" }
+            vars = { kind = "default" }
+
+            [subject.aube]
+            cmd = ["aube", "install"]
+            env = { HOME = "/h-aube" }
+            vars = { lockfile = "aube-lock.yaml" }
+
+            [subject.pnpm]
+            cmd = ["pnpm", "install"]
+            counters = true
+
+            [bench.warm]
+            subjects = ["aube", "pnpm"]
+
+            [bench.cold]
+            subjects = ["aube", "pnpm"]
+            prepare = "reset --cold"
+            warmup = 0
+
+            [bench.test]
+            subjects = ["pnpm"]
+            [bench.test.subject.aube]
+            cmd = ["aube", "test"]
+            [bench.test.subject.pnpm]
+            cmd = ["pnpm", "install-test"]
+            vars = { kind = "local" }
+            "#,
+        )
+        .unwrap();
+
+        let warm = c.subjects("warm").unwrap();
+        assert_eq!(
+            warm.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["aube", "pnpm"]
+        );
+        assert_eq!(warm[0].cmd, ["aube", "install"]);
+        assert_eq!(warm[0].runs, Runs::Auto);
+        assert_eq!(warm[0].auto.min, 4);
+        assert_eq!(warm[0].prepare.as_deref().unwrap(), ["reset"]);
+        assert_eq!(warm[0].env["HOME"], "/h-aube", "subject over defaults");
+        assert_eq!(warm[0].env["CI"], "1", "merged, not replaced");
+        assert_eq!(warm[0].vars["lockfile"], "aube-lock.yaml");
+        assert_eq!(warm[0].vars["kind"], "default");
+        assert!(!warm[0].counters && warm[1].counters);
+
+        let cold = c.subjects("cold").unwrap();
+        assert_eq!(
+            cold[0].prepare.as_deref().unwrap(),
+            ["reset", "--cold"],
+            "bench over defaults"
+        );
+        assert_eq!(cold[0].warmup, 0);
+
+        // A benchmark's own table adds a subject, or overrides a shared one.
+        let test = c.subjects("test").unwrap();
+        assert_eq!(test[0].cmd, ["aube", "test"]);
+        assert_eq!(
+            test[0].env["HOME"], "/h-aube",
+            "inherits the shared subject"
+        );
+        assert_eq!(test[1].cmd, ["pnpm", "install-test"]);
+        assert_eq!(test[1].vars["kind"], "local");
+        assert!(test[1].counters, "an override keeps the shared setting");
+    }
+
+    #[test]
+    fn a_listed_subject_must_exist() {
+        let err = Config::parse("[bench.a]\nsubjects = [\"ghost\"]").unwrap_err();
+        assert!(format!("{err:#}").contains("[subject.ghost]"), "{err:#}");
+    }
+
+    #[test]
+    fn a_subject_needs_a_command_from_somewhere() {
+        let err = Config::parse("[bench.a.subject.x]\nruns = 3").unwrap_err();
+        assert!(format!("{err:#}").contains("no command"), "{err:#}");
+    }
+
+    #[test]
+    fn a_broken_template_is_rejected_at_parse_time() {
+        let err = Config::parse("[bench.a]\ncmd = [\"x\", \"{{ env.X \"]").unwrap_err();
+        assert!(format!("{err:#}").contains("template"), "{err:#}");
     }
 }

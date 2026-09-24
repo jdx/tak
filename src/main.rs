@@ -306,6 +306,7 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         prepare: None,
         dir: None,
         env: BTreeMap::new(),
+        vars: BTreeMap::new(),
         runs: opts.runs.unwrap_or(Runs::Fixed(DEFAULT_RUNS)),
         auto: AutoRuns {
             budget: DEFAULT_BUDGET,
@@ -359,8 +360,17 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
     // --subject fails now rather than after the benchmarks before it ran.
     let mut plans = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
+    let env = tak_cli::template::env();
     for (name, b) in selected {
-        let mut subjects = b.subjects()?;
+        let mut subjects = cfg
+            .subjects(&name)?
+            .into_iter()
+            .map(|s| {
+                let subject = s.name.clone();
+                tak_cli::template::render(s, &name, &env)
+                    .with_context(|| format!("benchmark `{name}`, subject `{subject}`"))
+            })
+            .collect::<Result<Vec<_>>>()?;
         for s in &mut subjects {
             seen.insert(s.name.clone());
             s.anchor(&root);

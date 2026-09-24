@@ -25,11 +25,16 @@ impl Project {
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        self.run_env(args, &[])
+    }
+
+    fn run_env(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_tak"))
             .arg("run")
             .args(args)
             .current_dir(&self.dir)
             .env("GITHUB_TOKEN", "sentinel-must-not-leak")
+            .envs(env.iter().copied())
             .output()
             .expect("failed to run tak")
     }
@@ -345,4 +350,68 @@ fn runs_auto_can_be_given_on_the_command_line() {
     let bad = p.run(&["--runs", "lots"]);
     assert!(!bad.status.success());
     assert!(stderr(&bad).contains("auto"), "{}", stderr(&bad));
+}
+
+/// Shared subjects, defaults and templates end to end: the values reach the
+/// command without a shell, and each benchmark gets its own render.
+#[test]
+fn templates_fill_commands_from_the_environment() {
+    let p = Project::new(
+        "templates",
+        r#"
+[defaults]
+warmup = 0
+runs = 1
+dir = "{{ env.WORK }}"
+
+[subject.a]
+cmd = ["sh", "-c", "echo $0 $1 >> log", "{{ bench }}-{{ subject }}", "{{ vars.tag }}"]
+vars = { tag = "{{ env.TAG }}" }
+
+[bench.one]
+subjects = ["a"]
+
+[bench.two]
+subjects = ["a"]
+"#,
+    );
+    let work = p.path("work");
+    std::fs::create_dir(&work).unwrap();
+    let out = p.run_env(
+        &["--no-progress"],
+        &[("WORK", work.to_str().unwrap()), ("TAG", "t1")],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let log = std::fs::read_to_string(work.join("log")).unwrap();
+    assert_eq!(log, "one-a t1\ntwo-a t1\n");
+}
+
+/// A variable nobody set fails the run before any sample is taken, naming
+/// the benchmark and subject — but only for benchmarks being run.
+#[test]
+fn an_unset_variable_fails_before_measuring_only_where_it_is_used() {
+    let p = Project::new(
+        "unset",
+        r#"
+[bench.needs]
+warmup = 0
+runs = 1
+cmd = ["sh", "-c", "echo ran >> log", "{{ env.TAK_TEST_NEVER_SET }}"]
+
+[bench.fine]
+warmup = 0
+runs = 1
+cmd = ["true"]
+"#,
+    );
+    let out = p.run(&["--no-progress"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("needs"), "{}", stderr(&out));
+    assert!(p.log().is_empty(), "nothing ran");
+
+    assert!(
+        p.run(&["--no-progress", "--bench", "fine"])
+            .status
+            .success()
+    );
 }
