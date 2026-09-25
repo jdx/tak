@@ -127,8 +127,8 @@ CI writers avoid conflicts without a custom merge driver. It dedupes on **exact 
 
 ## Conventional commits
 
-PR titles must use `<type>(<scope>): <description>` with a lowercase-leading,
-imperative description. Intermediate commit subjects should use the same format.
+PR titles must use `<type>(<scope>): <description>` with an imperative description
+that starts lowercase or with an acronym such as `CLI`. Intermediate commit subjects should use the same format.
 
 **Types:** `feat`, `fix`, `refactor`, `docs`, `style`, `perf`, `test`, `chore`, `ci`, `revert`, `security`
 
@@ -139,7 +139,7 @@ Only `fix:` and `feat:` commits trigger a release — see the cadence guards in 
 
 CI validates the pull request title and re-runs when it is edited. Intermediate
 commit subjects are not checked because pull requests are squash-merged. CI
-mechanically checks the allowed type, syntax, and lowercase-leading description;
+mechanically checks the allowed type, syntax, and lowercase- or acronym-leading description;
 imperative mood remains a review rule.
 
 ## Releasing
