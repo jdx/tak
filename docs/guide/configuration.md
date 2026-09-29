@@ -302,8 +302,9 @@ benchmark adds them to the end of each subject's summary line. With GNU `ls` cop
   on stdout, such as `1234`, `12.5` or `1.2e6`. Surrounding whitespace is ignored. A sign,
   `inf`, a unit, a thousands separator, a second number or any other text is an error rather
   than something tak tries to pick a number out of. A command that prints more than 1 KiB is
-  stopped as soon as it does. stderr is ignored unless the command fails, when tak reports
-  its last line.
+  stopped as soon as it does. So is anything it leaves running in the background with its
+  stdout still open, and the metric is an error, since more output could still arrive.
+  stderr is ignored unless the command fails, when tak reports its last line.
 - **Each metric is taken once**, after the subject's samples and instruction counts, and
   isn't part of either. `setup` or the samples can create what it measures. `--dry-run`
   lists each metric without taking it.

@@ -278,11 +278,23 @@ fn metric_cmd_once(argv: &[String], site: &Site) -> Result<f64> {
              command prints one number and nothing else"
         );
     }
+    // Something the command left running still holds its stdout and may
+    // print more, so what arrived so far is not known to be the whole
+    // answer. It is stopped too, unlike after a `version_cmd`: a metric is
+    // taken between benchmarks, and a leftover would compete with the next
+    // one's samples.
+    if out.stdout_open {
+        stop_leftovers(out.pgid);
+        bail!(
+            "`{bin}` exited but left a process holding its stdout open, so that was stopped; \
+             a metric command must finish its output before it exits"
+        );
+    }
     if !out.status.success() {
         bail!(
             "`{bin}` exited with {}: {}",
             out.status,
-            last_line(&out.stderr)
+            last_line(&out.stderr_tail)
         );
     }
     let text = std::str::from_utf8(&out.stdout)
@@ -970,11 +982,16 @@ const VERSION_OUTPUT_GRACE: Duration = Duration::from_millis(500);
 /// full pipe, so the command can finish and report its real exit status.
 /// `overflow` is set once anything past `cap` arrives, for a caller that
 /// treats more output than that as a failure and stops the command.
+///
+/// With `tail`, the last [`UNTIMED_STDERR_TAIL`] bytes are kept there too:
+/// an error message is at the end of a log, and a long one pushes it past
+/// any prefix.
 fn keep_prefix(
     mut r: impl std::io::Read,
     cap: usize,
     kept: &Mutex<Vec<u8>>,
     overflow: &std::sync::atomic::AtomicBool,
+    tail: Option<&Mutex<Vec<u8>>>,
 ) {
     let mut buf = [0u8; 8192];
     loop {
@@ -987,6 +1004,11 @@ fn keep_prefix(
                     overflow.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 k.extend_from_slice(&buf[..n.min(room)]);
+                if let Some(Ok(mut t)) = tail.map(Mutex::lock) {
+                    t.extend_from_slice(&buf[..n]);
+                    let excess = t.len().saturating_sub(UNTIMED_STDERR_TAIL);
+                    t.drain(..excess);
+                }
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => return,
@@ -1304,13 +1326,14 @@ fn version_once(argv: &[String], site: &Site, timeout: Duration) -> Result<Strin
         status,
         stdout,
         stderr,
+        stderr_tail,
         ..
     } = capture(argv, site, Some(timeout), VERSION_OUTPUT_CAP, false)?;
 
     // A failing command's output is an error message or a usage dump, not a
     // version, however much of it there is.
     if !status.success() {
-        bail!("`{bin}` exited with {status}: {}", last_line(&stderr));
+        bail!("`{bin}` exited with {status}: {}", last_line(&stderr_tail));
     }
     let first = |bytes: &[u8]| {
         String::from_utf8_lossy(bytes)
@@ -1339,11 +1362,35 @@ struct Captured {
     status: std::process::ExitStatus,
     /// At most the cap passed to [`capture`].
     stdout: Vec<u8>,
-    /// At most [`VERSION_OUTPUT_CAP`].
+    /// The first [`VERSION_OUTPUT_CAP`] bytes, where a version is.
     stderr: Vec<u8>,
+    /// The last [`UNTIMED_STDERR_TAIL`] bytes, where an error is.
+    stderr_tail: Vec<u8>,
     /// stdout went past the cap. With `stop_past_cap`, the command was
     /// stopped as soon as that was seen, and `status` is how it died.
     overflowed: bool,
+    /// stdout was still open when the grace period after the command's exit
+    /// ran out: something it left running holds it and may yet write to it.
+    stdout_open: bool,
+    /// The command's process group on Unix, which is also its pid, for a
+    /// caller that has to stop what it left behind.
+    pgid: u32,
+}
+
+/// Stop whatever is left of a finished command's process group: a caller's
+/// decision, since leaving a daemon running can be the point; see
+/// [`stop_group`]. The command itself has been reaped, but its group id
+/// cannot be handed to a new process while any member of the group lives,
+/// so this reaches only what the command started. Elsewhere there is no
+/// group to reach.
+fn stop_leftovers(pgid: u32) {
+    #[cfg(unix)]
+    // SAFETY: killpg only sends a signal.
+    unsafe {
+        libc::killpg(pgid as libc::pid_t, libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    let _ = pgid;
 }
 
 /// Run `argv` at `site` with both streams piped, keeping the first
@@ -1397,29 +1444,47 @@ fn capture(
     let overflow = Arc::new(AtomicBool::new(false));
     // stderr's overflow is never acted on: it only feeds an error message.
     let ignored = Arc::new(AtomicBool::new(false));
-    let spawn_reader =
-        |r: Option<Box<dyn std::io::Read + Send>>, cap: usize, flag: &Arc<AtomicBool>| {
-            let kept = Arc::new(Mutex::new(Vec::new()));
-            if let Some(r) = r {
-                let (kept, tx, flag) = (Arc::clone(&kept), done_tx.clone(), Arc::clone(flag));
-                std::thread::spawn(move || {
-                    keep_prefix(r, cap, &kept, &flag);
-                    let _ = tx.send(());
-                });
-            } else {
-                let _ = done_tx.send(());
-            }
-            kept
-        };
+    let stdout_done = Arc::new(AtomicBool::new(false));
+    let unused = Arc::new(AtomicBool::new(false));
+    let spawn_reader = |r: Option<Box<dyn std::io::Read + Send>>,
+                        cap: usize,
+                        flag: &Arc<AtomicBool>,
+                        done: &Arc<AtomicBool>,
+                        tail: Option<&Arc<Mutex<Vec<u8>>>>| {
+        let kept = Arc::new(Mutex::new(Vec::new()));
+        if let Some(r) = r {
+            let (kept, tx, flag, done) = (
+                Arc::clone(&kept),
+                done_tx.clone(),
+                Arc::clone(flag),
+                Arc::clone(done),
+            );
+            let tail = tail.map(Arc::clone);
+            std::thread::spawn(move || {
+                keep_prefix(r, cap, &kept, &flag, tail.as_deref());
+                done.store(true, SeqCst);
+                let _ = tx.send(());
+            });
+        } else {
+            done.store(true, SeqCst);
+            let _ = done_tx.send(());
+        }
+        kept
+    };
     let stdout = spawn_reader(
         child.stdout.take().map(|o| Box::new(o) as _),
         stdout_cap,
         &overflow,
+        &stdout_done,
+        None,
     );
+    let stderr_tail = Arc::new(Mutex::new(Vec::new()));
     let stderr = spawn_reader(
         child.stderr.take().map(|e| Box::new(e) as _),
         VERSION_OUTPUT_CAP,
         &ignored,
+        &unused,
+        Some(&stderr_tail),
     );
 
     let deadline = timeout.map(|t| Instant::now() + t);
@@ -1461,7 +1526,10 @@ fn capture(
         status,
         stdout: take(&stdout),
         stderr: take(&stderr),
+        stderr_tail: take(&stderr_tail),
         overflowed: overflow.load(SeqCst),
+        stdout_open: !stdout_done.load(SeqCst),
+        pgid: child.id(),
     })
 }
 
@@ -1864,11 +1932,54 @@ mod tests {
         let err = format!("{:#}", sh("exec yes 1").unwrap_err());
         assert!(err.contains("so it was stopped"), "{err}");
         assert!(start.elapsed() < Duration::from_secs(4));
-        // Something left running in the background holding stdout open must
-        // not hold up the run.
+        // The error at the end of a long log is the one reported, not a line
+        // from its start.
+        let err = format!(
+            "{:#}",
+            sh("yes 'noise line' | head -c 20000 >&2; echo 'the real error' >&2; exit 2")
+                .unwrap_err()
+        );
+        assert!(err.ends_with("the real error"), "{err}");
+        assert!(!err.contains("noise"), "{err}");
+    }
+
+    /// A metric command that exits while something it started still holds
+    /// its stdout has not finished its answer: that is an error rather than
+    /// whatever number arrived first, it does not hold up the run, and the
+    /// leftover is stopped rather than left running into the next samples.
+    #[cfg(unix)]
+    #[test]
+    fn a_metric_cmd_leaving_stdout_open_fails_and_is_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = with_metrics(dir.path(), &[]);
         let start = Instant::now();
-        assert_eq!(sh("sleep 5 & echo 7").unwrap(), 7.0);
+        let err = custom_metric(
+            &MetricSource::Cmd(vec![
+                "sh".into(),
+                "-c".into(),
+                "sleep 30 & echo $! > pid; echo 7".into(),
+            ]),
+            &s,
+            &Settings::default(),
+        )
+        .unwrap_err();
         assert!(start.elapsed() < Duration::from_secs(4));
+        assert!(format!("{err:#}").contains("stdout open"), "{err:#}");
+        let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
+        // SIGKILL is delivered asynchronously; give it a moment to land.
+        let alive = |pid: &str| {
+            Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        let until = Instant::now() + Duration::from_secs(2);
+        while alive(&pid) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(&pid), "the background process was left running");
     }
 
     /// Runs `sh -c script` as a `version_cmd` with the given deadline.
@@ -1919,7 +2030,7 @@ mod tests {
         let kept = Mutex::new(Vec::new());
         let mut src = std::io::Cursor::new(vec![7u8; 100]);
         let overflow = std::sync::atomic::AtomicBool::new(false);
-        keep_prefix(&mut src, 10, &kept, &overflow);
+        keep_prefix(&mut src, 10, &kept, &overflow, None);
         assert_eq!(kept.lock().unwrap().len(), 10, "only the cap is kept");
         assert_eq!(
             src.position(),
@@ -1932,7 +2043,13 @@ mod tests {
             Mutex::new(Vec::new()),
             std::sync::atomic::AtomicBool::new(false),
         );
-        keep_prefix(std::io::Cursor::new(vec![7u8; 10]), 10, &kept, &overflow);
+        keep_prefix(
+            std::io::Cursor::new(vec![7u8; 10]),
+            10,
+            &kept,
+            &overflow,
+            None,
+        );
         assert!(!overflow.into_inner(), "exactly the cap is not past it");
     }
 
