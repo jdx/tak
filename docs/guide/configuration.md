@@ -540,7 +540,7 @@ env = { CARGO_INCREMENTAL = "0" }
 and a program path containing `/` is relative to the directory holding `tak.toml`. A build that
 needs several steps can name an interpreter explicitly, such as
 `["sh", "-c", "git submodule update --init && make"]`. The build is not measured, so the shell
-adds no noise there. `[build]` values are not templates; a `{{` in one is an error. A project
+adds no noise there. `[build]` values are not templates, and template syntax in one is an error. A project
 with nothing to build can declare `cmd = ["true"]`.
 
 `env_deny` does not apply to the build. It exists to keep a token from changing what a measured

@@ -229,6 +229,11 @@ fn each_commit_is_measured_in_its_own_checkout() {
     let rec = &repo.notes(&v4)[0];
     assert_eq!(rec.runner, "test");
     assert_eq!(rec.bench, "startup");
+    // Optional everywhere else in this file, but where valgrind exists the
+    // backfilled points must carry the one metric a gate can use.
+    if tak_cli::measure::valgrind_available() {
+        assert!(rec.metrics.contains_key("instructions"), "{rec:?}");
+    }
     // The commit's own date, in the one shape `ts` is written in.
     let committed = git_env(&mut Command::new("git"))
         .args([

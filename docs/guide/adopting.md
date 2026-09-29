@@ -327,15 +327,15 @@ commit where any benchmark fails, a subject is dropped, or a check fails records
 even the benchmarks that did measure. The command fails only when the range ends with no
 record at all. The checkouts are removed when tak finishes, fails, or is stopped with Ctrl-C
 or SIGTERM. On Windows, and if a subject's `version_cmd` is running when the signal arrives,
-an interrupted run can leave its checkout in the temporary directory; the next run clears
-git's record of it.
+an interrupted run can leave its checkout in the temporary directory. Once that directory is
+deleted, the next backfill runs `git worktree prune`, which clears git's record of it.
 
 The benchmarks come from the current `tak.toml`, not each commit's own copy, so a series keeps
 measuring the same thing when someone edits a benchmark. The cost is that an old tree may lack
 a fixture or path the current file names. That commit is then reported and left unrecorded.
 To measure old commits against a fixture they did not contain, create it in a `setup`, or point
-`dir` at an absolute path outside the repository with a [template](/guide/configuration#templates)
-such as `{{ env.FIXTURES }}`.
+`dir` at an absolute path outside the repository, for example with a
+[template](/guide/configuration#templates) that reads an environment variable.
 
 Backfilled numbers are only comparable with the ones CI records if they are produced the same
 way. That means the same runner class, compiler, build profile, flags and lockfile policy as
