@@ -124,6 +124,29 @@ enum Cmd {
         #[usage(long, default = "origin")]
         remote: String,
     },
+    /// Show each benchmark's measurements over first-parent history.
+    ///
+    /// One table per benchmark and runner class, newest commit first, with the
+    /// change in instruction count from the previous measurement. Commits with
+    /// nothing recorded are skipped. `--html` writes the same history as a
+    /// self-contained page of charts instead.
+    Log {
+        /// Revision to walk back from. Defaults to HEAD.
+        #[usage(arg, default = "HEAD")]
+        rev: String,
+        /// Most recent recorded commits to show.
+        #[usage(short = 'n', long, default = "30")]
+        limit: usize,
+        /// Show only this benchmark. Repeatable.
+        #[usage(long, value_name = "NAME")]
+        bench: Vec<String>,
+        /// Write a self-contained HTML report to PATH instead of printing.
+        #[usage(long, value_name = "PATH")]
+        html: Option<std::path::PathBuf>,
+        /// Remote to refresh notes from.
+        #[usage(long, default = "origin")]
+        remote: String,
+    },
     /// Push recorded measurements to the remote.
     Push(RemoteArgs),
     /// Move measurements between a read-only job and a trusted publisher.
@@ -989,6 +1012,52 @@ fn cmd_history(rev: String, remote: String) -> Result<()> {
     Ok(())
 }
 
+/// `tak log`'s options, gathered so they travel as one value.
+struct LogOpts {
+    rev: String,
+    limit: usize,
+    bench: Vec<String>,
+    html: Option<std::path::PathBuf>,
+    remote: String,
+}
+
+/// Print, or write as a page, the series along `rev`'s first-parent history.
+fn cmd_log(opts: LogOpts, settings: &Settings) -> Result<()> {
+    if opts.limit == 0 {
+        bail!("-n must be at least 1");
+    }
+    // Resolved first so a bad revision names itself, rather than surfacing as
+    // whatever `git log` makes of it after a network round trip.
+    notes::rev_parse(&opts.rev).with_context(|| format!("cannot resolve {}", opts.rev))?;
+    // Never fatal, as in `notes::read`: offline, or a remote with no notes
+    // yet, falls back to the local ref.
+    let _ = notes::fetch(&opts.remote);
+    let walked = notes::log(&opts.rev)?;
+    let history = tak_cli::report::build(walked, opts.limit, &opts.bench, notes::is_shallow())?;
+
+    let Some(path) = opts.html else {
+        print!(
+            "{}",
+            tak_cli::report::markdown(&history, &opts.rev, settings.credit)
+        );
+        return Ok(());
+    };
+    let page = tak_cli::report::html(
+        &history,
+        &opts.rev,
+        repo_from_origin().as_deref(),
+        settings.credit,
+    );
+    std::fs::write(&path, page).with_context(|| format!("could not write {}", path.display()))?;
+    println!(
+        "wrote {}: {} series over {} recorded commit(s)",
+        path.display(),
+        history.series.len(),
+        history.commits.len()
+    );
+    Ok(())
+}
+
 /// How many commits of trunk history the sparkline covers.
 ///
 /// A constant rather than a setting: it changes how a picture looks, not what
@@ -1414,6 +1483,22 @@ fn main() -> Result<()> {
             )
         }
         Cmd::History { rev, remote } => cmd_history(rev, remote),
+        Cmd::Log {
+            rev,
+            limit,
+            bench,
+            html,
+            remote,
+        } => cmd_log(
+            LogOpts {
+                rev,
+                limit,
+                bench,
+                html,
+                remote,
+            },
+            &resolve_settings(&overrides)?,
+        ),
         Cmd::Push(RemoteArgs { remote }) => {
             notes::push(&remote)?;
             println!("pushed {} to {}", notes::NOTES_REF, remote);

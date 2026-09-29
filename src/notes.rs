@@ -244,6 +244,83 @@ pub fn rev_list(rev: &str, n: usize) -> Result<Vec<String>> {
     Ok(out.lines().map(str::to_string).collect())
 }
 
+/// One commit on a first-parent walk, with whatever tak recorded on it.
+#[derive(Debug, Clone)]
+pub struct Logged {
+    pub sha: String,
+    /// Committer date, strict ISO 8601. The committer date rather than the
+    /// author date because a trunk timeline is about when a change landed; a
+    /// branch rebased and merged a month later was authored long before it
+    /// could have moved anything.
+    pub date: String,
+    pub subject: String,
+    /// Empty for a commit nothing was recorded on — the common case.
+    pub records: Vec<Record>,
+}
+
+/// Field and record separators for [`log`]'s output. Neither can occur in a
+/// SHA, a date, or a subject line, and JSON escapes every control character,
+/// so neither can occur inside a well-formed record either.
+const FIELD_SEP: char = '\u{0}';
+const RECORD_SEP: char = '\u{1e}';
+
+/// Every commit on `rev`'s first-parent history, newest first, with its records.
+///
+/// One `git log`, with each note inlined through `%N`, rather than a
+/// `notes show` per commit: a series view wants hundreds of commits, and a
+/// subprocess each put a noticeable pause in front of what should be an
+/// instant read of local objects.
+///
+/// First-parent for the same reason as [`rev_list`]. `--no-notes` first clears
+/// whatever refs `core.notesRef` and `notes.displayRef` configure, so only this
+/// ref's notes reach `%N` and are parsed as records — explicitly, rather than
+/// relying on an explicit `--notes=<ref>` happening to replace the defaults.
+pub fn log(rev: &str) -> Result<Vec<Logged>> {
+    let notes = format!("--notes={NOTES_REF}");
+    let out = git(&[
+        "log",
+        "--first-parent",
+        "--no-show-signature",
+        "--no-notes",
+        &notes,
+        "--format=%x1e%H%x00%cI%x00%s%x00%N",
+        "--end-of-options",
+        rev,
+        "--",
+    ])?;
+    Ok(parse_log(&out))
+}
+
+fn parse_log(out: &str) -> Vec<Logged> {
+    out.split(RECORD_SEP)
+        .filter_map(|chunk| {
+            let mut fields = chunk.splitn(4, FIELD_SEP);
+            let sha = fields.next()?.trim();
+            // A subject can in principle carry a stray separator byte. What
+            // follows it is then not a commit, and parsing it as one would put
+            // a phantom row in the history.
+            if sha.is_empty() || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            Some(Logged {
+                sha: sha.to_string(),
+                date: fields.next().unwrap_or_default().to_string(),
+                subject: fields.next().unwrap_or_default().to_string(),
+                records: parse_note(fields.next().unwrap_or_default()),
+            })
+        })
+        .collect()
+}
+
+/// Whether this clone's history is cut off, so a walk that ran out of commits
+/// may have run out of *clone* rather than out of project.
+///
+/// `actions/checkout` defaults to a depth of one, so this is the normal state
+/// of a CI checkout rather than an edge case.
+pub fn is_shallow() -> bool {
+    git(&["rev-parse", "--is-shallow-repository"]).is_ok_and(|s| s.trim() == "true")
+}
+
 /// Teach plain `git fetch` about the notes ref, so the data is visible to users
 /// who never run `tak`. A convenience, not load-bearing — every `tak` read path
 /// fetches for itself.
@@ -255,4 +332,29 @@ pub fn install_refspec(remote: &str) -> Result<()> {
     }
     git(&["config", "--add", &key, USER_FETCH_REFSPEC])?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LINE: &str =
+        r#"{"bench":"a","metrics":{"instructions":5.0},"runner":"r","tool":"self","ts":"t","v":1}"#;
+
+    /// `%N` ends with a newline and is empty for a commit with no note; both
+    /// have to come out as a commit, the second with no records.
+    #[test]
+    fn a_log_parses_noted_and_unnoted_commits() {
+        let out = format!(
+            "\u{1e}aaa\u{0}2026-01-02T00:00:00+00:00\u{0}second\u{0}{LINE}\n\n\
+             \u{1e}bbb\u{0}2026-01-01T00:00:00+00:00\u{0}first\u{0}\n"
+        );
+        let log = parse_log(&out);
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].sha, "aaa");
+        assert_eq!(log[0].subject, "second");
+        assert_eq!(log[0].records.len(), 1);
+        assert_eq!(log[1].sha, "bbb");
+        assert!(log[1].records.is_empty());
+    }
 }

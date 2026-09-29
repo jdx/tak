@@ -21,6 +21,7 @@
 - [`tak completion <SHELL>`](/cli/completion.md)
 - [`tak run [FLAGS] [-- CMD]…`](/cli/run.md)
 - [`tak history [--remote <REMOTE>] [REV]`](/cli/history.md)
+- [`tak log [FLAGS] [REV]`](/cli/log.md)
 - [`tak push [--remote <REMOTE>]`](/cli/push.md)
 - [`tak artifact <SUBCOMMAND>`](/cli/artifact.md)
 - [`tak artifact export <--output <PATH>> [--rev <REV>]`](/cli/artifact/export.md)
