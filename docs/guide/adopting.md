@@ -220,10 +220,6 @@ jobs:
           set -e
           cat /tmp/tak-report.md
           cat /tmp/tak-report.md >> "$GITHUB_STEP_SUMMARY"
-          if grep -Fq '**Nothing was compared' /tmp/tak-report.md; then
-            echo "::error::no comparable baseline was found"
-            status=1
-          fi
           exit "$status"
 ```
 
@@ -236,9 +232,17 @@ then removes that credential before mise or any project command runs. `tak compa
 to the prefetched local notes when its unauthenticated refresh fails. This keeps private
 repositories readable without exposing their token to pull-request-controlled code.
 
-An empty comparison is not a passing gate: it can mean that the base was never recorded or
-that the runner classes differ. The explicit report check fails either case. If the workflow
-also posts a sticky pull-request comment, keep the write token in a separate reporting job
+An empty comparison is not a passing gate. When no series was measured on both the merge base
+and the pull request, because the base was never recorded or the runner classes differ,
+`tak compare` prints the full report and then exits non-zero. Two situations produce one
+legitimately: the first pull request after adopting tak, whose merge base predates any
+main-branch measurement, and a runner-class migration, where every base series is on the old
+class. Pass `--allow-empty` for those pull requests and remove it once main has measurements on
+the current class. Left in place, it lets a workflow that has stopped recording pass without
+comparing anything. A regression still fails under `--allow-empty`; only `--no-gate` reports
+without ever failing.
+
+If the workflow also posts a sticky pull-request comment, keep the write token in a separate reporting job
 that checks out no code and executes nothing from the pull request. Pass the Markdown report
 and exit status to it as an artifact. mise's
 [pull-request workflow](https://github.com/jdx/mise/blob/main/.github/workflows/perf-pr.yml)

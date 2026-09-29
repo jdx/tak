@@ -72,5 +72,12 @@ tak compare origin/main
 An instruction-count increase beyond the configured gate fails the command. Wall-clock
 changes are displayed but never gate the result.
 
+So does finding nothing to compare: when no series was measured on both revisions, the report
+says `**Nothing was compared` and the command exits non-zero after printing it. That usually
+means the base was never recorded, its notes were not fetched, or the two were measured on
+different runner classes. Pass `--allow-empty` when that is expected: on the first pull request
+after adopting tak, or while a runner-class migration has left the base on the old class.
+`--no-gate` also passes an empty comparison, since it never fails.
+
 Always keep measurements partitioned by runner class. Comparing numbers across runner classes
 turns an infrastructure change into an apparent code regression.
