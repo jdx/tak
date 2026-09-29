@@ -313,22 +313,40 @@ For each first-parent commit in the range, newest first, tak:
 
 The range is whatever `git rev-list` accepts as one argument. `A..B` includes `B` and excludes
 `A`, so `main~20..main` is the last twenty commits. Merged branches are not walked, because
-their commits were never points on the main branch's timeline. A commit that already has a
-record for this runner class and benchmark is skipped. Pass `--force` to measure it again,
-which adds a second record rather than replacing the first. `--limit` (default 20) caps how
-many commits are built, so running the same command again continues where the last run
-stopped. `--bench NAME` limits the backfill to one declared benchmark, and `--runs N` overrides
-the file's run count. tak fetches `refs/notes/tak` from `origin` first, so commits that CI
-already recorded are skipped rather than measured twice.
+their commits were never points on the main branch's timeline.
+
+A subject that already has a record on a commit for this runner class is not measured there
+again. A commit where every subject has one is skipped without being built. When a subject is
+added to a benchmark, the next backfill measures only that subject on the commits recorded
+before it existed. Pass `--force` to measure everything again, which adds a second record
+rather than replacing the first. tak fetches `refs/notes/tak` from `origin` first, so commits
+that CI already recorded are skipped rather than measured twice.
+
+`--limit` (default 20) caps how many commits are built, so running the same command again
+continues where the last run stopped. `--bench NAME` limits the backfill to one declared
+benchmark, and `--runs N` overrides the file's run count.
 
 Each commit is recorded whole or not at all. A commit whose build fails is reported and
-skipped, and the rest of the range continues; old commits that no longer build are normal. A
-commit where any benchmark fails, a subject is dropped, or a check fails records nothing, not
-even the benchmarks that did measure. The command fails only when the range ends with no
-record at all. The checkouts are removed when tak finishes, fails, or is stopped with Ctrl-C
-or SIGTERM. On Windows, and if a subject's `version_cmd` is running when the signal arrives,
-an interrupted run can leave its checkout in the temporary directory. Once that directory is
-deleted, the next backfill runs `git worktree prune`, which clears git's record of it.
+skipped, and the rest of the range continues; old commits that no longer build are normal.
+tak remembers that failure in git's directory (`.git/tak/backfill-build-failed`), together with the `[build]` it
+failed under, and later runs pass over that commit rather than retrying it before every other
+commit. Changing `[build]` or passing `--force` tries it again. The file is local to the clone
+and never pushed. A commit where any benchmark fails, a subject is dropped, or a check fails
+records nothing, not even the benchmarks that did measure. It is not remembered, because a
+measurement can fail for reasons that do not repeat. The command fails only when the range
+ends with no record at all.
+
+Build output goes to a file in the temporary directory, and a failed build shows its last 20
+lines. `[build].dir`, and a benchmark's `dir` inside the checkout, must resolve inside the
+checkout. A commit whose tree has a symlink there that points elsewhere is reported and not
+built.
+
+The checkouts are removed when tak finishes, fails, or is stopped with Ctrl-C, SIGTERM or
+SIGHUP. On Unix the build runs in its own process group, and tak kills that group before
+removing the checkout. That also covers a signal sent to tak alone, as when CI cancels a job.
+On Windows, and if a subject's `version_cmd` is running when the signal arrives, an interrupted
+run can leave its checkout in the temporary directory. Once that directory is deleted, the next
+backfill runs `git worktree prune`, which clears git's record of it.
 
 The benchmarks come from the current `tak.toml`, not each commit's own copy, so a series keeps
 measuring the same thing when someone edits a benchmark. The cost is that an old tree may lack

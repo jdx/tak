@@ -65,14 +65,30 @@ pub fn first_parent_commits(range: &str) -> Result<Vec<String>> {
 }
 
 /// When `sha` was committed, as seconds since the epoch, and its subject line.
+///
+/// `log.showSignature` is switched off because with it set, `git show` writes
+/// a signature's verification text onto stdout ahead of the format, and the
+/// timestamp would no longer be the first thing printed. The two fields are
+/// separated by NUL, which a subject line cannot contain.
 pub fn describe(sha: &str) -> Result<(u64, String)> {
-    let out = git_str(&["show", "-s", "--format=%ct %s", sha])?;
-    let (ts, subject) = out.split_once(' ').unwrap_or((out.as_str(), ""));
-    let ts = ts
-        .trim()
-        .parse()
-        .with_context(|| format!("unexpected commit time for {sha}: {ts:?}"))?;
-    Ok((ts, subject.to_string()))
+    let out = git_str(&[
+        "-c",
+        "log.showSignature=false",
+        "show",
+        "-s",
+        "--no-show-signature",
+        "--format=%ct%x00%s",
+        sha,
+    ])?;
+    parse_description(&out).with_context(|| format!("unexpected output describing {sha}: {out:?}"))
+}
+
+/// The last line holding the NUL separator, so any stray text git printed
+/// before the format cannot be mistaken for the date.
+fn parse_description(out: &str) -> Option<(u64, String)> {
+    let line = out.lines().rev().find(|l| l.contains('\0'))?;
+    let (ts, subject) = line.split_once('\0')?;
+    Some((ts.trim().parse().ok()?, subject.to_string()))
 }
 
 /// The root of the work tree containing `dir`.
@@ -105,6 +121,126 @@ pub fn prune() {
 static LIVE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 /// Set once an interrupt is being handled: nothing new may be checked out.
 static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// The running build's process group, or 0 when none is running.
+///
+/// The build gets a group of its own so that stopping tak stops all of it,
+/// compilers and linkers included, even when the signal was sent to tak
+/// alone: CI cancelling a job, or `kill <pid>`, reaches tak but not its
+/// children. A terminal's Ctrl-C no longer reaches the build directly either,
+/// since it is out of the foreground group; the interrupt handler kills the
+/// group on tak's behalf.
+#[cfg(unix)]
+static BUILD_GROUP: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// The build has been spawned as the leader of process group `pid`.
+///
+/// If an interrupt is already being handled, the handler may have looked for
+/// a group before this one was recorded, so the build is killed here. Each
+/// side writes its own flag before reading the other's, all `SeqCst`, so at
+/// least one of them sees the group.
+#[cfg(unix)]
+pub fn build_started(pid: u32) {
+    BUILD_GROUP.store(pid as i32, Ordering::SeqCst);
+    if STOPPING.load(Ordering::SeqCst) {
+        kill_build();
+    }
+}
+
+/// The build has been reaped; its group id may be reused from here on.
+#[cfg(unix)]
+pub fn build_finished() {
+    BUILD_GROUP.store(0, Ordering::SeqCst);
+}
+
+/// SIGKILL rather than SIGTERM: the checkout it is writing into is about to
+/// be deleted, and a build given time to clean up would only race that.
+#[cfg(unix)]
+fn kill_build() {
+    let pgid = BUILD_GROUP.load(Ordering::SeqCst);
+    if pgid > 0 {
+        // SAFETY: killpg has no memory-safety preconditions.
+        unsafe {
+            libc::killpg(pgid, libc::SIGKILL);
+        }
+    }
+}
+
+/// Commits whose build failed, each with the build it failed under.
+///
+/// Without a memory of these, a commit that can never build is chosen again
+/// at the top of every run, and with `--limit` a backfill stops making
+/// progress at the first one. Keyed on the `[build]` definition as well as
+/// the commit, so changing the build — usually to fix exactly that failure —
+/// tries every such commit again. Kept in git's common directory: shared by
+/// the repository's worktrees, never committed, and local to this clone,
+/// since a failure says as much about this machine's toolchain as about the
+/// commit.
+///
+/// Only build failures are remembered. A measurement can fail for reasons
+/// that do not repeat, such as a flaky `check`, and skipping that commit for
+/// good would be the wrong answer to a transient problem.
+pub struct FailedBuilds {
+    path: PathBuf,
+    build: String,
+    shas: std::collections::BTreeSet<String>,
+}
+
+impl FailedBuilds {
+    /// The commits that failed under `build`, a stable one-line description
+    /// of the `[build]` definition.
+    pub fn load(build: String) -> Result<FailedBuilds> {
+        let common = git_str(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+        let path = PathBuf::from(common)
+            .join("tak")
+            .join("backfill-build-failed");
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let shas = text
+            .lines()
+            .filter_map(|l| l.split_once('\t'))
+            .filter(|(_, b)| *b == build)
+            .map(|(sha, _)| sha.to_string())
+            .collect();
+        Ok(FailedBuilds { path, build, shas })
+    }
+
+    pub fn contains(&self, sha: &str) -> bool {
+        self.shas.contains(sha)
+    }
+
+    /// Remember that `sha` failed to build.
+    pub fn add(&mut self, sha: &str) -> Result<()> {
+        if !self.shas.insert(sha.to_string()) {
+            return Ok(());
+        }
+        let line = format!("{sha}\t{}", self.build);
+        self.rewrite(|lines| lines.push(line))
+    }
+
+    /// Forget `sha` under this build, once it has built.
+    pub fn remove(&mut self, sha: &str) -> Result<()> {
+        if !self.shas.remove(sha) {
+            return Ok(());
+        }
+        let line = format!("{sha}\t{}", self.build);
+        self.rewrite(|lines| lines.retain(|l| *l != line))
+    }
+
+    fn rewrite(&self, change: impl FnOnce(&mut Vec<String>)) -> Result<()> {
+        let text = std::fs::read_to_string(&self.path).unwrap_or_default();
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        change(&mut lines);
+        lines.sort();
+        lines.dedup();
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut body = lines.join("\n");
+        body.push('\n');
+        std::fs::write(&self.path, body)
+            .with_context(|| format!("could not write {}", self.path.display()))
+    }
+}
 
 /// A detached checkout of one commit, removed when dropped.
 pub struct Worktree {
@@ -145,6 +281,23 @@ impl Worktree {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Check that `p`, symlinks resolved, is inside this checkout.
+    ///
+    /// Refusing `..` in the configured path is not enough: an old commit can
+    /// hold a symlink where the current tak.toml expects a directory, and one
+    /// pointing at the live tree would build or measure that tree at every
+    /// commit of the backfill.
+    pub fn check_contains(&self, p: &Path) -> Result<()> {
+        let shown = p.strip_prefix(&self.path).unwrap_or(p).display();
+        let real = p
+            .canonicalize()
+            .with_context(|| format!("{shown} does not exist at this commit"))?;
+        if !real.starts_with(self.path.canonicalize()?) {
+            bail!("{shown} leads outside the checkout, to {}", real.display());
+        }
+        Ok(())
+    }
 }
 
 /// Remove a checkout and git's record of it.
@@ -183,9 +336,10 @@ impl Drop for Worktree {
 ///
 /// The handler only writes the signal number to a socket; a thread blocked on
 /// the other end does the cleanup, since running git from inside a signal
-/// handler is not safe. The build and measured commands share tak's process
-/// group, so a terminal's Ctrl-C has already reached them by the time the
-/// thread removes the directory they were running in.
+/// handler is not safe. It kills the build's process group first (see
+/// [`BUILD_GROUP`]), so a build never outlives the checkout it was writing
+/// into. Measured commands share tak's own group and get a terminal's Ctrl-C
+/// directly.
 ///
 /// While a subject's `version_cmd` runs, [`crate::measure`] installs its own
 /// handlers, which stop tak at once; [`prune`] at the start of the next run
@@ -222,6 +376,7 @@ pub fn clean_up_on_interrupt(scratch: &Path) -> Result<()> {
             return;
         }
         STOPPING.store(true, Ordering::SeqCst);
+        kill_build();
         // Never released: the process exits while holding it, so nothing
         // can be checked out after the sweep.
         let live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
@@ -252,4 +407,34 @@ pub fn clean_up_on_interrupt(scratch: &Path) -> Result<()> {
 #[cfg(not(unix))]
 pub fn clean_up_on_interrupt(_scratch: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_description;
+
+    #[test]
+    fn a_description_is_date_then_subject() {
+        assert_eq!(
+            parse_description("1700000000\0fix: a thing"),
+            Some((1_700_000_000, "fix: a thing".to_string()))
+        );
+        assert_eq!(
+            parse_description("1700000000\0"),
+            Some((1_700_000_000, String::new()))
+        );
+    }
+
+    /// With `log.showSignature` set somewhere tak's override does not reach,
+    /// git prints the verification ahead of the format. That text must not
+    /// be read as the date.
+    #[test]
+    fn signature_text_before_the_format_is_ignored() {
+        let out = "Good \"git\" signature for t@x with ED25519 key SHA256:abc\n1700000000\0v4";
+        assert_eq!(
+            parse_description(out),
+            Some((1_700_000_000, "v4".to_string()))
+        );
+        assert_eq!(parse_description("gpg: no signature"), None);
+    }
 }

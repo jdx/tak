@@ -264,11 +264,12 @@ fn recorded_commits_are_skipped_unless_forced() {
     assert!(first.status.success(), "{}", both(&first));
     assert_eq!(repo.builds(), 3);
 
-    // Only the commit that failed to build is tried again, and a run with
-    // nothing new to record still succeeds: the range has its history.
+    // Nothing is built again, not even the commit whose build failed, and a
+    // run with nothing new to record still succeeds: the range has its
+    // history.
     let again = repo.tak(&["--commits", &range]);
     assert!(again.status.success(), "{}", both(&again));
-    assert_eq!(repo.builds(), 4);
+    assert_eq!(repo.builds(), 3);
     assert!(
         stdout(&again).contains("2 already recorded"),
         "{}",
@@ -279,7 +280,7 @@ fn recorded_commits_are_skipped_unless_forced() {
 
     let forced = repo.tak(&["--commits", &range, "--force"]);
     assert!(forced.status.success(), "{}", both(&forced));
-    assert_eq!(repo.builds(), 7);
+    assert_eq!(repo.builds(), 6);
     assert_eq!(versions(&repo, &v4), ["v4", "v4"]);
     assert_eq!(repo.notes(&v2).len(), 2);
 }
@@ -434,54 +435,217 @@ fn release_options_are_refused_with_commits() {
     assert!(both(&out).contains("--force only applies with --commits"));
 }
 
-/// Ctrl-C reaches tak and the build together, as a terminal delivers it to
-/// the whole foreground process group. The checkout must not outlive tak.
+/// A subject added to a benchmark after some commits were recorded is still
+/// missing on those commits, and is backfilled there without measuring the
+/// subjects that already have a point.
 #[test]
-fn an_interrupted_build_leaves_no_checkout_behind() {
-    use std::os::unix::process::CommandExt;
-
+fn a_new_subject_is_backfilled_on_recorded_commits() {
     let repo = Repo::new();
-    history(&repo);
+    let [v1, v2, _, v4] = history(&repo);
+    let subject = |name: &str| {
+        format!("[bench.cmp.subject.{name}]\ncmd = [\"./tool\"]\nruns = 2\nwarmup = 0\n")
+    };
+    let toml = |subjects: &str| {
+        format!(
+            "[build]\ncmd = [\"sh\", \"-c\", \"echo built >> {} && cp tool.sh tool\"]\n{subjects}",
+            repo.build_log().display()
+        )
+    };
+    let range = format!("{v1}..main");
+    repo.write("tak.toml", &toml(&subject("a")));
+    let first = repo.tak(&["--commits", &range]);
+    assert!(first.status.success(), "{}", both(&first));
+
+    repo.write("tak.toml", &toml(&(subject("a") + &subject("b"))));
+    let dry = repo.tak(&["--commits", &range, "--dry-run"]);
+    assert!(
+        stdout(&dry).contains(&format!("{}  would build (cmp (b))", &v4[..12])),
+        "{}",
+        stdout(&dry)
+    );
+    let second = repo.tak(&["--commits", &range]);
+    assert!(second.status.success(), "{}", both(&second));
+    for sha in [&v2, &v4] {
+        let mut tools: Vec<String> = repo.notes(sha).into_iter().map(|r| r.tool).collect();
+        tools.sort();
+        assert_eq!(tools, ["a", "b"], "one point per subject on {sha}");
+    }
+}
+
+/// A commit that cannot build is passed over by later runs, so `--limit`
+/// keeps making progress past it. Changing `[build]` tries it again.
+#[test]
+fn a_failed_build_is_passed_over_next_time() {
+    let repo = Repo::new();
+    config(&repo, "");
+    repo.write(".gitignore", "tool\ntak.toml\n");
+    repo.git(&["add", ".gitignore"]);
+    let v1 = repo.commit_tool(Some("v1"));
+    let v2 = repo.commit_tool(Some("v2"));
+    let broken = repo.commit_tool(None);
+    let range = format!("{v1}..main");
+
+    let first = repo.tak(&["--commits", &range, "--limit", "1"]);
+    assert!(
+        !first.status.success(),
+        "nothing recorded: {}",
+        both(&first)
+    );
+    assert_eq!(repo.builds(), 1);
+
+    let dry = repo.tak(&["--commits", &range, "--dry-run"]);
+    assert!(
+        stdout(&dry).contains(&format!("{}  build failed before", &broken[..12])),
+        "{}",
+        stdout(&dry)
+    );
+    let second = repo.tak(&["--commits", &range, "--limit", "1"]);
+    assert!(second.status.success(), "{}", both(&second));
+    assert_eq!(versions(&repo, &v2), ["v2"], "the next commit was reached");
+    assert!(stdout(&second).contains("1 commit(s) passed over"));
+    assert_eq!(repo.builds(), 2);
+
+    // --force retries it, and so does a different [build].
+    repo.tak(&["--commits", &range, "--force", "--limit", "1"]);
+    assert_eq!(repo.builds(), 3);
+    config(&repo, "[build.env]\nCHANGED = \"1\"\n");
+    let changed = repo.tak(&["--commits", &range, "--dry-run"]);
+    assert!(
+        stdout(&changed).contains(&format!("{}  would build", &broken[..12])),
+        "{}",
+        stdout(&changed)
+    );
+}
+
+/// The configured `dir` has no `..`, but an old commit can hold a symlink
+/// where it expects a directory. Following one to the live tree would build
+/// that tree instead of the commit.
+#[test]
+fn a_build_dir_symlinked_out_of_the_checkout_is_refused() {
+    let repo = Repo::new();
+    repo.write(".gitignore", "tool\ntak.toml\n");
+    repo.git(&["add", ".gitignore"]);
+    let base = repo.commit_tool(Some("v1"));
+    let outside = repo.tmp.parent().unwrap().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, repo.dir.join("app")).unwrap();
+    repo.git(&["add", "app"]);
+    let linked = repo.commit_tool(Some("v2"));
     repo.write(
         "tak.toml",
-        "[build]\ncmd = [\"sleep\", \"30\"]\n[bench.startup]\ncmd = [\"./tool\"]\n",
+        &format!(
+            "[build]\ncmd = [\"sh\", \"-c\", \"echo built >> {}\"]\ndir = \"app\"\n\
+             [bench.startup]\ncmd = [\"./tool\"]\n",
+            repo.build_log().display()
+        ),
     );
-    let mut child = repo
+
+    let out = repo.tak(&["--commits", &format!("{base}..main")]);
+    assert!(
+        stdout(&out).contains("app leads outside the checkout"),
+        "{}",
+        both(&out)
+    );
+    assert_eq!(repo.builds(), 0, "the build never ran");
+    assert!(repo.notes(&linked).is_empty());
+    assert_eq!(repo.worktrees(), 1);
+}
+
+/// Start a backfill whose build records its pid and then sleeps, and wait
+/// until that build is running. Returns tak and the build's pid.
+fn start_slow_build(repo: &Repo) -> (std::process::Child, i32) {
+    use std::os::unix::process::CommandExt;
+
+    history(repo);
+    let pidfile = repo.tmp.parent().unwrap().join("build.pid");
+    repo.write(
+        "tak.toml",
+        &format!(
+            "[build]\ncmd = [\"sh\", \"-c\", \"echo $$ > {}.tmp && mv {0}.tmp {0} && exec sleep 30\"]\n\
+             [bench.startup]\ncmd = [\"./tool\"]\n",
+            pidfile.display()
+        ),
+    );
+    // Its own group, standing in for a terminal's foreground job.
+    let child = repo
         .tak_cmd(&["--commits", "main~1..main"])
         .process_group(0)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-
-    // Wait for the checkout to exist, so the signal lands during the build.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while repo.worktrees() < 2 {
-        assert!(std::time::Instant::now() < deadline, "no checkout appeared");
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    // Give tak a moment to start the build after the checkout.
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    let pgid = child.id() as i32;
-    // SAFETY: signals a process group this test created.
-    unsafe {
-        libc::killpg(pgid, libc::SIGINT);
-    }
-
-    let status = loop {
-        if let Some(s) = child.try_wait().unwrap() {
-            break s;
+    let pid = loop {
+        if let Ok(text) = std::fs::read_to_string(&pidfile) {
+            break text.trim().parse().unwrap();
         }
-        if std::time::Instant::now() > deadline {
-            // SAFETY: as above.
-            unsafe {
-                libc::killpg(pgid, libc::SIGKILL);
-            }
-            panic!("tak did not stop after SIGINT");
-        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the build never started"
+        );
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
+    (child, pid)
+}
+
+/// Wait for `pid` to be gone, or for the deadline.
+fn wait_gone(pid: i32) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        // SAFETY: signal 0 only checks that the process exists.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
+}
+
+fn wait_for(child: &mut std::process::Child) -> std::process::ExitStatus {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            return s;
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().ok();
+            panic!("tak did not stop");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Ctrl-C, delivered as a terminal does to the whole foreground job. The
+/// build runs in a group of its own, so it is tak that stops it; neither it
+/// nor the checkout may outlive tak.
+#[test]
+fn an_interrupted_build_leaves_no_checkout_behind() {
+    let repo = Repo::new();
+    let (mut child, build) = start_slow_build(&repo);
+    // SAFETY: signals the process group this test created.
+    unsafe {
+        libc::killpg(child.id() as i32, libc::SIGINT);
+    }
+    let status = wait_for(&mut child);
     assert_eq!(status.code(), Some(130), "{status:?}");
+    assert!(wait_gone(build), "the build outlived tak");
     assert_eq!(repo.worktrees(), 1, "the checkout was removed");
     assert!(repo.tmp_is_empty(), "and the scratch directory");
+}
+
+/// SIGTERM to tak alone, as CI cancelling a job or `kill <pid>` sends it:
+/// the build never receives it, so tak has to stop the build itself.
+#[test]
+fn a_sigterm_to_tak_alone_stops_the_build() {
+    let repo = Repo::new();
+    let (mut child, build) = start_slow_build(&repo);
+    // SAFETY: signals the process this test spawned.
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    let status = wait_for(&mut child);
+    assert_eq!(status.code(), Some(143), "{status:?}");
+    assert!(wait_gone(build), "the build outlived tak");
+    assert_eq!(repo.worktrees(), 1);
+    assert!(repo.tmp_is_empty());
 }

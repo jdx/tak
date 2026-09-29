@@ -145,8 +145,9 @@ enum Cmd {
         /// `main~20..main`, instead of downloading releases.
         #[usage(long, value_name = "RANGE")]
         commits: Option<String>,
-        /// With --commits, measure commits that already have a record for
-        /// this runner class and benchmark.
+        /// With --commits, measure every subject again even where this runner
+        /// class already has a record, and retry commits whose build failed
+        /// in an earlier run.
         #[usage(long)]
         force: bool,
         /// Repository to pull releases from, as "owner/name". Defaults to the
@@ -962,14 +963,7 @@ fn measure_bench(
             println!("  {:<16} {:>14}", "checks", format!("{passed}/{total}"));
         }
 
-        // TAK_TOOL only ever renames the single-command series. Keyed on the
-        // benchmark's shape rather than the subject's name, so a declared
-        // subject can never be recorded as anything but itself.
-        let tool = if multi {
-            s.name.clone()
-        } else {
-            std::env::var("TAK_TOOL").unwrap_or_else(|_| SELF_TOOL.into())
-        };
+        let tool = record_tool(multi, s);
         measured.push(Measured {
             bench: bench.to_string(),
             subject: s.clone(),
@@ -989,6 +983,19 @@ fn measure_bench(
         });
     }
     Ok((measured, failed))
+}
+
+/// The `tool` a subject's records are stored under.
+///
+/// TAK_TOOL only ever renames the single-command series. Keyed on the
+/// benchmark's shape rather than the subject's name, so a declared subject
+/// can never be recorded as anything but itself.
+fn record_tool(multi: bool, s: &Subject) -> String {
+    if multi {
+        s.name.clone()
+    } else {
+        std::env::var("TAK_TOOL").unwrap_or_else(|_| SELF_TOOL.into())
+    }
 }
 
 /// Add a subject's instruction count to its metrics, warning rather than
@@ -1387,15 +1394,69 @@ struct CommitBackfill {
     dry_run: bool,
 }
 
-/// A commit in the range, and the benchmarks it still needs.
+/// A commit in the range, and what it still needs.
 struct Pending {
     sha: String,
     subject: String,
     /// Committed at, seconds since the epoch.
     time: u64,
-    /// Benchmarks with no record for this runner class yet, or every
-    /// selected one under `--force`. Empty means nothing to do.
-    benches: Vec<String>,
+    /// Benchmark to the names of its subjects with no record for this runner
+    /// class yet, or every selected one under `--force`. Empty means nothing
+    /// to do.
+    needs: BTreeMap<String, Vec<String>>,
+    /// Its build failed in an earlier run, under the same `[build]`.
+    failed_before: bool,
+}
+
+impl Pending {
+    fn wanted(&self) -> bool {
+        !self.needs.is_empty() && !self.failed_before
+    }
+}
+
+/// What a commit still needs, given the `(bench, tool)` pairs it already has
+/// records for: per benchmark, the subjects that have none.
+///
+/// Keyed on the subject and not only the benchmark, so a subject added to a
+/// benchmark after some commits were recorded is still backfilled on them,
+/// without measuring again the subjects that already have a point there.
+fn needs_for(
+    plans: &[BenchPlan],
+    have: &std::collections::BTreeSet<(String, String)>,
+    force: bool,
+) -> BTreeMap<String, Vec<String>> {
+    let mut needs = BTreeMap::new();
+    for (bench, multi, subjects) in plans {
+        let missing: Vec<String> = subjects
+            .iter()
+            .filter(|s| force || !have.contains(&(bench.clone(), record_tool(*multi, s))))
+            .map(|s| s.name.clone())
+            .collect();
+        if !missing.is_empty() {
+            needs.insert(bench.clone(), missing);
+        }
+    }
+    needs
+}
+
+/// `needs` for a dry run: benchmarks whole where every subject is missing,
+/// otherwise with the subjects that are.
+fn describe_needs(needs: &BTreeMap<String, Vec<String>>, plans: &[BenchPlan]) -> String {
+    needs
+        .iter()
+        .map(|(bench, subjects)| {
+            let all = plans
+                .iter()
+                .find(|(b, _, _)| b == bench)
+                .is_some_and(|(_, _, s)| s.len() == subjects.len());
+            if all {
+                bench.clone()
+            } else {
+                format!("{bench} ({})", subjects.join(", "))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// How far one commit got.
@@ -1487,32 +1548,44 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
     // second point each. Offline or without a remote, the local ref decides.
     let _ = notes::fetch("origin");
 
+    // A stable one-line description of the build, so a remembered failure is
+    // forgotten as soon as `[build]` changes. JSON escapes tabs and newlines.
+    let build_key = serde_json::to_string(&(
+        &build.cmd,
+        build.dir.as_ref().map(|d| d.to_string_lossy()),
+        &build.env,
+    ))?;
+    let mut failed_builds = tak_cli::worktree::FailedBuilds::load(build_key)?;
+
     let runner = runner_class(settings);
     let mut pending = Vec::with_capacity(commits.len());
     for sha in commits {
-        let have: std::collections::BTreeSet<String> = notes::read(None, &sha)?
+        let have: std::collections::BTreeSet<(String, String)> = notes::read(None, &sha)?
             .into_iter()
             .filter(|r| r.runner == runner)
-            .map(|r| r.bench)
+            .map(|r| (r.bench, r.tool))
             .collect();
-        let benches = plans
-            .iter()
-            .map(|(name, _, _)| name.clone())
-            .filter(|name| o.force || !have.contains(name))
-            .collect();
+        let needs = needs_for(&plans, &have, o.force);
         let (time, subject) = tak_cli::worktree::describe(&sha)?;
         pending.push(Pending {
+            failed_before: !o.force && failed_builds.contains(&sha),
             sha,
             subject,
             time,
-            benches,
+            needs,
         });
     }
-    let recorded_before = pending.iter().filter(|p| p.benches.is_empty()).count();
-    // Newest first, and `--limit` counts builds rather than commits, so the
-    // same command run again carries on from where the last one stopped.
+    let recorded_before = pending.iter().filter(|p| p.needs.is_empty()).count();
+    let failed_before = pending
+        .iter()
+        .filter(|p| !p.needs.is_empty() && p.failed_before)
+        .count();
+    // Newest first, and `--limit` counts builds rather than commits. A
+    // commit whose build failed is remembered and passed over next time, so
+    // the same command run again carries on from where the last one stopped
+    // instead of retrying the same broken commit at the top of every run.
     let (todo, beyond): (Vec<&Pending>, Vec<&Pending>) = {
-        let needed: Vec<&Pending> = pending.iter().filter(|p| !p.benches.is_empty()).collect();
+        let needed: Vec<&Pending> = pending.iter().filter(|p| p.wanted()).collect();
         let split = needed.len().min(o.limit);
         (needed[..split].to_vec(), needed[split..].to_vec())
     };
@@ -1526,18 +1599,20 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
 
     if o.dry_run {
         println!();
-        let all = plans.len();
+        let everything = needs_for(&plans, &Default::default(), true);
         for p in &pending {
-            let status = if p.benches.is_empty() {
+            let status = if p.needs.is_empty() {
                 "recorded".to_string()
+            } else if p.failed_before {
+                "build failed before".to_string()
             } else if beyond.iter().any(|b| b.sha == p.sha) {
                 "beyond --limit".to_string()
-            } else if p.benches.len() == all {
+            } else if p.needs == everything {
                 "would build".to_string()
             } else {
-                format!("would build ({})", p.benches.join(", "))
+                format!("would build ({})", describe_needs(&p.needs, &plans))
             };
-            println!("  {}  {status:<16}  {}", &p.sha[..12], p.subject);
+            println!("  {}  {status:<19}  {}", &p.sha[..12], p.subject);
         }
         println!("\n  dry run — nothing built or written");
         return Ok(());
@@ -1570,9 +1645,19 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
             Outcome::Recorded(n) => {
                 println!("  recorded {n} measurement(s)");
                 recorded += 1;
+                failed_builds.remove(&p.sha)?;
             }
-            Outcome::BuildFailed => build_failed.push(short),
-            Outcome::NotRecorded => not_recorded.push(short),
+            Outcome::BuildFailed => {
+                build_failed.push(short);
+                failed_builds.add(&p.sha)?;
+            }
+            Outcome::NotRecorded => {
+                not_recorded.push(short);
+                // Only reached for a remembered failure under --force: it
+                // did not fail to build this time, so it is not passed over
+                // next time either.
+                failed_builds.remove(&p.sha)?;
+            }
         }
     }
 
@@ -1582,6 +1667,12 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
     );
     if !build_failed.is_empty() {
         println!("  build failed: {}", build_failed.join(", "));
+    }
+    if failed_before > 0 {
+        println!(
+            "  {failed_before} commit(s) passed over: their build failed in an earlier run \
+             (--force retries them)"
+        );
     }
     if !not_recorded.is_empty() {
         println!("  not recorded: {}", not_recorded.join(", "));
@@ -1600,7 +1691,7 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
     // success, and so is a second run that only retries those. One that has
     // no record at all to show for the range is not: a CI job seeding
     // history must not pass having seeded none.
-    let failed = !(build_failed.is_empty() && not_recorded.is_empty());
+    let failed = !(build_failed.is_empty() && not_recorded.is_empty()) || failed_before > 0;
     if recorded == 0 && recorded_before == 0 && failed {
         bail!("no commit in {} was recorded", o.range);
     }
@@ -1633,7 +1724,15 @@ fn backfill_commit(
 
     let mut build = build.clone();
     build.anchor(&root);
-    match backfill::run_build(&build) {
+    // The checked path has no `..`, but the old tree may put a symlink where
+    // the current tak.toml expects a directory.
+    for dir in [Some(&root), build.dir.as_ref()].into_iter().flatten() {
+        if let Err(e) = wt.check_contains(dir) {
+            println!("  not recorded — {e:#}");
+            return Ok(Outcome::NotRecorded);
+        }
+    }
+    match backfill::run_build(&build, &scratch.join("build.log")) {
         Ok(took) => println!("  built in {:.1}s", took.as_secs_f64()),
         Err(e) => {
             println!("  build failed — skipped");
@@ -1645,12 +1744,21 @@ fn backfill_commit(
     }
 
     let mut records = Vec::new();
-    for (name, multi, subjects) in plans.iter().filter(|(n, _, _)| p.benches.contains(n)) {
-        let mut subjects = subjects.clone();
+    for (name, multi, subjects) in plans {
+        let Some(wanted) = p.needs.get(name) else {
+            continue;
+        };
+        // Only the subjects with no point on this commit yet: measuring the
+        // rest again would give them a second one.
+        let mut subjects: Vec<Subject> = subjects
+            .iter()
+            .filter(|s| wanted.contains(&s.name))
+            .cloned()
+            .collect();
         for s in &mut subjects {
             s.anchor(&root);
         }
-        let problem = match missing_input(&subjects, &root) {
+        let problem = match check_inputs(&subjects, &wt) {
             Some(missing) => Some(missing),
             None => match measure_bench(name, &subjects, *multi, seed, opts, settings) {
                 Err(e) => Some(format!("{e:#}")),
@@ -1696,9 +1804,24 @@ fn backfill_commit(
 /// Only for subjects without a `setup`, which may be what creates them.
 /// Without this, the failure surfaces as a spawn error that says nothing
 /// about the file having been read from a newer commit than the tree.
-fn missing_input(subjects: &[Subject], root: &Path) -> Option<String> {
-    let shown = |p: &Path| p.strip_prefix(root).unwrap_or(p).display().to_string();
-    for s in subjects.iter().filter(|s| s.setup.is_none()) {
+///
+/// A `dir` inside the checkout must also stay inside it once symlinks are
+/// resolved, for the reason [`tak_cli::worktree::Worktree::check_contains`]
+/// gives. One outside it, such as an absolute fixture path from a template,
+/// is the user's choice and is left alone.
+fn check_inputs(subjects: &[Subject], wt: &tak_cli::worktree::Worktree) -> Option<String> {
+    let shown = |p: &Path| p.strip_prefix(wt.path()).unwrap_or(p).display().to_string();
+    for s in subjects {
+        if let Some(d) = &s.dir
+            && d.starts_with(wt.path())
+            && d.exists()
+            && let Err(e) = wt.check_contains(d)
+        {
+            return Some(format!("{e:#}"));
+        }
+        if s.setup.is_some() {
+            continue;
+        }
         if let Some(d) = &s.dir
             && !d.is_dir()
         {
@@ -1708,7 +1831,7 @@ fn missing_input(subjects: &[Subject], root: &Path) -> Option<String> {
             ));
         }
         let program = Path::new(&s.cmd[0]);
-        if program.is_absolute() && program.starts_with(root) && !program.exists() {
+        if program.is_absolute() && program.starts_with(wt.path()) && !program_exists(program) {
             return Some(format!(
                 "{} does not exist at this commit after the build",
                 shown(program)
@@ -1716,6 +1839,21 @@ fn missing_input(subjects: &[Subject], root: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Whether spawning `program` would find it. On Windows that includes the
+/// executable suffix: `./target/release/mycli` runs `mycli.exe`, and a check
+/// for the bare name would call every Windows build missing.
+fn program_exists(program: &Path) -> bool {
+    if program.exists() {
+        return true;
+    }
+    let suffix = std::env::consts::EXE_SUFFIX;
+    !suffix.is_empty() && program.extension().is_none() && {
+        let mut with = program.as_os_str().to_owned();
+        with.push(suffix);
+        Path::new(&with).exists()
+    }
 }
 
 /// Resolve settings from the CLI layer, the environment, and `tak.toml`.
@@ -2014,6 +2152,21 @@ mod tests {
         let workdir = backfill_workdir().unwrap();
         let mode = workdir.path().metadata().unwrap().permissions().mode();
         assert_eq!(mode & 0o077, 0, "workdir mode was {:o}", mode & 0o777);
+    }
+
+    /// A program is found as spawning would find it, which on Windows
+    /// includes the `.exe` a bare `./target/release/mycli` resolves to.
+    #[test]
+    fn a_built_program_is_found_with_the_platform_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("mycli");
+        assert!(!program_exists(&bin));
+        std::fs::write(
+            format!("{}{}", bin.display(), std::env::consts::EXE_SUFFIX),
+            b"",
+        )
+        .unwrap();
+        assert!(program_exists(&bin));
     }
 
     /// An explicit class wins over the derived one. This is how a project

@@ -533,36 +533,75 @@ pub fn version_of(tag: &str) -> &str {
 /// and the command that failed; the rest is progress noise.
 const BUILD_TAIL: usize = 20;
 
+/// Bytes read back from the end of a failed build's log to find its last
+/// lines. A bound, so a build that printed gigabytes costs no more to report
+/// than one that printed a page.
+const BUILD_TAIL_BYTES: u64 = 64 * 1024;
+
 /// Run `[build]`, anchored in a commit's checkout, and say how long it took.
 ///
-/// Output is captured rather than streamed: twenty builds' worth of compiler
-/// progress buries the lines saying what was recorded, and when a build fails
-/// the error is at the end, which is what the failure shows.
+/// Output goes to `log` rather than the terminal: twenty builds' worth of
+/// compiler progress buries the lines saying what was recorded, and when a
+/// build fails the error is at the end, which is what the failure shows. A
+/// file rather than a pipe held in memory, because a verbose build across a
+/// long backfill can print far more than tak should hold.
+///
+/// On Unix the build leads its own process group, registered with
+/// [`crate::worktree::build_started`] so an interrupt can stop all of it.
 ///
 /// The environment is tak's own plus `[build].env`, without `env_deny`
 /// applied. That setting keeps a token from changing what a *measured*
 /// command does; the build is not measured, and one fetching a private
 /// dependency may need exactly the variable it removes.
-pub fn run_build(build: &crate::config::Build) -> Result<std::time::Duration> {
+pub fn run_build(build: &crate::config::Build, log: &Path) -> Result<std::time::Duration> {
     let started = std::time::Instant::now();
     let (program, args) = build.cmd.split_first().context("empty build command")?;
+    let out = std::fs::File::create(log)
+        .with_context(|| format!("could not create {}", log.display()))?;
     let mut cmd = Command::new(program);
-    cmd.args(args).envs(&build.env).stdin(Stdio::null());
+    cmd.args(args)
+        .envs(&build.env)
+        .stdin(Stdio::null())
+        .stdout(out.try_clone()?)
+        .stderr(out);
     if let Some(dir) = &build.dir {
         cmd.current_dir(dir);
     }
-    let out = cmd.output().with_context(|| match &build.dir {
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut child = cmd.spawn().with_context(|| match &build.dir {
         Some(d) if !d.is_dir() => format!("{} does not exist at this commit", d.display()),
         _ => format!("could not run {program}"),
     })?;
-    if !out.status.success() {
-        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-        text.push_str(&String::from_utf8_lossy(&out.stderr));
-        let lines: Vec<&str> = text.lines().collect();
-        let tail = lines[lines.len().saturating_sub(BUILD_TAIL)..].join("\n");
-        bail!("build failed ({})\n{tail}", out.status);
+    #[cfg(unix)]
+    crate::worktree::build_started(child.id());
+    let status = child.wait();
+    #[cfg(unix)]
+    crate::worktree::build_finished();
+    let status = status.context("could not wait for the build")?;
+    if !status.success() {
+        bail!("build failed ({status})\n{}", tail(log)?);
     }
     Ok(started.elapsed())
+}
+
+/// The last [`BUILD_TAIL`] lines of `log`, reading at most
+/// [`BUILD_TAIL_BYTES`] from its end.
+fn tail(log: &Path) -> Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(log)?;
+    let len = f.metadata()?.len();
+    let start = len.saturating_sub(BUILD_TAIL_BYTES);
+    f.seek(SeekFrom::Start(start))?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<&str> = text.lines().collect();
+    // Starting mid-file almost always lands mid-line.
+    if start > 0 && !lines.is_empty() {
+        lines.remove(0);
+    }
+    Ok(lines[lines.len().saturating_sub(BUILD_TAIL)..].join("\n"))
 }
 
 #[cfg(test)]
@@ -809,6 +848,25 @@ mod tests {
         assert!(!release_dir_name(0, "release/1.0").contains('/'));
         // A tag of only punctuation still yields something usable.
         assert!(!release_dir_name(0, "...").is_empty());
+    }
+
+    /// A failed build shows its last lines, read from the end of the log,
+    /// however much it printed before them.
+    #[test]
+    fn a_long_build_log_is_read_from_its_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("build.log");
+        let mut text: String = (0..100_000).map(|i| format!("progress {i}\n")).collect();
+        text.push_str("error: it broke\n");
+        std::fs::write(&log, &text).unwrap();
+        let got = tail(&log).unwrap();
+        let lines: Vec<&str> = got.lines().collect();
+        assert_eq!(lines.len(), BUILD_TAIL);
+        assert_eq!(lines.last(), Some(&"error: it broke"));
+        assert_eq!(lines[0], "progress 99981", "whole lines only");
+
+        std::fs::write(&log, "one\ntwo\n").unwrap();
+        assert_eq!(tail(&log).unwrap(), "one\ntwo");
     }
 
     #[test]
