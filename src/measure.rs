@@ -238,12 +238,14 @@ const METRIC_OUTPUT_MAX: usize = 1024;
 /// A file is `stat`ed, following symlinks, and must be a regular file: a
 /// directory's size is filesystem bookkeeping, not the size of what is in it.
 ///
-/// A command runs like `setup` or `check`: in the subject's `dir` and `env`,
-/// with the same variables removed, no shell, and no deadline. It must exit 0
-/// and print exactly one number; see [`parse_metric_value`]. Both streams go
-/// to anonymous files rather than pipes for the reason [`untimed`] gives: a
-/// script that leaves something running in the background must not hang the
-/// run by holding a pipe open.
+/// A command runs in the subject's `dir` and `env`, with the same variables
+/// removed, no shell, and no deadline, like `setup` or `check`. It must exit 0
+/// and print exactly one number; see [`parse_metric_value`]. Its output is
+/// captured the way `version_cmd`'s is, through [`capture`]: bounded while it
+/// is read, so a script that dumps a report is stopped at
+/// [`METRIC_OUTPUT_MAX`] instead of filling memory or a disk, and not waited
+/// on past its exit, so one that leaves something running in the background
+/// holding the pipe open does not hang the run.
 pub fn custom_metric(source: &MetricSource, s: &Subject, settings: &Settings) -> Result<f64> {
     match source {
         MetricSource::File(path) => {
@@ -266,52 +268,24 @@ pub fn custom_metric(source: &MetricSource, s: &Subject, settings: &Settings) ->
 }
 
 fn metric_cmd_once(argv: &[String], site: &Site) -> Result<f64> {
-    let mut c = command(argv, site)?;
     let bin = &argv[0];
-    let file = || {
-        tempfile::tempfile()
-            .with_context(|| format!("failed to create a file for `{bin}`'s output"))
-    };
-    let (out, err) = (file()?, file()?);
-    let (out_reader, err_reader) = (
-        out.try_clone()
-            .with_context(|| format!("failed to create a file for `{bin}`'s output"))?,
-        err.try_clone()
-            .with_context(|| format!("failed to create a file for `{bin}`'s output"))?,
-    );
-    let status = c
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(out))
-        .stderr(Stdio::from(err))
-        .status()
-        .with_context(|| format!("failed to spawn `{bin}`"))?;
-    if !status.success() {
-        let tail = stderr_tail(&err_reader).unwrap_or_default();
-        let stderr = String::from_utf8_lossy(&tail);
-        match stderr.lines().rfind(|l| !l.trim().is_empty()) {
-            Some(last) => bail!("`{bin}` exited with {status}: {}", last.trim()),
-            None => bail!("`{bin}` exited with {status}"),
-        }
+    let out = capture(argv, site, None, METRIC_OUTPUT_MAX, true)?;
+    // Before the status: a command stopped for printing too much died of
+    // tak's signal, and saying so would hide why it was stopped.
+    if out.overflowed {
+        bail!(
+            "`{bin}` printed more than {METRIC_OUTPUT_MAX} bytes, so it was stopped; a metric \
+             command prints one number and nothing else"
+        );
     }
-    let len = out_reader
-        .metadata()
-        .with_context(|| format!("could not read `{bin}`'s output"))?
-        .len();
-    if len > METRIC_OUTPUT_MAX as u64 {
-        bail!("`{bin}` printed {len} bytes; a metric command prints one number and nothing else");
+    if !out.status.success() {
+        bail!(
+            "`{bin}` exited with {}: {}",
+            out.status,
+            last_line(&out.stderr)
+        );
     }
-    let mut buf = vec![0u8; len as usize];
-    let mut filled = 0;
-    while filled < buf.len() {
-        let n = read_at(&out_reader, &mut buf[filled..], filled as u64)
-            .with_context(|| format!("could not read `{bin}`'s output"))?;
-        if n == 0 {
-            break;
-        }
-        filled += n;
-    }
-    buf.truncate(filled);
-    let text = std::str::from_utf8(&buf)
+    let text = std::str::from_utf8(&out.stdout)
         .map_err(|_| anyhow::anyhow!("`{bin}` printed something that is not UTF-8"))?;
     parse_metric_value(text).with_context(|| format!("`{bin}`"))
 }
@@ -994,7 +968,14 @@ const VERSION_OUTPUT_GRACE: Duration = Duration::from_millis(500);
 /// Read `r` to the end, keeping the first `cap` bytes in `kept` and
 /// discarding the rest. Draining it all means the writer never blocks on a
 /// full pipe, so the command can finish and report its real exit status.
-fn keep_prefix(mut r: impl std::io::Read, cap: usize, kept: &Mutex<Vec<u8>>) {
+/// `overflow` is set once anything past `cap` arrives, for a caller that
+/// treats more output than that as a failure and stops the command.
+fn keep_prefix(
+    mut r: impl std::io::Read,
+    cap: usize,
+    kept: &Mutex<Vec<u8>>,
+    overflow: &std::sync::atomic::AtomicBool,
+) {
     let mut buf = [0u8; 8192];
     loop {
         match r.read(&mut buf) {
@@ -1002,6 +983,9 @@ fn keep_prefix(mut r: impl std::io::Read, cap: usize, kept: &Mutex<Vec<u8>>) {
             Ok(n) => {
                 let Ok(mut k) = kept.lock() else { return };
                 let room = cap.saturating_sub(k.len());
+                if n > room {
+                    overflow.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 k.extend_from_slice(&buf[..n.min(room)]);
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
@@ -1286,13 +1270,14 @@ mod forward_signals {
     }
 }
 
-/// Stop a timed-out `version_cmd` and everything it started, then reap it.
+/// Stop a command run by [`capture`] and everything it started, then reap it:
+/// a `version_cmd` past its deadline, or a metric command past its output cap.
 ///
 /// On Unix that is its whole process group, so a helper it spawned cannot go
 /// on using CPU through the samples that follow, or hold the output pipes
 /// open. Elsewhere only the command itself is stopped.
 ///
-/// Only on a timeout: a command that exits on its own may have started a
+/// Only then: a command that exits on its own may have started a
 /// daemon on purpose — a version check that launches a language server or
 /// build daemon — and that is the tool's business, not tak's to kill.
 fn stop_group(child: &mut std::process::Child) {
@@ -1311,6 +1296,77 @@ fn stop_group(child: &mut std::process::Child) {
 }
 
 fn version_once(argv: &[String], site: &Site, timeout: Duration) -> Result<String> {
+    let bin = argv
+        .first()
+        .map(String::as_str)
+        .unwrap_or("(empty command)");
+    let Captured {
+        status,
+        stdout,
+        stderr,
+        ..
+    } = capture(argv, site, Some(timeout), VERSION_OUTPUT_CAP, false)?;
+
+    // A failing command's output is an error message or a usage dump, not a
+    // version, however much of it there is.
+    if !status.success() {
+        bail!("`{bin}` exited with {status}: {}", last_line(&stderr));
+    }
+    let first = |bytes: &[u8]| {
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(str::to_string)
+    };
+    first(&stdout)
+        .or_else(|| first(&stderr))
+        .with_context(|| format!("`{bin}` printed nothing"))
+}
+
+/// The last non-empty line of a captured stream, for an error message.
+fn last_line(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .unwrap_or("(no output)")
+        .to_string()
+}
+
+/// What [`capture`] got from a command that finished.
+struct Captured {
+    status: std::process::ExitStatus,
+    /// At most the cap passed to [`capture`].
+    stdout: Vec<u8>,
+    /// At most [`VERSION_OUTPUT_CAP`].
+    stderr: Vec<u8>,
+    /// stdout went past the cap. With `stop_past_cap`, the command was
+    /// stopped as soon as that was seen, and `status` is how it died.
+    overflowed: bool,
+}
+
+/// Run `argv` at `site` with both streams piped, keeping the first
+/// `stdout_cap` bytes of stdout and [`VERSION_OUTPUT_CAP`] of stderr, and
+/// reading and discarding the rest so the command never blocks on a full
+/// pipe. Memory and disk stay bounded however much it prints.
+///
+/// It runs in its own process group, so a `timeout` or `stop_past_cap` can
+/// stop everything it started. With `stop_past_cap`, output beyond the cap
+/// is a failure the caller will report anyway, so the command is stopped the
+/// moment it arrives rather than left to print for as long as it likes.
+/// `timeout: None` waits as long as the command takes, as `setup` does.
+///
+/// Once the command exits, its output is waited for only briefly: a process
+/// it left in the background may hold a pipe open indefinitely.
+fn capture(
+    argv: &[String],
+    site: &Site,
+    timeout: Option<Duration>,
+    stdout_cap: usize,
+    stop_past_cap: bool,
+) -> Result<Captured> {
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
     let bin = argv
         .first()
         .map(String::as_str)
@@ -1338,34 +1394,53 @@ fn version_once(argv: &[String], site: &Site, timeout: Duration) -> Result<Strin
     // may hold a pipe open long after it exits, and the run must not wait on
     // that. Each thread ends when its pipe finally closes.
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
-    let spawn_reader = |r: Option<Box<dyn std::io::Read + Send>>| {
-        let kept = Arc::new(Mutex::new(Vec::new()));
-        if let Some(r) = r {
-            let (kept, tx) = (Arc::clone(&kept), done_tx.clone());
-            std::thread::spawn(move || {
-                keep_prefix(r, VERSION_OUTPUT_CAP, &kept);
-                let _ = tx.send(());
-            });
-        } else {
-            let _ = done_tx.send(());
-        }
-        kept
-    };
-    let stdout = spawn_reader(child.stdout.take().map(|o| Box::new(o) as _));
-    let stderr = spawn_reader(child.stderr.take().map(|e| Box::new(e) as _));
+    let overflow = Arc::new(AtomicBool::new(false));
+    // stderr's overflow is never acted on: it only feeds an error message.
+    let ignored = Arc::new(AtomicBool::new(false));
+    let spawn_reader =
+        |r: Option<Box<dyn std::io::Read + Send>>, cap: usize, flag: &Arc<AtomicBool>| {
+            let kept = Arc::new(Mutex::new(Vec::new()));
+            if let Some(r) = r {
+                let (kept, tx, flag) = (Arc::clone(&kept), done_tx.clone(), Arc::clone(flag));
+                std::thread::spawn(move || {
+                    keep_prefix(r, cap, &kept, &flag);
+                    let _ = tx.send(());
+                });
+            } else {
+                let _ = done_tx.send(());
+            }
+            kept
+        };
+    let stdout = spawn_reader(
+        child.stdout.take().map(|o| Box::new(o) as _),
+        stdout_cap,
+        &overflow,
+    );
+    let stderr = spawn_reader(
+        child.stderr.take().map(|e| Box::new(e) as _),
+        VERSION_OUTPUT_CAP,
+        &ignored,
+    );
 
-    let deadline = Instant::now() + timeout;
+    let deadline = timeout.map(|t| Instant::now() + t);
     let status = loop {
+        if stop_past_cap && overflow.load(SeqCst) {
+            stop_group(&mut child);
+            // Reaped by `stop_group`; this only reads the status it left.
+            break child
+                .wait()
+                .with_context(|| format!("failed to wait for `{bin}`"))?;
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => {
+            Ok(None) if deadline.is_none_or(|d| Instant::now() < d) => {
                 std::thread::sleep(Duration::from_millis(5));
             }
             Ok(None) => {
                 stop_group(&mut child);
                 bail!(
                     "`{bin}` did not finish within {}, so it was stopped",
-                    crate::progress::fmt(timeout)
+                    crate::progress::fmt(timeout.unwrap_or_default())
                 );
             }
             Err(e) => {
@@ -1382,31 +1457,12 @@ fn version_once(argv: &[String], site: &Site, timeout: Duration) -> Result<Strin
         }
     }
     let take = |kept: &Mutex<Vec<u8>>| kept.lock().map(|k| k.clone()).unwrap_or_default();
-    let (stdout, stderr) = (take(&stdout), take(&stderr));
-
-    // A failing command's output is an error message or a usage dump, not a
-    // version, however much of it there is.
-    if !status.success() {
-        let stderr = String::from_utf8_lossy(&stderr);
-        bail!(
-            "`{bin}` exited with {status}: {}",
-            stderr
-                .lines()
-                .map(str::trim)
-                .rfind(|l| !l.is_empty())
-                .unwrap_or("(no output)")
-        );
-    }
-    let first = |bytes: &[u8]| {
-        String::from_utf8_lossy(bytes)
-            .lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty())
-            .map(str::to_string)
-    };
-    first(&stdout)
-        .or_else(|| first(&stderr))
-        .with_context(|| format!("`{bin}` printed nothing"))
+    Ok(Captured {
+        status,
+        stdout: take(&stdout),
+        stderr: take(&stderr),
+        overflowed: overflow.load(SeqCst),
+    })
 }
 
 /// `ok` applies to the subject under valgrind: cachegrind exits with its
@@ -1798,7 +1854,16 @@ mod tests {
         let err = format!("{:#}", sh("echo 'bundle: 12 kB'").unwrap_err());
         assert!(err.contains("not one number"), "{err}");
         let err = format!("{:#}", sh("yes 1 | head -c 4096").unwrap_err());
-        assert!(err.contains("4096 bytes"), "{err}");
+        assert!(err.contains("more than 1024 bytes"), "{err}");
+        // Exactly at the cap is still judged as output, not as too much.
+        let err = format!("{:#}", sh("yes 1 | head -c 1024").unwrap_err());
+        assert!(err.contains("not one number"), "{err}");
+        // A command that never stops printing is stopped at the cap, not
+        // left to fill memory or a disk; `exec` so it is the command itself.
+        let start = Instant::now();
+        let err = format!("{:#}", sh("exec yes 1").unwrap_err());
+        assert!(err.contains("so it was stopped"), "{err}");
+        assert!(start.elapsed() < Duration::from_secs(4));
         // Something left running in the background holding stdout open must
         // not hold up the run.
         let start = Instant::now();
@@ -1853,13 +1918,22 @@ mod tests {
         );
         let kept = Mutex::new(Vec::new());
         let mut src = std::io::Cursor::new(vec![7u8; 100]);
-        keep_prefix(&mut src, 10, &kept);
+        let overflow = std::sync::atomic::AtomicBool::new(false);
+        keep_prefix(&mut src, 10, &kept, &overflow);
         assert_eq!(kept.lock().unwrap().len(), 10, "only the cap is kept");
         assert_eq!(
             src.position(),
             100,
             "the rest is read, not left in the pipe"
         );
+        assert!(overflow.into_inner(), "and going past the cap is noticed");
+
+        let (kept, overflow) = (
+            Mutex::new(Vec::new()),
+            std::sync::atomic::AtomicBool::new(false),
+        );
+        keep_prefix(std::io::Cursor::new(vec![7u8; 10]), 10, &kept, &overflow);
+        assert!(!overflow.into_inner(), "exactly the cap is not past it");
     }
 
     /// A failing command that prints a lot — a usage dump after an unknown

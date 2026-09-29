@@ -103,7 +103,12 @@ struct Layer {
 /// Two fields on one table rather than a tagged enum, so the error for a
 /// table with both or neither can name the metric and say what is wrong,
 /// instead of serde's "data did not match any variant".
+///
+/// Unknown keys are refused, unlike in the tables around it: with only two
+/// keys to spell, a typo such as `fiel = "new.bin"` next to an old `file`
+/// would otherwise go on recording the old file's size without a word.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MetricDecl {
     /// A path, relative to `tak.toml`, whose size in bytes is the value.
     file: Option<String>,
@@ -1791,6 +1796,13 @@ cmd = "mycli 'two words'""#,
                 "{bad}: {msg}"
             );
         }
+        // A misspelt key is an error, not ignored beside the one it meant.
+        let err = Config::parse(
+            "[bench.a]\ncmd = \"x\"\n[bench.a.metric.size_bytes]\nfile = \"old.bin\"\nfiel = \"new.bin\"",
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("fiel"), "{err:#}");
+
         let unused = "[subject.spare]\ncmd = \"y\"\n[subject.spare.metric.Bad]\nfile = \"a\"\n[bench.a]\ncmd = \"x\"";
         let err = Config::parse(unused).unwrap_err();
         assert!(format!("{err:#}").contains("subject.spare"), "{err:#}");

@@ -2006,7 +2006,10 @@ cmd = ["sh", "-c", "echo ran >> log; echo 1"]
     let out = p.run(&["--dry-run"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let file = p.path("target/release/mycli");
+    // Canonical, because tak finds tak.toml from its working directory, which
+    // the OS reports resolved: on macOS the temp dir is under /var, a symlink
+    // to /private/var, and the plan names the /private one.
+    let file = p.dir.canonicalize().unwrap().join("target/release/mycli");
     assert!(
         stdout.contains(&format!("metric   binary_bytes  file {}", file.display())),
         "{stdout}"
