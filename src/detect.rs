@@ -51,23 +51,21 @@ pub enum Cutoff {
 
 /// Decide whether the walk was cut short, and by what.
 ///
-/// `listed` is how many commits `rev-list` returned when asked for at most
-/// `limit`. Returning exactly `limit` means it stopped because it was told to,
-/// so history continues past the walk. Fewer means it reached the end of the
-/// history this checkout has — the root, or a shallow clone's boundary, which
-/// only `shallow` can tell apart. A window that filled was cut short by
-/// neither, however deep the history.
+/// `truncated` says history continued past [`SCAN_LIMIT`] — see [`gather`]
+/// for how that is known rather than guessed. Otherwise the walk reached the
+/// end of the history this checkout has: the root, or a shallow clone's
+/// boundary, which only `shallow` can tell apart. A window that filled was cut
+/// short by neither, however deep the history.
 pub fn cutoff(
     recorded: usize,
     window: usize,
-    listed: usize,
-    limit: usize,
+    truncated: bool,
     shallow: impl FnOnce() -> Result<bool>,
 ) -> Result<Option<Cutoff>> {
     if recorded >= window {
         return Ok(None);
     }
-    if listed >= limit {
+    if truncated {
         return Ok(Some(Cutoff::ScanLimit));
     }
     Ok(shallow()?.then_some(Cutoff::Shallow))
@@ -214,7 +212,13 @@ pub type Walk = Vec<(String, Vec<Record>)>;
 ///
 /// Returns the walk oldest first, plus what cut it short, if anything did.
 pub fn gather(head: &str, window: usize) -> Result<(Walk, Option<Cutoff>)> {
-    let commits = notes::rev_list(head, SCAN_LIMIT)?;
+    // One more than the limit, then drop it. Returning exactly SCAN_LIMIT is
+    // ambiguous — a history of exactly that length returns it too — and
+    // reading it as a cut-off sent people looking for recordings that did not
+    // exist. An extra commit is proof that history goes on.
+    let mut commits = notes::rev_list(head, SCAN_LIMIT + 1)?;
+    let truncated = commits.len() > SCAN_LIMIT;
+    commits.truncate(SCAN_LIMIT);
     let annotated = notes::annotated()?;
     let chosen = select(&commits, &annotated, window);
     let mut walked = Vec::with_capacity(chosen.len());
@@ -230,7 +234,7 @@ pub fn gather(head: &str, window: usize) -> Result<(Walk, Option<Cutoff>)> {
     }
     // The oldest commit rev-list reached, not the oldest one kept: the walk
     // ended there, so that is where a shallow boundary would have stopped it.
-    let cut = cutoff(recorded, window, commits.len(), SCAN_LIMIT, || {
+    let cut = cutoff(recorded, window, truncated, || {
         commits
             .last()
             .map_or(Ok(false), |oldest| notes::is_shallow_boundary(oldest))
@@ -797,16 +801,16 @@ mod tests {
     #[test]
     fn a_filled_window_is_never_cut_short() {
         let shallow = || -> Result<bool> { panic!("no need to ask") };
-        assert_eq!(cutoff(20, 20, 10_000, 10_000, shallow).unwrap(), None);
+        assert_eq!(cutoff(20, 20, true, shallow).unwrap(), None);
     }
 
-    /// Returning exactly as many commits as allowed means history goes on past
-    /// the walk; that has to be reported, not read as the end of the project.
+    /// History that goes on past the walk has to be reported, not read as the
+    /// end of the project.
     #[test]
     fn hitting_the_scan_limit_is_a_cutoff() {
         let shallow = || -> Result<bool> { panic!("the limit decides first") };
         assert_eq!(
-            cutoff(3, 20, 10_000, 10_000, shallow).unwrap(),
+            cutoff(3, 20, true, shallow).unwrap(),
             Some(Cutoff::ScanLimit)
         );
     }
@@ -816,10 +820,10 @@ mod tests {
     #[test]
     fn the_end_of_history_is_a_cutoff_only_when_shallow() {
         assert_eq!(
-            cutoff(3, 20, 40, 10_000, || Ok(true)).unwrap(),
+            cutoff(3, 20, false, || Ok(true)).unwrap(),
             Some(Cutoff::Shallow)
         );
-        assert_eq!(cutoff(3, 20, 40, 10_000, || Ok(false)).unwrap(), None);
+        assert_eq!(cutoff(3, 20, false, || Ok(false)).unwrap(), None);
     }
 
     #[test]

@@ -336,23 +336,17 @@ fn a_shallow_notes_fetch_is_not_a_shallow_checkout() {
     assert!(!md.contains("This checkout is shallow"), "{md}");
 }
 
-/// A previous recording further back than the scan limit is never reached.
-/// The walk must say it stopped at the limit rather than report the head's
-/// series as brand new, and the empty comparison must still fail.
-#[test]
-fn hitting_the_scan_limit_is_named_as_the_reason() {
+/// A single first-parent line of `total` empty commits, with `startup` on
+/// `gha` recorded at the root and at the tip.
+///
+/// fast-import builds them in one process; ten thousand `git commit` calls
+/// would not.
+fn linear_history(prefix: &str, total: usize, root: u64, tip: u64) -> tempfile::TempDir {
     use std::io::Write;
 
-    let dir = tempfile::Builder::new()
-        .prefix("tak-detect-limit-")
-        .tempdir()
-        .unwrap();
+    let dir = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
     let d = dir.path();
     git(d, &["init", "--quiet", "-b", "main"]);
-
-    // Two more commits than the limit, so the oldest lies past it. fast-import
-    // builds them in one process; ten thousand `git commit` calls would not.
-    let total = tak_cli::detect::SCAN_LIMIT + 2;
     let mut stream = String::new();
     for i in 1..=total {
         stream.push_str(&format!(
@@ -378,8 +372,8 @@ fn hitting_the_scan_limit_is_named_as_the_reason() {
     assert!(child.wait().unwrap().success(), "fast-import failed");
     git(d, &["reset", "--quiet", "--hard", "main"]);
 
-    let root = git(d, &["rev-list", "--max-parents=0", "HEAD"]);
-    for (rev, value) in [(root.as_str(), 1000), ("HEAD", 2000)] {
+    let first = git(d, &["rev-list", "--max-parents=0", "HEAD"]);
+    for (rev, value) in [(first.as_str(), root), ("HEAD", tip)] {
         git(
             d,
             &[
@@ -393,10 +387,39 @@ fn hitting_the_scan_limit_is_named_as_the_reason() {
             ],
         );
     }
+    dir
+}
 
-    let out = tak(d, &["detect"]);
+/// A previous recording further back than the scan limit is never reached.
+/// The walk must say it stopped at the limit rather than report the head's
+/// series as brand new, and the empty comparison must still fail. One commit
+/// past the limit is the tightest case: the root is the only one left out.
+#[test]
+fn hitting_the_scan_limit_is_named_as_the_reason() {
+    let total = tak_cli::detect::SCAN_LIMIT + 1;
+    let dir = linear_history("tak-detect-over-", total, 1000, 2000);
+
+    let out = tak(dir.path(), &["detect"]);
     let md = stdout(&out);
     assert!(!out.status.success(), "nothing was compared: {md}");
     assert!(md.contains("limit of 10,000 first-parent commits"), "{md}");
     assert!(!md.contains("This checkout is shallow"), "{md}");
+}
+
+/// A history of exactly the limit is complete: the walk reaches the root, the
+/// root's recording is compared, and nothing claims older ones were missed.
+#[test]
+fn a_history_of_exactly_the_limit_is_not_cut_short() {
+    let total = tak_cli::detect::SCAN_LIMIT;
+    let dir = linear_history("tak-detect-exact-", total, 1000, 1000);
+
+    let out = tak(dir.path(), &["detect"]);
+    let md = stdout(&out);
+    assert!(out.status.success(), "{md}");
+    assert!(
+        md.contains(&format!("Walked {total} first-parent commit(s)")),
+        "{md}"
+    );
+    assert!(!md.contains("limit of"), "{md}");
+    assert!(!md.contains("Nothing was compared"), "{md}");
 }
