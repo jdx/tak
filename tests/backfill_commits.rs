@@ -600,6 +600,57 @@ fn a_program_symlinked_out_of_the_checkout_is_not_measured() {
     assert!(repo.notes(&linked).is_empty());
 }
 
+/// A commit dated before 1970 is still recorded, and does not stop the rest
+/// of the range.
+#[test]
+fn a_commit_dated_before_1970_is_recorded() {
+    let repo = Repo::new();
+    config(&repo, "");
+    repo.write(".gitignore", "tool\ntak.toml\n");
+    repo.git(&["add", ".gitignore"]);
+    let base = repo.commit_tool(Some("v1"));
+    repo.write("tool.sh", "#!/bin/sh\necho v2\n");
+    repo.git(&["add", "tool.sh"]);
+    // `git commit` refuses a date before 1970 however GIT_COMMITTER_DATE
+    // spells it, so the commit is written by hand, as an import from
+    // another system could have.
+    let tree = repo.git(&["write-tree"]);
+    let who = "tak test <test@example.invalid> -14182940 +0000";
+    let body = format!("tree {tree}\nparent {base}\nauthor {who}\ncommitter {who}\n\nv2\n");
+    let object = repo.dir.join("commit-object");
+    std::fs::write(&object, body).unwrap();
+    let old = repo.git(&[
+        "hash-object",
+        "-t",
+        "commit",
+        "-w",
+        "--literally",
+        object.to_str().unwrap(),
+    ]);
+    std::fs::remove_file(&object).unwrap();
+    repo.git(&["update-ref", "refs/heads/main", &old]);
+    let after = repo.commit_tool(Some("v3"));
+
+    let run = repo.tak(&["--commits", &format!("{base}..main")]);
+    assert!(run.status.success(), "{}", both(&run));
+    assert_eq!(versions(&repo, &after), ["v3"], "the range carried on");
+    // Git prints no `%ct` for such a commit, so there is no date to use:
+    // the point is kept, stamped with when it was measured, and says so.
+    let recs = repo.notes(&old);
+    let rec = recs.first().unwrap_or_else(|| panic!("{}", both(&run)));
+    assert_eq!(rec.version.as_deref(), Some("v2"));
+    assert!(
+        rec.ts.starts_with("20") && rec.ts.ends_with('Z'),
+        "{}",
+        rec.ts
+    );
+    assert!(
+        both(&run).contains("recording the measurement time instead"),
+        "{}",
+        both(&run)
+    );
+}
+
 /// Start a backfill whose build records its pid and then sleeps, and wait
 /// until that build is running. Returns tak and the build's pid.
 fn start_slow_build(repo: &Repo) -> (std::process::Child, i32) {

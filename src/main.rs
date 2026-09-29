@@ -1839,13 +1839,16 @@ fn backfill_commit(
         }
     };
     let root = wt.path().join(rel);
-    // Read before building, so a date that cannot be read costs this commit
-    // and not a finished build, and never the rest of the range.
-    let committed = match tak_cli::worktree::commit_time(&p.sha) {
-        Ok(t) => t,
+    // The commit's own date, as release backfill uses the release's: this is
+    // when the code existed, which is what a series is plotted against. Git
+    // prints no `%ct` at all for a commit dated before 1970, which only an
+    // import or a hand-written object can produce; that commit still gets
+    // its measurement, stamped with when it was taken, rather than failing.
+    let ts = match tak_cli::worktree::commit_time(&p.sha) {
+        Ok(t) => rfc3339(t),
         Err(e) => {
-            println!("  not recorded — {e:#}");
-            return Ok(Outcome::NotRecorded);
+            eprintln!("  warning: {e:#}; recording the measurement time instead");
+            now_rfc3339()
         }
     };
 
@@ -1917,10 +1920,6 @@ fn backfill_commit(
             return Ok(Outcome::NotRecorded);
         }
     }
-
-    // The commit's own date, as release backfill uses the release's: this
-    // is when the code existed, which is what a series is plotted against.
-    let ts = rfc3339(committed);
     for r in &mut records {
         r.ts = ts.clone();
     }
