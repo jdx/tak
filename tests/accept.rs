@@ -132,7 +132,7 @@ fn a_trailer_accepts_only_the_benchmark_it_names() {
     assert!(stderr.contains("1 benchmark(s) regressed"), "{stderr}");
     assert!(
         stdout.contains(&format!(
-            "`startup` +10.00% (`Tak-Accept` in `{}`)",
+            "`startup` on `test` +10.00% (`Tak-Accept` in `{}`)",
             &head[..12]
         )),
         "{stdout}"
@@ -213,9 +213,24 @@ fn the_flag_accepts_without_a_trailer() {
     );
     assert!(ok, "{stdout}");
     assert!(
-        stdout.contains("`startup` +10.00% (`--accept`)"),
+        stdout.contains("`startup` on `test` +10.00% (`--accept`)"),
         "{stdout}"
     );
+}
+
+/// Benchmark names are unrestricted, so `--accept` takes each value as one
+/// exact name. Splitting it on commas left a name like this with no spelling
+/// that could accept it.
+#[test]
+fn the_flag_accepts_a_name_containing_a_comma() {
+    let dir = repo();
+    let base = commit(dir.path(), "base");
+    note(dir.path(), &base, &[("parse a,b", 1e6)]);
+    let head = commit(dir.path(), "slower");
+    note(dir.path(), &head, &[("parse a,b", 1.1e6)]);
+    let (ok, stdout, _) = compare(dir.path(), &[&base, "--accept", "parse a,b"]);
+    assert!(ok, "{stdout}");
+    assert!(stdout.contains("**1 accepted regression(s)"), "{stdout}");
 }
 
 /// Only the compared range speaks for the change. A trailer that landed before

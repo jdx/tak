@@ -62,21 +62,31 @@ impl Source {
 pub struct Acceptances(BTreeMap<String, BTreeSet<Source>>);
 
 impl Acceptances {
-    /// Add every name in a comma-separated list.
+    /// Add every name in a comma-separated list, as a trailer value is read.
     ///
-    /// Commas for both sources, so `--accept a,b` and `Tak-Accept: a, b` mean
-    /// the same thing, as do repeated flags and repeated trailers. Nothing else
-    /// is stripped: `Tak-Accept: startup (new plugin loader)` names a benchmark
-    /// that does not exist and is reported as such, which fails closed — the
-    /// real `startup` regression still gates — rather than guessing which word
-    /// was meant.
+    /// Commas, because a trailer is one line and `Tak-Accept: a, b` is how
+    /// people write two names there; repeated trailers work as well. Nothing
+    /// else is stripped: `Tak-Accept: startup (new plugin loader)` names a
+    /// benchmark that does not exist and is reported as such, which fails
+    /// closed — the real `startup` regression still gates — rather than
+    /// guessing which word was meant.
     pub fn add(&mut self, list: &str, source: Source) {
-        for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
-            self.0
-                .entry(name.to_string())
-                .or_default()
-                .insert(source.clone());
+        for name in list.split(',') {
+            self.add_name(name, source.clone());
         }
+    }
+
+    /// Add one exact name, as `--accept` gives it.
+    ///
+    /// Not split on commas. Benchmark names are unrestricted, so a name that
+    /// contains a comma would otherwise have no spelling that accepts it; the
+    /// flag is repeatable, which covers every list without needing a separator.
+    pub fn add_name(&mut self, name: &str, source: Source) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        self.0.entry(name.to_string()).or_default().insert(source);
     }
 
     /// Parse the output of [`crate::notes::trailers`]: one line per commit,
@@ -156,6 +166,16 @@ mod tests {
             "`--accept`, `Tak-Accept` in `aaaaaaaaaaaa`, `Tak-Accept` in `bbbbbbbbbbbb`"
         );
         assert_eq!(a.describe("resolve"), "`Tak-Accept` in `aaaaaaaaaaaa`");
+    }
+
+    /// The flag takes a name as given, so a benchmark whose name contains a
+    /// comma can still be accepted.
+    #[test]
+    fn a_flag_value_is_one_name() {
+        let mut a = Acceptances::default();
+        a.add_name("parse a,b", Source::Flag);
+        assert!(a.covers("parse a,b"));
+        assert_eq!(a.iter().count(), 1);
     }
 
     /// A reason written after the name is not quietly dropped. The whole value

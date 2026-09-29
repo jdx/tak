@@ -20,5 +20,5 @@ Fails when an instruction count has risen by more than `gate_pct`. Wall clock is
 
   **Default:** `origin`
 - **`--no-gate`** — Report without failing, whatever the numbers say.
-- **`--accept <BENCH>`** — Accept a regression in this benchmark: report it, but do not fail on it. Repeatable, or comma-separated. Honoured whatever `accept_trailers` says.
+- **`--accept <BENCH>`** — Accept a regression in this benchmark: report it, but do not fail on it. Repeatable; each value is one exact benchmark name. Honoured whatever `accept_trailers` says.
 - **`-h --help`** — Print help

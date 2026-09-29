@@ -208,9 +208,17 @@ jobs:
       # and here a rise is reported while an error must still fail. Whether
       # counts rose comes from the report's own gate line instead. Status:
       # 0 clean, 1 rose beyond the gate (reported), 2 the comparison failed.
+      #
+      # TAK_ACCEPT_TRAILERS=0 because tak.toml comes from the pull request's
+      # own checkout: a pull request could set `[gate] accept_trailers = true`
+      # and accept its own regression with a trailer. The environment takes
+      # precedence over the file. An accepted rise still counts as a rise
+      # below, so an acceptance can only ever turn this check neutral, never
+      # green.
       - name: Compare against the base
         env:
           BASE_SHA: ${{ steps.base.outputs.sha }}
+          TAK_ACCEPT_TRAILERS: "0"
         run: |
           set +e
           ./target/release/tak compare --no-gate "$BASE_SHA" > /tmp/tak-report.md
@@ -218,7 +226,7 @@ jobs:
           set -e
           if [ "$ran" -ne 0 ]; then
             echo 2 > /tmp/tak-gate-status
-          elif grep -q 'benchmark(s) above the .*% gate' /tmp/tak-report.md; then
+          elif grep -Eq '(benchmark|accepted regression)\(s\) above the .*% gate' /tmp/tak-report.md; then
             echo 1 > /tmp/tak-gate-status
           else
             echo 0 > /tmp/tak-gate-status

@@ -132,7 +132,7 @@ Fails when an instruction count has risen by more than `gate_pct`. Wall clock is
         arg <REMOTE>
     }
     flag --no-gate help="Report without failing, whatever the numbers say."
-    flag --accept help="Accept a regression in this benchmark: report it, but do not fail on it. Repeatable, or comma-separated. Honoured whatever `accept_trailers` says." var=#true {
+    flag --accept help="Accept a regression in this benchmark: report it, but do not fail on it. Repeatable; each value is one exact benchmark name. Honoured whatever `accept_trailers` says." var=#true {
         arg <BENCH>
     }
     flag "-h --help" help="Print help" action=help builtin=#true

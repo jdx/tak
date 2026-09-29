@@ -213,6 +213,9 @@ jobs:
       - name: Compare and gate
         env:
           BASE_SHA: ${{ steps.base.outputs.sha }}
+          # tak.toml comes from the pull request, which could otherwise turn on
+          # `accept_trailers` and accept its own regression with a trailer.
+          TAK_ACCEPT_TRAILERS: "0"
         run: |
           set +e
           tak compare "$BASE_SHA" > /tmp/tak-report.md

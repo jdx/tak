@@ -182,8 +182,8 @@ enum Cmd {
         #[usage(long)]
         no_gate: bool,
         /// Accept a regression in this benchmark: report it, but do not fail
-        /// on it. Repeatable, or comma-separated. Honoured whatever
-        /// `accept_trailers` says.
+        /// on it. Repeatable; each value is one exact benchmark name. Honoured
+        /// whatever `accept_trailers` says.
         #[usage(long, value_name = "BENCH")]
         accept: Vec<String>,
     },
@@ -1035,8 +1035,8 @@ fn cmd_compare(
     let head_sha = notes::rev_parse(&rev).with_context(|| format!("cannot resolve {rev}"))?;
 
     let mut accepted = Acceptances::default();
-    for list in &accept_flags {
-        accepted.add(list, accept::Source::Flag);
+    for name in &accept_flags {
+        accepted.add_name(name, accept::Source::Flag);
     }
     // Read either way; only honoured when the setting says so. The commits
     // under comparison are the change being gated, so by default their own

@@ -86,8 +86,8 @@ regress:
 tak compare "$BASE_SHA" --accept startup
 ```
 
-`--accept` is repeatable and also takes a comma-separated list. It accepts only the benchmarks
-it names. Every other benchmark still gates. An acceptance names a benchmark and covers each of
+`--accept` is repeatable. Each value is one exact benchmark name and is not split on commas,
+so it can accept any name. It accepts only the benchmarks it names. Every other benchmark still gates. An acceptance names a benchmark and covers each of
 its tools and runner classes. It has no size limit.
 
 An accepted regression still appears in the report. Its row is marked `(accepted)`, and a
@@ -107,16 +107,21 @@ to accept the regression. For example, a GitHub Actions step can pass every
       - name: Compare and gate
         env:
           BASE_SHA: ${{ steps.base.outputs.sha }}
-          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          TAK_ACCEPT_TRAILERS: "0"
         run: |
           accept=()
-          for label in $LABELS; do
+          while IFS= read -r label; do
             case "$label" in
               tak-accept:*) accept+=(--accept "${label#tak-accept:}") ;;
             esac
-          done
+          done < <(jq -r '.[]' <<<"$LABELS")
           tak compare "$BASE_SHA" "${accept[@]}"
 ```
+
+The labels are passed as JSON and read one per line, so a label for a benchmark whose name
+contains a space stays whole. `TAK_ACCEPT_TRAILERS: "0"` stops a pull request from turning
+trailers on in its own `tak.toml`; see below.
 
 To re-run the gate when a label changes, add `labeled` and `unlabeled` to the workflow's
 `pull_request` types. Only people with triage or write access to the repository can apply

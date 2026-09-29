@@ -454,9 +454,12 @@ fn table(c: &Comparison, trend: &Trend, gate_pct: f64) -> String {
             accepted.len(),
             accepted
                 .iter()
+                // The runner too: one benchmark accepted on two runner classes
+                // is two entries, and without it they would read identically.
                 .map(|ch| format!(
-                    "`{}` {} ({})",
-                    series_name(&ch.bench, &ch.tool),
+                    "{} on {} {} ({})",
+                    code(&series_name(&ch.bench, &ch.tool)),
+                    code(&ch.runner),
                     signed_pct(ch.pct()),
                     c.accepted.describe(&ch.bench)
                 ))
@@ -466,6 +469,27 @@ fn table(c: &Comparison, trend: &Trend, gate_pct: f64) -> String {
     }
 
     out
+}
+
+/// `text` as a Markdown code span, whatever it contains.
+///
+/// Acceptance names come from commit messages and flags, not from a validated
+/// config, so a backtick in one is plausible; a single-backtick span would close
+/// early and garble the rest of the line. CommonMark allows a fence of any
+/// length that does not occur inside, padded with spaces when the text starts
+/// or ends with a backtick.
+fn code(text: &str) -> String {
+    let mut longest = 0;
+    let mut run = 0;
+    for ch in text.chars() {
+        run = if ch == '`' { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    if longest == 0 {
+        return format!("`{text}`");
+    }
+    let fence = "`".repeat(longest + 1);
+    format!("{fence} {text} {fence}")
 }
 
 /// A series' benchmark name, plus its tool when that is not the project itself.
@@ -489,7 +513,7 @@ fn ignored_trailers(c: &Comparison) -> String {
         crate::accept::TRAILER,
         c.ignored_trailers
             .iter()
-            .map(|(bench, _)| format!("`{bench}` ({})", c.ignored_trailers.describe(bench)))
+            .map(|(bench, _)| format!("{} ({})", code(bench), c.ignored_trailers.describe(bench)))
             .collect::<Vec<_>>()
             .join(", ")
     )
@@ -506,7 +530,7 @@ fn unused_acceptances(c: &Comparison, gate_pct: f64) -> String {
     let mut quiet = Vec::new();
     let mut unknown = Vec::new();
     for (bench, _) in c.accepted.iter() {
-        let entry = format!("`{bench}` ({})", c.accepted.describe(bench));
+        let entry = format!("{} ({})", code(bench), c.accepted.describe(bench));
         if !c.changes.iter().any(|ch| ch.bench == bench) {
             unknown.push(entry);
         } else if !c
@@ -900,7 +924,7 @@ mod tests {
         let md = markdown(&c, &Trend::new(), 1.0, false);
         assert!(md.contains("**+10.00%** (accepted)"), "{md}");
         assert!(
-            md.contains("**1 accepted regression(s) above the 1% gate, not failing it:** `a` +10.00% (`Tak-Accept` in `0123456789ab`)"),
+            md.contains("**1 accepted regression(s) above the 1% gate, not failing it:** `a` on `gha` +10.00% (`Tak-Accept` in `0123456789ab`)"),
             "{md}"
         );
         assert!(!md.contains("No instruction-count regression"), "{md}");
@@ -925,7 +949,7 @@ mod tests {
             md.contains("**1 benchmark(s) above the 1% gate:** `b` +20.00%"),
             "{md}"
         );
-        assert!(md.contains("`a` +10.00% (`--accept`)"), "{md}");
+        assert!(md.contains("`a` on `gha` +10.00% (`--accept`)"), "{md}");
     }
 
     /// One name covers every tool and runner the benchmark was measured with.
@@ -951,7 +975,7 @@ mod tests {
         assert_eq!(c.regressions(1.0).len(), 3);
         assert!(c.failures(1.0).is_empty());
         let md = markdown(&c, &Trend::new(), 1.0, false);
-        assert!(md.contains("`a (other)` +100.00%"), "{md}");
+        assert!(md.contains("`a (other)` on `gha` +100.00%"), "{md}");
     }
 
     /// An acceptance that accepted nothing is reported: stale, it would
@@ -1031,6 +1055,37 @@ mod tests {
             "{md}"
         );
         assert!(!md.contains("(accepted)"), "{md}");
+    }
+
+    /// A backtick in a name must not close the code span it is shown in.
+    #[test]
+    fn a_name_with_backticks_keeps_its_code_span() {
+        assert_eq!(code("startup"), "`startup`");
+        assert_eq!(code("a`b"), "`` a`b ``");
+        assert_eq!(code("``x"), "``` ``x ```");
+        let c = compare(&[], &[]).with_accepted(accepting("we`ird", Source::Flag));
+        let md = markdown(&c, &Trend::new(), 1.0, false);
+        assert!(md.contains("`` we`ird `` (`--accept`)"), "{md}");
+    }
+
+    /// Two runner classes of one accepted benchmark are two entries, and the
+    /// verdict has to say which is which.
+    #[test]
+    fn an_accepted_entry_names_its_runner() {
+        let c = compare(
+            &[
+                rec("a", "gha", 1_000_000.0, 10.0),
+                rec("a", "arm", 1_000_000.0, 10.0),
+            ],
+            &[
+                rec("a", "gha", 1_100_000.0, 10.0),
+                rec("a", "arm", 1_200_000.0, 10.0),
+            ],
+        )
+        .with_accepted(accepting("a", Source::Flag));
+        let md = markdown(&c, &Trend::new(), 1.0, false);
+        assert!(md.contains("`a` on `arm` +20.00% (`--accept`)"), "{md}");
+        assert!(md.contains("`a` on `gha` +10.00% (`--accept`)"), "{md}");
     }
 
     #[test]
