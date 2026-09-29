@@ -339,9 +339,9 @@ measurement can fail for reasons that do not repeat. The command fails only when
 ends with no record at all.
 
 Build output goes to a file in the temporary directory, and a failed build shows its last 20
-lines. `[build].dir`, and a benchmark's `dir` inside the checkout, must resolve inside the
-checkout. A commit whose tree has a symlink there that points elsewhere is reported and not
-built.
+lines. `[build].dir`, and a benchmark's `dir` or program inside the checkout, must resolve
+inside the checkout once symlinks are followed. A commit whose tree has a symlink at one of
+those paths that points elsewhere is reported and not recorded.
 
 The checkouts are removed when tak finishes, fails, or is stopped with Ctrl-C, SIGTERM or
 SIGHUP. On Unix the build runs in its own process group, and tak kills that group before

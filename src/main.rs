@@ -1812,10 +1812,12 @@ fn backfill_commit(
 /// Without this, the failure surfaces as a spawn error that says nothing
 /// about the file having been read from a newer commit than the tree.
 ///
-/// A `dir` inside the checkout must also stay inside it once symlinks are
-/// resolved, for the reason [`tak_cli::worktree::Worktree::check_contains`]
-/// gives. One outside it, such as an absolute fixture path from a template,
-/// is the user's choice and is left alone.
+/// A `dir` or program inside the checkout must also stay inside it once
+/// symlinks are resolved, for the reason
+/// [`tak_cli::worktree::Worktree::check_contains`] gives: a committed
+/// symlink at the program's path would otherwise run a binary from outside
+/// the commit being measured. One named outside the checkout, such as an
+/// absolute path from a template, is the user's choice and is left alone.
 fn check_inputs(subjects: &[Subject], wt: &tak_cli::worktree::Worktree) -> Option<String> {
     let shown = |p: &Path| p.strip_prefix(wt.path()).unwrap_or(p).display().to_string();
     for s in subjects {
@@ -1823,6 +1825,14 @@ fn check_inputs(subjects: &[Subject], wt: &tak_cli::worktree::Worktree) -> Optio
             && d.starts_with(wt.path())
             && d.exists()
             && let Err(e) = wt.check_contains(d)
+        {
+            return Some(format!("{e:#}"));
+        }
+        let program = Path::new(&s.cmd[0]);
+        if program.is_absolute()
+            && program.starts_with(wt.path())
+            && let Some(found) = spawned_path(program)
+            && let Err(e) = wt.check_contains(&found)
         {
             return Some(format!("{e:#}"));
         }
@@ -1837,8 +1847,10 @@ fn check_inputs(subjects: &[Subject], wt: &tak_cli::worktree::Worktree) -> Optio
                 shown(d)
             ));
         }
-        let program = Path::new(&s.cmd[0]);
-        if program.is_absolute() && program.starts_with(wt.path()) && !program_exists(program) {
+        if program.is_absolute()
+            && program.starts_with(wt.path())
+            && spawned_path(program).is_none()
+        {
             return Some(format!(
                 "{} does not exist at this commit after the build",
                 shown(program)
@@ -1848,19 +1860,21 @@ fn check_inputs(subjects: &[Subject], wt: &tak_cli::worktree::Worktree) -> Optio
     None
 }
 
-/// Whether spawning `program` would find it. On Windows that includes the
-/// executable suffix: `./target/release/mycli` runs `mycli.exe`, and a check
-/// for the bare name would call every Windows build missing.
-fn program_exists(program: &Path) -> bool {
+/// The file spawning `program` would run, if there is one. On Windows that
+/// includes the executable suffix: `./target/release/mycli` runs `mycli.exe`,
+/// and a check for the bare name would call every Windows build missing.
+fn spawned_path(program: &Path) -> Option<std::path::PathBuf> {
     if program.exists() {
-        return true;
+        return Some(program.to_path_buf());
     }
     let suffix = std::env::consts::EXE_SUFFIX;
-    !suffix.is_empty() && program.extension().is_none() && {
-        let mut with = program.as_os_str().to_owned();
-        with.push(suffix);
-        Path::new(&with).exists()
+    if suffix.is_empty() || program.extension().is_some() {
+        return None;
     }
+    let mut with = program.as_os_str().to_owned();
+    with.push(suffix);
+    let with = std::path::PathBuf::from(with);
+    with.exists().then_some(with)
 }
 
 /// Resolve settings from the CLI layer, the environment, and `tak.toml`.
@@ -2167,13 +2181,10 @@ mod tests {
     fn a_built_program_is_found_with_the_platform_suffix() {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("mycli");
-        assert!(!program_exists(&bin));
-        std::fs::write(
-            format!("{}{}", bin.display(), std::env::consts::EXE_SUFFIX),
-            b"",
-        )
-        .unwrap();
-        assert!(program_exists(&bin));
+        assert_eq!(spawned_path(&bin), None);
+        let file = format!("{}{}", bin.display(), std::env::consts::EXE_SUFFIX);
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(spawned_path(&bin), Some(std::path::PathBuf::from(file)));
     }
 
     /// An explicit class wins over the derived one. This is how a project

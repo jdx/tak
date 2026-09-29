@@ -572,6 +572,34 @@ fn a_build_dir_symlinked_out_of_the_checkout_is_refused() {
     );
 }
 
+/// Likewise a program: a committed symlink at the path the current tak.toml
+/// runs would measure a binary from outside the commit.
+#[test]
+fn a_program_symlinked_out_of_the_checkout_is_not_measured() {
+    let repo = Repo::new();
+    repo.write(".gitignore", "tak.toml\n");
+    repo.git(&["add", ".gitignore"]);
+    let base = repo.commit_tool(Some("v1"));
+    let outside = repo.tmp.parent().unwrap().join("outside-tool");
+    std::fs::write(&outside, "#!/bin/sh\necho outside\n").unwrap();
+    make_executable(&outside);
+    std::os::unix::fs::symlink(&outside, repo.dir.join("tool")).unwrap();
+    repo.git(&["add", "tool"]);
+    let linked = repo.commit_tool(Some("v2"));
+    repo.write(
+        "tak.toml",
+        "[build]\ncmd = [\"true\"]\n[bench.startup]\ncmd = [\"./tool\"]\nruns = 2\nwarmup = 0\n",
+    );
+
+    let out = repo.tak(&["--commits", &format!("{base}..main")]);
+    assert!(
+        stdout(&out).contains("tool leads outside the checkout"),
+        "{}",
+        both(&out)
+    );
+    assert!(repo.notes(&linked).is_empty());
+}
+
 /// Start a backfill whose build records its pid and then sleeps, and wait
 /// until that build is running. Returns tak and the build's pid.
 fn start_slow_build(repo: &Repo) -> (std::process::Child, i32) {
