@@ -225,3 +225,30 @@ fn merged_branches_are_not_walked() {
     assert!(out.status.success(), "{md}");
     assert!(!md.contains("50,000"), "the side branch leaked in: {md}");
 }
+
+/// `actions/checkout` fetches one commit by default. The walk then finds
+/// nothing earlier, which on its own reads exactly like a first recording; the
+/// report has to say the checkout was the reason.
+#[test]
+fn a_shallow_checkout_is_named_as_the_reason() {
+    let (dir, _) = repo();
+    let d = dir.path();
+    let url = format!("file://{}", d.display());
+    git(d, &["clone", "--quiet", "--depth", "2", &url, "shallow"]);
+    let shallow = d.join("shallow");
+    git(
+        &shallow,
+        &[
+            "fetch",
+            "--quiet",
+            "origin",
+            "+refs/notes/tak:refs/notes/tak",
+        ],
+    );
+    let md = stdout(&tak(&shallow, &["detect"]));
+    assert!(md.contains("This checkout is shallow"), "{md}");
+
+    // A full clone is not warned about.
+    let md = stdout(&tak(d, &["detect"]));
+    assert!(!md.contains("shallow"), "{md}");
+}
