@@ -1268,81 +1268,80 @@ fn version_once(argv: &[String], site: &Site, timeout: Duration) -> Result<Strin
         .with_context(|| format!("`{bin}` printed nothing"))
 }
 
-/// How much of a valgrind run's stderr to keep. Its summary comes last, after
-/// whatever the subject wrote, so this is a tail; a megabyte holds any
-/// summary with room to spare, where keeping all of a chatty subject's
-/// stderr would not be bounded at all.
-const VALGRIND_STDERR_TAIL: usize = 1 << 20;
+/// How much of valgrind's log to read. Only valgrind writes it, so it holds
+/// a banner and a summary and is a few kilobytes; the cap is there so a
+/// tool that turned verbose could not make tak read without limit.
+const VALGRIND_LOG_CAP: u64 = 1 << 20;
 
-/// Read `r` to the end, keeping only its last `cap` bytes in `kept`. Like
-/// [`keep_prefix`], it drains everything, so the writer never blocks on a
-/// full pipe.
-fn keep_suffix(mut r: impl std::io::Read, cap: usize, kept: &Mutex<Vec<u8>>) {
-    let mut buf = [0u8; 8192];
-    loop {
-        match r.read(&mut buf) {
-            Ok(0) => return,
-            Ok(n) => {
-                let Ok(mut k) = kept.lock() else { return };
-                k.extend_from_slice(&buf[..n]);
-                // Trimmed in steps of `cap`, not on every read, so a flood
-                // costs amortised constant work per byte.
-                if k.len() > 2 * cap {
-                    let excess = k.len() - cap;
-                    k.drain(..excess);
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => return,
-        }
-    }
-}
-
-/// Run a valgrind command to completion: its exit status, its pid, and the
-/// tail of its stderr, where the tool writes its summary.
+/// Run `cmd` under valgrind with `tool` options to completion, returning its
+/// exit status and valgrind's own log, where the tool's summary is.
 ///
-/// The run is over when the process spawned here exits, not when its stderr
-/// closes. A subject that starts something in the background — `sleep 600
-/// &`, a daemon, a build server — leaves it holding the write end, and
-/// reading to EOF waited for that process instead, hanging the run. So the
-/// pipe is read on a thread that is never joined, as [`version_once`] does:
-/// once valgrind exits, what it wrote is already in the pipe, and after a
-/// short grace the tail read so far is taken. The thread goes on draining
-/// into its bounded tail until the leftover process closes the pipe, so the
-/// process is neither blocked nor killed by SIGPIPE, and nothing it writes
-/// accumulates anywhere: not in memory past the cap, and not on disk.
+/// valgrind writes its messages to a file of its own (`--log-file`), and the
+/// subject's stdout and stderr go to `/dev/null`, as they do for timed
+/// samples. Mixing the two on one stream, as valgrind does by default,
+/// caused every problem a subject's background process could cause: reading
+/// the stream to EOF waited for that process and hung the run; a file for
+/// it grew for as long as the process logged; a bounded tail of it could
+/// have the summary pushed out by the process's output; and the subject
+/// could print a line that read as the summary. With the log apart, nothing
+/// the subject leaves behind can reach it, and the run is over when the
+/// process spawned here exits.
 ///
-/// A pipe rather than the temporary file [`untimed`] uses, because a file
-/// is exactly where a leftover process that keeps logging would grow without
-/// bound, and because instruction counts are the gated metric: they should
-/// not start failing, and a gated benchmark quietly become timing-only,
-/// because a temporary directory is full or read-only.
+/// `%p` puts valgrind's pid in the name, which is the subject's pid:
+/// valgrind replaces itself with the tool rather than forking. A process the
+/// subject forks without exec stays under valgrind and writes its own
+/// `log.<pid>`, so the one read is the subject's alone. A program the
+/// subject execs is not traced (`--trace-children` is off) and writes
+/// nothing there.
 ///
-/// The pid is the subject's: valgrind replaces itself with the tool rather
-/// than forking, so its `==PID==` prefix is the pid spawned here.
-fn under_valgrind(mut c: Command) -> Result<(std::process::ExitStatus, u32, String)> {
-    let mut child = c
+/// The directory is only for this log, and is removed when the run is over.
+/// Creating it can fail — a full or read-only temporary directory — and that
+/// is an error naming it, which the caller reports as a failed measurement,
+/// never as valgrind being absent.
+fn under_valgrind(
+    tool: &[&str],
+    cmd: &[String],
+    site: &Site,
+) -> Result<(std::process::ExitStatus, String)> {
+    use std::io::Read;
+    let dir = tempfile::tempdir().context("failed to create a directory for valgrind's log")?;
+    let mut argv: Vec<String> = std::iter::once("valgrind")
+        .chain(tool.iter().copied())
+        .map(String::from)
+        .collect();
+    argv.push(format!(
+        "--log-file={}",
+        dir.path().join("log.%p").display()
+    ));
+    argv.extend_from_slice(cmd);
+    let mut child = command(&argv, site)?
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .context("failed to run valgrind")?;
     let pid = child.id();
-    let kept = Arc::new(Mutex::new(Vec::new()));
-    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
-    if let Some(err) = child.stderr.take() {
-        let kept = Arc::clone(&kept);
-        std::thread::spawn(move || {
-            keep_suffix(err, VALGRIND_STDERR_TAIL, &kept);
-            let _ = done_tx.send(());
-        });
-    }
     let status = child.wait().context("failed to run valgrind")?;
-    // Normally EOF arrives with the exit; only a leftover holding the pipe
-    // makes this wait out the grace.
-    let _ = done_rx.recv_timeout(VERSION_OUTPUT_GRACE);
-    let tail = kept.lock().map(|k| k.clone()).unwrap_or_default();
-    Ok((status, pid, String::from_utf8_lossy(&tail).into_owned()))
+    // No log at all is what a valgrind that could not start the subject
+    // leaves: its launcher reports that on stderr, before the log is open.
+    // The caller's "no summary" error says so rather than this one guessing.
+    let mut log = Vec::new();
+    if let Ok(f) = std::fs::File::open(dir.path().join(format!("log.{pid}"))) {
+        f.take(VALGRIND_LOG_CAP)
+            .read_to_end(&mut log)
+            .context("failed to read valgrind's log")?;
+    }
+    Ok((status, String::from_utf8_lossy(&log).into_owned()))
+}
+
+/// The last line of valgrind's log with something on it past the `==PID==`
+/// prefix, for an error that has no summary to show. valgrind ends its
+/// output with a bare `==PID==` line, which says nothing.
+fn last_line(log: &str) -> &str {
+    log.lines()
+        .map(|l| valgrind_line(l).unwrap_or(l).trim())
+        .rfind(|l| !l.is_empty())
+        .unwrap_or("(valgrind wrote no log; it may not have been able to start the command)")
 }
 
 /// `ok` applies to the subject under valgrind: cachegrind exits with its
@@ -1362,29 +1361,28 @@ fn count(
         if let Some(p) = prepare {
             prepare_once(p, site)?;
         }
-        let mut argv: Vec<String> = [
-            "valgrind",
-            "--tool=cachegrind",
-            "--cache-sim=no",
-            "--branch-sim=no",
-            "--cachegrind-out-file=/dev/null",
-        ]
-        .map(String::from)
-        .to_vec();
-        argv.extend_from_slice(cmd);
-        let (status, _, stderr) = under_valgrind(command(&argv, site)?)?;
+        let (status, log) = under_valgrind(
+            &[
+                "--tool=cachegrind",
+                "--cache-sim=no",
+                "--branch-sim=no",
+                "--cachegrind-out-file=/dev/null",
+            ],
+            cmd,
+            site,
+        )?;
 
-        // cachegrind writes its summary to stderr as e.g. "I refs:  48,349,132".
+        // cachegrind writes its summary to its log as e.g. "I refs:  48,349,132".
         let bin = cmd.first().map(String::as_str).unwrap_or("(empty command)");
         accepted(bin, status, ok, " under valgrind")?;
-        match parse_irefs(&stderr) {
+        match parse_irefs(&log) {
             Some(n) => samples.push(n),
             // Valgrind is installed but produced no summary — a real failure,
             // not the same thing as valgrind being absent. Reporting it as
             // absent sends people off installing something they already have.
             None => bail!(
                 "valgrind ran but emitted no `I refs` summary: {}",
-                stderr.lines().last().unwrap_or("(no output)").trim()
+                last_line(&log)
             ),
         }
     }
@@ -1530,17 +1528,14 @@ fn allocations(
         // The profile DHAT would write is for its viewer, and tak reads only
         // the summary; without this every run leaves a `dhat.out.PID` in the
         // subject's directory.
-        let mut argv: Vec<String> = ["valgrind", "--tool=dhat", "--dhat-out-file=/dev/null"]
-            .map(String::from)
-            .to_vec();
-        argv.extend_from_slice(cmd);
-        let (status, pid, stderr) = under_valgrind(command(&argv, site)?)?;
+        let (status, log) =
+            under_valgrind(&["--tool=dhat", "--dhat-out-file=/dev/null"], cmd, site)?;
         accepted(bin, status, ok, " under valgrind")?;
-        match parse_dhat(&stderr, pid) {
+        match parse_dhat(&log) {
             Some(h) => runs.push(h),
             None => bail!(
                 "valgrind ran but emitted no DHAT summary: {}",
-                stderr.lines().last().unwrap_or("(no output)").trim()
+                last_line(&log)
             ),
         }
     }
@@ -1561,24 +1556,24 @@ fn allocations(
     }))
 }
 
-/// Extract DHAT's summary from its stderr, e.g.
+/// Extract DHAT's summary from valgrind's log, e.g.
 ///
 /// ```text
 /// ==8== Total:     4,140 bytes in 3 blocks
 /// ==8== At t-gmax: 4,140 bytes in 3 blocks
 /// ```
 ///
-/// Only lines carrying valgrind's own `==PID==` prefix count. The subject's
-/// stderr arrives on the same stream, and a subject printing "Total: 5 bytes
-/// in 1 blocks" — a download progress line, a test summary — must not be
-/// read as the measurement. The format is the one valgrind 3.15 introduced
-/// with `--tool=dhat`; before that it was `exp-dhat`, which no longer exists.
-fn parse_dhat(stderr: &str, pid: u32) -> Option<Heap> {
-    let prefix = format!("=={pid}==");
+/// Only lines with valgrind's `==PID==` prefix count. The log holds nothing
+/// else when it is written by [`under_valgrind`], but the summary's own
+/// words are too ordinary — "Total: 5 bytes in 1 blocks" could be any
+/// progress line — to match wherever they appear. The format is the one
+/// valgrind 3.15 introduced with `--tool=dhat`; before that it was
+/// `exp-dhat`, which no longer exists.
+fn parse_dhat(log: &str) -> Option<Heap> {
     let field = |name: &str| {
-        let rest = stderr
+        let rest = log
             .lines()
-            .filter_map(|l| l.strip_prefix(prefix.as_str()))
+            .filter_map(valgrind_line)
             .find_map(|l| l.trim_start().strip_prefix(name))?;
         let (bytes, rest) = rest.trim().split_once(" bytes in ")?;
         let blocks = rest.split_whitespace().next()?;
@@ -1591,6 +1586,13 @@ fn parse_dhat(stderr: &str, pid: u32) -> Option<Heap> {
         bytes,
         peak_bytes,
     })
+}
+
+/// A line of valgrind's own output, without its `==PID==` prefix.
+fn valgrind_line(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("==")?;
+    let (pid, rest) = rest.split_once("==")?;
+    (!pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit())).then_some(rest)
 }
 
 /// A count as valgrind prints it, with commas every three digits.
@@ -1632,7 +1634,7 @@ git version 2.43.0
     #[test]
     fn parses_a_dhat_summary() {
         assert_eq!(
-            parse_dhat(DHAT_3_22, 9),
+            parse_dhat(DHAT_3_22),
             Some(Heap {
                 blocks: 31,
                 bytes: 7_119,
@@ -1648,7 +1650,7 @@ git version 2.43.0
         let s = "==21== Total:     2,626,313 bytes in 2,833 blocks\n\
                  ==21== At t-gmax: 1,185,686 bytes in 1,661 blocks\n";
         assert_eq!(
-            parse_dhat(s, 21),
+            parse_dhat(s),
             Some(Heap {
                 blocks: 2_833,
                 bytes: 2_626_313,
@@ -1657,35 +1659,31 @@ git version 2.43.0
         );
     }
 
-    /// A subject's own stderr shares the stream. Its lines carry no
-    /// `==PID==` prefix, or not valgrind's, and are never the measurement.
+    /// Only valgrind's own lines are read: a line without its `==PID==`
+    /// prefix is never the measurement, however much it looks like one.
     #[test]
-    fn a_subject_printing_a_lookalike_summary_is_ignored() {
+    fn only_valgrinds_own_lines_are_read() {
         let s = "Total: 5 bytes in 1 blocks\n\
-                 ==99== Total:     6 bytes in 2 blocks\n\
-                 ==99== At t-gmax: 6 bytes in 2 blocks\n\
                  ==12== \n\
                  ==12== Total:     8,748 bytes in 17 blocks\n\
                  ==12== At t-gmax: 8,748 bytes in 17 blocks\n";
-        assert_eq!(parse_dhat(s, 12).unwrap().blocks, 17);
-        assert_eq!(parse_dhat("Total: 5 bytes in 1 blocks\n", 12), None);
+        assert_eq!(parse_dhat(s).unwrap().blocks, 17);
+        assert_eq!(
+            parse_dhat("Total: 5 bytes in 1 blocks\nAt t-gmax: 5 bytes in 1 blocks\n"),
+            None
+        );
+        assert_eq!(valgrind_line("==x== Total:"), None);
+        assert_eq!(valgrind_line("==== Total:"), None);
     }
 
     #[test]
     fn a_missing_or_truncated_dhat_summary_is_none() {
-        assert_eq!(
-            parse_dhat("valgrind: /nonexistent: No such file or directory", 1),
-            None
-        );
+        assert_eq!(parse_dhat(""), None);
         // A run that died before the summary's second line.
-        assert_eq!(
-            parse_dhat("==3== Total:     1 bytes in 1 blocks\n", 3),
-            None
-        );
+        assert_eq!(parse_dhat("==3== Total:     1 bytes in 1 blocks\n"), None);
         assert_eq!(
             parse_dhat(
-                "==3== Total:     lots bytes in 1 blocks\n==3== At t-gmax: 1 bytes in 1 blocks\n",
-                3
+                "==3== Total:     lots bytes in 1 blocks\n==3== At t-gmax: 1 bytes in 1 blocks\n"
             ),
             None
         );
@@ -1993,25 +1991,6 @@ git version 2.43.0
             src.position(),
             100,
             "the rest is read, not left in the pipe"
-        );
-    }
-
-    /// A valgrind run keeps the end of its stderr, where the summary is,
-    /// however much came before it, and the buffer stays bounded.
-    #[test]
-    fn a_suffix_keeps_the_end_of_a_flood() {
-        let mut flood = vec![b'x'; 100_000];
-        flood.extend_from_slice(b"summary");
-        let kept = Mutex::new(Vec::new());
-        let mut src = std::io::Cursor::new(flood);
-        keep_suffix(&mut src, 10, &kept);
-        let k = kept.lock().unwrap();
-        assert!(k.len() <= 20, "bounded: {}", k.len());
-        assert!(k.ends_with(b"summary"), "{:?}", String::from_utf8_lossy(&k));
-        assert_eq!(
-            src.position(),
-            100_007,
-            "all of it read, none left in the pipe"
         );
     }
 

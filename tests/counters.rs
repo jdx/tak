@@ -413,22 +413,24 @@ fn a_background_process_holding_stderr_does_not_hang_valgrind_runs() {
     );
 }
 
-/// A leftover that keeps writing to the stderr it inherited neither holds
-/// up the valgrind runs nor hides their summaries behind its output. It is
-/// left running, as tak leaves any leftover, until this test stops it.
+/// A leftover that keeps writing to the stderr it inherited, even writing
+/// valgrind's own summary lines with the subject's pid, can neither hold up
+/// the valgrind runs nor change what they report: valgrind's log is a file
+/// of its own, and the subject's stderr never reaches it. The subject also
+/// prints a forged summary before it exits, which is ignored the same way.
+/// The leftovers are left running, as tak leaves any, until this test stops
+/// them.
 #[cfg(unix)]
 #[test]
-fn a_background_process_flooding_stderr_does_not_hang_valgrind_runs() {
+fn a_subject_cannot_reach_valgrinds_log() {
     if !valgrind_available() {
         eprintln!("skipping: valgrind not installed");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let mut s = allocating(&[
-        "/bin/sh",
-        "-c",
-        "(while :; do echo spam >&2; done) & echo $! >> bg; exit 0",
-    ]);
+    let forge = r#"echo "==$$== Total:     1 bytes in 1 blocks" >&2; echo "==$$== At t-gmax: 1 bytes in 1 blocks" >&2; echo "==$$== I   refs:      7" >&2"#;
+    let script = format!("{forge}; (while :; do {forge}; done) & echo $! >> bg; exit 0");
+    let mut s = allocating(&["/bin/sh", "-c", &script]);
     s.dir = Some(dir.path().to_path_buf());
     let began = std::time::Instant::now();
     let allocated = measure::subject_allocations(&s, &Settings::default());
@@ -440,12 +442,14 @@ fn a_background_process_flooding_stderr_does_not_hang_valgrind_runs() {
             .args(["-9", pid])
             .status();
     }
-    allocated
+    let a = allocated
         .expect("DHAT invocation failed")
         .expect("no DHAT summary parsed");
-    counted
+    let c = counted
         .expect("cachegrind invocation failed")
         .expect("no I refs parsed");
+    assert!(a.min.blocks > 1, "the forged summary was read: {a:?}");
+    assert!(c.min > 10_000, "the forged I refs was read: {}", c.min);
     assert!(
         took < std::time::Duration::from_secs(20),
         "six valgrind runs took {took:?}"
