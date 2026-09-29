@@ -193,9 +193,8 @@ fn an_unrecorded_head_fails_as_nothing_compared() {
     );
 }
 
-/// The first recording has nothing before it. It fails by default, passes
-/// with `--allow-empty`, and `--no-gate` — which is about what the numbers
-/// say — does not also waive it.
+/// The first recording has nothing before it. It fails by default and passes
+/// with `--allow-empty` or with `--no-gate`, which never fails.
 #[test]
 fn a_first_recording_needs_allow_empty() {
     let (dir, c) = repo();
@@ -209,7 +208,9 @@ fn a_first_recording_needs_allow_empty() {
     assert!(md.contains("pass `--allow-empty`"), "{md}");
 
     let out = tak(dir.path(), &["detect", &c[0], "--no-gate"]);
-    assert!(!out.status.success(), "--no-gate is not --allow-empty");
+    let md = stdout(&out);
+    assert!(out.status.success(), "--no-gate never fails: {md}");
+    assert!(md.contains("nothing was gated** (`--no-gate`)"), "{md}");
 
     let out = tak(dir.path(), &["detect", &c[0], "--allow-empty"]);
     let md = stdout(&out);

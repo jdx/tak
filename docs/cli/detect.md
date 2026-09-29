@@ -19,6 +19,6 @@ Meant for the main-branch workflow, after recording. Walks REV's first-parent hi
 - **`--remote <REMOTE>`** — Remote to refresh notes from.
 
   **Default:** `origin`
-- **`--no-gate`** — Report without failing, whatever the numbers say.
-- **`--allow-empty`** — Succeed when nothing could be compared: REV has no instruction counts, or none of its series has an earlier point in the window. Without it that fails, because a check that examined nothing otherwise looks like a pass. Needed on a first recording or the first on a new runner class.
+- **`--no-gate`** — Report without ever failing: neither a step nor an empty comparison fails the command.
+- **`--allow-empty`** — Succeed when nothing could be compared: REV has no instruction counts, or none of its series has an earlier point in the window. Without it that fails, because a check that examined nothing otherwise looks like a pass. Needed on a first recording or the first on a new runner class. A step onto REV still fails.
 - **`-h --help`** — Print help

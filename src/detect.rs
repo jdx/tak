@@ -103,6 +103,10 @@ pub struct Detection {
     /// Whether an empty comparison was accepted (`--allow-empty`) rather than
     /// failed. Carried here so the report and the exit status cannot disagree.
     pub allow_empty: bool,
+    /// Report-only (`--no-gate`): nothing fails, an empty comparison included.
+    /// The same promise `tak compare --no-gate` makes, so a workflow that must
+    /// always exit successfully needs one flag, not two.
+    pub no_gate: bool,
 }
 
 impl Detection {
@@ -134,7 +138,7 @@ impl Detection {
     /// runner class, are rare and known in advance, so they are the ones asked
     /// to opt out.
     pub fn empty_fails(&self) -> bool {
-        self.nothing_compared() && !self.allow_empty
+        self.nothing_compared() && !self.allow_empty && !self.no_gate
     }
 }
 
@@ -401,10 +405,16 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
              this is the first recording, the history is too short or shallow, or \
              the runner class changed, which deliberately starts a new series."
         };
-        if d.allow_empty {
+        if !d.empty_fails() {
+            // Name the flag that waived it, so a report that passed says why.
+            let flag = if d.no_gate {
+                "--no-gate"
+            } else {
+                "--allow-empty"
+            };
             out.push_str(&format!(
                 "**Nothing was compared at `{head}`, and so nothing was gated** \
-                 (`--allow-empty`). {why}\n"
+                 (`{flag}`). {why}\n"
             ));
         } else {
             out.push_str(&format!(
@@ -751,6 +761,18 @@ mod tests {
         assert!(!d.empty_fails());
         let md = markdown(&d, false);
         assert!(md.contains("nothing was gated** (`--allow-empty`)"), "{md}");
+        assert!(!md.contains("this check fails"), "{md}");
+    }
+
+    /// `--no-gate` means never fail, so it waives an empty comparison too, and
+    /// the report names it rather than `--allow-empty`.
+    #[test]
+    fn no_gate_waives_an_empty_comparison() {
+        let mut d = analyze(&walk(&[Some(1000.0)]), 1.0);
+        d.no_gate = true;
+        assert!(!d.empty_fails());
+        let md = markdown(&d, false);
+        assert!(md.contains("nothing was gated** (`--no-gate`)"), "{md}");
         assert!(!md.contains("this check fails"), "{md}");
     }
 

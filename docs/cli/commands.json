@@ -1023,8 +1023,8 @@
           {
             "name": "no-gate",
             "usage": "--no-gate",
-            "help": "Report without failing, whatever the numbers say.",
-            "help_first_line": "Report without failing, whatever the numbers say.",
+            "help": "Report without ever failing: neither a step nor an empty comparison fails the command.",
+            "help_first_line": "Report without ever failing: neither a step nor an empty comparison fails the command.",
             "short": [],
             "long": [
               "no-gate"
@@ -1035,8 +1035,8 @@
           {
             "name": "allow-empty",
             "usage": "--allow-empty",
-            "help": "Succeed when nothing could be compared: REV has no instruction counts, or none of its series has an earlier point in the window. Without it that fails, because a check that examined nothing otherwise looks like a pass. Needed on a first recording or the first on a new runner class.",
-            "help_first_line": "Succeed when nothing could be compared: REV has no instruction counts, or none of its series has an earlier point in the window. Without it that fails, because a check that examined nothing otherwise looks like a pass. Needed on a first recording or the first on a new runner class.",
+            "help": "Succeed when nothing could be compared: REV has no instruction counts, or none of its series has an earlier point in the window. Without it that fails, because a check that examined nothing otherwise looks like a pass. Needed on a first recording or the first on a new runner class. A step onto REV still fails.",
+            "help_first_line": "Succeed when nothing could be compared: REV has no instruction counts, or none of its series has an earlier point in the window. Without it that fails, because a check that examined nothing otherwise looks like a pass. Needed on a first recording or the first on a new runner class. A step onto REV still fails.",
             "short": [],
             "long": [
               "allow-empty"

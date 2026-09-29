@@ -108,8 +108,9 @@ gates. The gate is the same `gate_pct` setting that `tak compare` uses.
 
 When the newest commit has no instruction counts, or no series on it has an earlier point in
 the window, the report says **Nothing was compared** and the command fails, because a check
-that examined nothing would otherwise look like a pass. `--no-gate` does not change this; it
-only stops a step from failing the command.
+that examined nothing would otherwise look like a pass. `--allow-empty` waives this case
+only, so a step onto the newest commit still fails. `--no-gate` makes the command report
+without ever failing, covering both, as it does for `tak compare`.
 
 On the first recording, or the first on a new runner class, there is nothing earlier to
 compare with. Pass `--allow-empty` for that run, or seed the history first by recording an

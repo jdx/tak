@@ -197,14 +197,15 @@ enum Cmd {
         /// Remote to refresh notes from.
         #[usage(long, default = "origin")]
         remote: String,
-        /// Report without failing, whatever the numbers say.
+        /// Report without ever failing: neither a step nor an empty comparison
+        /// fails the command.
         #[usage(long)]
         no_gate: bool,
         /// Succeed when nothing could be compared: REV has no instruction
         /// counts, or none of its series has an earlier point in the window.
         /// Without it that fails, because a check that examined nothing
         /// otherwise looks like a pass. Needed on a first recording or the
-        /// first on a new runner class.
+        /// first on a new runner class. A step onto REV still fails.
         #[usage(long)]
         allow_empty: bool,
     },
@@ -1104,10 +1105,11 @@ fn cmd_detect(
     let mut found = detect::analyze(&walked, settings.gate_pct);
     found.shallow_cutoff = shallow_cutoff;
     found.allow_empty = allow_empty;
+    found.no_gate = no_gate;
     print!("{}", detect::markdown(&found, settings.credit));
 
-    // Independent of --no-gate, which is about what the numbers say. Here
-    // there are no numbers, and passing would claim a check that never ran.
+    // Passing here would claim a check that never ran, so it takes an explicit
+    // waiver: --allow-empty for this case alone, or --no-gate for everything.
     if found.empty_fails() {
         bail!(
             "nothing was compared at {}; pass --allow-empty if that is expected",
