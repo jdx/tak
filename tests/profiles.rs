@@ -227,6 +227,35 @@ fn a_profile_cachegrind_could_not_write_is_not_a_count_of_zero() {
     assert!(all.contains("wrote 0 profile(s)"), "{all}");
 }
 
+/// The subject shares valgrind's stderr. One that prints valgrind's own
+/// words — the unwritable-output error, a zero summary — keeps its real
+/// count, with or without a profile being kept.
+#[cfg(unix)]
+#[test]
+fn a_subject_printing_valgrinds_words_keeps_its_count() {
+    if !valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let mut s = echo();
+    s.cmd = [
+        "/bin/sh",
+        "-c",
+        "echo \"error: can't open output data file 'x'\" >&2; echo 'I refs: 0' >&2",
+    ]
+    .map(String::from)
+    .to_vec();
+    let plain = measure::subject_instructions(&s, &Settings::default())
+        .expect("a count, not a failure")
+        .expect("valgrind present");
+    assert!(plain.min > 10_000, "implausibly low: {}", plain.min);
+    let (kept, raw) = measure::subject_profile(&s, &Settings::default())
+        .expect("a count, not a failure")
+        .expect("valgrind present");
+    assert_eq!(kept.min, plain.min);
+    assert!(!raw.expect("the profile was kept").is_empty());
+}
+
 #[cfg(unix)]
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")

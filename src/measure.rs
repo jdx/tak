@@ -1357,16 +1357,25 @@ fn count(
         let stderr = String::from_utf8_lossy(&out.stderr);
         let bin = cmd.first().map(String::as_str).unwrap_or("(empty command)");
         accepted(bin, out.status, ok, " under valgrind")?;
-        // cachegrind that cannot open its output file still exits with the
-        // client's code, and reports `I refs: 0` — a count that would record
-        // as the largest improvement ever measured. Seen with valgrind 3.24
-        // when the subject removed the directory the profile was going to.
-        if stderr.contains("can't open output data file") {
-            bail!(
-                "cachegrind could not write its profile to {out_file}, and counts nothing when that happens"
-            );
-        }
         match parse_irefs(&stderr) {
+            // cachegrind that cannot open its output file still exits with
+            // the client's code, and reports `I refs: 0` — a count that would
+            // record as the largest improvement ever measured. Seen with
+            // valgrind 3.24 when the subject removed the directory the profile
+            // was going to. Decided on the count, not on the message: stderr
+            // is the subject's as well, and a program printing the same words
+            // must not lose a real count. No process retires zero
+            // instructions, so zero is never a measurement.
+            Some(0) => {
+                let unwritable =
+                    valgrind_lines(&stderr).any(|l| l.contains("can't open output data file"));
+                if unwritable {
+                    bail!(
+                        "cachegrind could not write its profile to {out_file}, and counts nothing when that happens"
+                    );
+                }
+                bail!("cachegrind counted no instructions");
+            }
             Some(n) => samples.push(n),
             // Valgrind is installed but produced no summary — a real failure,
             // not the same thing as valgrind being absent. Reporting it as
@@ -1395,7 +1404,13 @@ fn count(
             let path = d.path().join(format!("run-{best}"));
             Some(
                 std::fs::read(&path)
-                    .with_context(|| format!("cachegrind wrote no profile to {}", path.display())),
+                    .with_context(|| format!("cachegrind wrote no profile to {}", path.display()))
+                    .and_then(|raw| {
+                        if raw.is_empty() {
+                            bail!("cachegrind wrote an empty profile to {}", path.display());
+                        }
+                        Ok(raw)
+                    }),
             )
         }
         (None, Some(e)) => Some(Err(e)),
@@ -1405,8 +1420,14 @@ fn count(
 }
 
 /// Extract the `I refs:` count from cachegrind's stderr summary.
+///
+/// Only valgrind's own lines are read, and the last summary among them: the
+/// subject shares the stream, and one that prints `I refs:` must not supply
+/// its own count.
 fn parse_irefs(stderr: &str) -> Option<u64> {
-    let line = stderr.lines().find(|l| l.contains("I refs:"))?;
+    let line = valgrind_lines(stderr)
+        .filter(|l| l.contains("I refs:"))
+        .last()?;
     let digits: String = line
         .rsplit(':')
         .next()?
@@ -1416,9 +1437,32 @@ fn parse_irefs(stderr: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
+/// The lines valgrind itself wrote to a stderr it shares with its client,
+/// with their `==<pid>==` prefix removed.
+fn valgrind_lines(stderr: &str) -> impl Iterator<Item = &str> {
+    stderr.lines().filter_map(|l| {
+        let rest = l.strip_prefix("==")?;
+        let (pid, rest) = rest.split_once("==")?;
+        (!pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit())).then_some(rest)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The subject's stderr is interleaved with valgrind's; only valgrind's
+    /// prefixed lines are its summary.
+    #[test]
+    fn a_count_printed_by_the_subject_is_not_the_count() {
+        let s = "I refs: 5\n==7== error: can't open output data file\n==7== I refs:      1,234\nI refs: 9\n";
+        assert_eq!(parse_irefs(s), Some(1_234));
+        assert_eq!(parse_irefs("I refs: 5\n"), None);
+        assert_eq!(
+            valgrind_lines("==x== no\n== 1== no\n==12== yes\n").collect::<Vec<_>>(),
+            [" yes"]
+        );
+    }
 
     #[test]
     fn parses_cachegrind_summary() {
