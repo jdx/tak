@@ -263,6 +263,24 @@ fn a_malformed_config_does_not_block_the_log() {
     assert!(err.contains("could not read tak.toml"), "{err}");
 }
 
+/// `--bench` naming a benchmark that only ever recorded other metrics fails
+/// the step instead of publishing a blank report.
+#[test]
+fn a_selected_bench_with_nothing_drawable_fails() {
+    let dir = trunk("undrawable");
+    let d = dir.path();
+    let c = commit(d, "size only");
+    note(
+        d,
+        &c,
+        &[r#"{"bench":"size","metrics":{"binary_bytes":9},"runner":"gha","tool":"self","ts":"2026-01-01T00:00:00Z","v":1}"#.to_string()],
+    );
+    let out = tak(d, &["log", "--bench", "size"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("`size` has no instructions"), "{err}");
+}
+
 #[test]
 fn a_history_with_nothing_recorded_says_so() {
     let dir = tempfile::tempdir().unwrap();

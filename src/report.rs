@@ -17,6 +17,7 @@ use std::fmt::Write as _;
 use crate::compare::{self, GATED_METRIC, Key, WALL_METRIC};
 use crate::config::SELF_TOOL;
 use crate::notes::Logged;
+use crate::record::Record;
 
 /// One series' values on one recorded commit.
 #[derive(Debug, Clone, PartialEq)]
@@ -82,6 +83,10 @@ pub struct History {
     pub walked: usize,
     /// Recorded commits further back than the limit reached.
     pub older: usize,
+    /// Commits whose records carry neither metric this report draws. Said
+    /// aloud when nothing else was found, so an empty report does not claim
+    /// that nothing was recorded when something was.
+    pub undrawable: usize,
     /// The clone is shallow, so the walk may have stopped short of the project's
     /// first commit rather than at it.
     pub shallow: bool,
@@ -108,42 +113,24 @@ pub fn build(
 ) -> Result<History> {
     let walked_n = walked.len();
     if !benches.is_empty() {
-        let seen: BTreeSet<&str> = walked
-            .iter()
-            .flat_map(|c| c.records.iter().map(|r| r.bench.as_str()))
-            .collect();
-        let missing: Vec<&String> = benches
-            .iter()
-            .filter(|b| !seen.contains(b.as_str()))
-            .collect();
-        if !missing.is_empty() {
-            bail!(
-                "no measurements of {} in {walked_n} commit(s) of history (recorded: {})",
-                missing
-                    .iter()
-                    .map(|b| format!("`{b}`"))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                if seen.is_empty() {
-                    "none".to_string()
-                } else {
-                    seen.into_iter().collect::<Vec<_>>().join(", ")
-                }
-            );
-        }
+        check_benches(&walked, benches)?;
     }
 
+    let mut undrawable = 0;
     let mut recorded: Vec<Logged> = walked
         .into_iter()
         .filter_map(|mut c| {
+            c.records
+                .retain(|r| benches.is_empty() || benches.contains(&r.bench));
+            let had_records = !c.records.is_empty();
             // A record with neither metric drawn here — only custom ones, say
             // — is dropped before counting. Left in, it made its commit use
             // up one of the `-n` slots while contributing no point, so enough
             // of them could push every drawable measurement out of the window.
-            c.records.retain(|r| {
-                (benches.is_empty() || benches.contains(&r.bench))
-                    && (r.metrics.contains_key(GATED_METRIC) || r.metrics.contains_key(WALL_METRIC))
-            });
+            c.records.retain(drawable);
+            if had_records && c.records.is_empty() {
+                undrawable += 1;
+            }
             (!c.records.is_empty()).then_some(c)
         })
         .collect();
@@ -176,8 +163,72 @@ pub fn build(
             .collect(),
         walked: walked_n,
         older,
+        undrawable,
         shallow,
     })
+}
+
+/// Whether a record carries a metric this report draws.
+fn drawable(r: &Record) -> bool {
+    r.metrics.contains_key(GATED_METRIC) || r.metrics.contains_key(WALL_METRIC)
+}
+
+/// Every benchmark named with `--bench` must have something to draw somewhere
+/// in the walk.
+///
+/// Two separate failures, because they have separate fixes. A name recorded
+/// nowhere is usually a typo. A name recorded only with other metrics is a
+/// benchmark that stopped producing — or never produced — an instruction
+/// count or a wall time, and filtering it would otherwise yield a report that
+/// succeeds, says nothing was recorded, and gets published blank.
+///
+/// The whole walk rather than the `-n` window is the right scope: `-n` counts
+/// only commits with something drawable, so if any exist the window reaches
+/// back to them.
+fn check_benches(walked: &[Logged], benches: &[String]) -> Result<()> {
+    let records = || walked.iter().flat_map(|c| c.records.iter());
+    let seen: BTreeSet<&str> = records().map(|r| r.bench.as_str()).collect();
+    let drawn: BTreeSet<&str> = records()
+        .filter(|r| drawable(r))
+        .map(|r| r.bench.as_str())
+        .collect();
+    let named = |names: Vec<&String>| {
+        names
+            .iter()
+            .map(|b| format!("`{b}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let missing: Vec<&String> = benches
+        .iter()
+        .filter(|b| !seen.contains(b.as_str()))
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "no measurements of {} in {} commit(s) of history (recorded: {})",
+            named(missing),
+            walked.len(),
+            if seen.is_empty() {
+                "none".to_string()
+            } else {
+                seen.into_iter().collect::<Vec<_>>().join(", ")
+            }
+        );
+    }
+    let blank: Vec<&String> = benches
+        .iter()
+        .filter(|b| !drawn.contains(b.as_str()))
+        .collect();
+    if !blank.is_empty() {
+        bail!(
+            "{} has no {GATED_METRIC} or {WALL_METRIC} measurements in {} commit(s) of \
+             history; its records carry only other metrics, which `tak log` does not show",
+            named(blank),
+            walked.len()
+        );
+    }
+    Ok(())
 }
 
 /// `abcdef0123…` -> `abcdef0`, git's own default abbreviation.
@@ -206,7 +257,14 @@ fn clip(s: &str) -> String {
 /// A sentence saying what the walk covered, and why it may have covered less
 /// than was asked for. Shared by both renderings so they cannot disagree.
 fn coverage(h: &History, rev: &str) -> String {
-    let mut out = if h.commits.is_empty() {
+    let mut out = if h.commits.is_empty() && h.undrawable > 0 {
+        format!(
+            "No {GATED_METRIC} or {WALL_METRIC} measurements on the first-parent history of \
+             `{rev}` ({} commit(s) walked; {} carried only other metrics, which this report \
+             does not show).",
+            h.walked, h.undrawable
+        )
+    } else if h.commits.is_empty() {
         format!(
             "No measurements recorded on the first-parent history of `{rev}` ({} commit(s) walked).",
             h.walked
@@ -854,7 +912,6 @@ fn md_code(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::Record;
 
     fn rec(bench: &str, runner: &str, ins: f64, wall: f64) -> Record {
         Record {
@@ -1163,6 +1220,37 @@ mod tests {
         assert_eq!(h.commits.len(), 2);
         assert_eq!(ins(&h.series[0]), vec![Some(1.0), Some(2.0)]);
         assert_eq!(h.older, 0);
+    }
+
+    /// A selected benchmark with nothing drawable must fail, not publish a
+    /// blank report — and say why, rather than claiming it was never recorded.
+    #[test]
+    fn a_selected_bench_with_nothing_drawable_is_an_error() {
+        let mut custom = rec("size", "r", 0.0, 0.0);
+        custom.metrics = BTreeMap::from([("binary_bytes".to_string(), 9.0)]);
+        let err = build(
+            walk(vec![vec![rec("a", "r", 1.0, 1.0), custom]]),
+            10,
+            &["size".to_string()],
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("`size` has no instructions"), "{err}");
+        assert!(err.contains("only other metrics"), "{err}");
+    }
+
+    /// Without a filter an empty history is a legitimate state, but one made
+    /// of undrawable records must not read as though nothing was recorded.
+    #[test]
+    fn an_all_undrawable_history_says_what_it_skipped() {
+        let mut custom = rec("size", "r", 0.0, 0.0);
+        custom.metrics = BTreeMap::from([("binary_bytes".to_string(), 9.0)]);
+        let h = build(walk(vec![vec![custom], vec![]]), 10, &[], false).unwrap();
+        assert!(h.series.is_empty());
+        let md = markdown(&h, "HEAD", false);
+        assert!(md.contains("1 carried only other metrics"), "{md}");
+        assert!(!md.contains("No measurements recorded"), "{md}");
     }
 
     /// A pipe in a commit subject would otherwise end its table row early.
