@@ -363,28 +363,26 @@ struct Local {
 /// its per-benchmark gates adds no way to fail. An ad-hoc `tak run -- CMD`
 /// has never depended on the declared benchmarks — settings read only the
 /// `[gate]` and other registry keys — and a broken `[bench.x]` must not stop
-/// it here either. So an ad-hoc run holds everything to `[gate]` unless
-/// `--gate` asks for a verdict, when a benchmark of the same name may have a
-/// gate of its own; and if the file will not load then, it warns and falls
-/// back to `[gate]` rather than refusing to measure.
+/// a report either. So an ad-hoc run without `--gate` holds everything to
+/// `[gate]` and never reads the benchmarks.
+///
+/// With `--gate` the verdict needs the real thresholds: a benchmark of the
+/// same name may be report-only or have its own `pct` or floor. A file that
+/// will not load is then an error, before anything is measured. Falling back
+/// to `[gate]` would gate silently harder or softer than the project asked,
+/// and a wrong verdict that exits 0 is worse than a loud failure.
 fn baseline_gates(opts: &RunOpts, settings: &Settings, adhoc: bool) -> Result<compare::Gates> {
-    if !adhoc {
-        return compare_gates(settings, opts.config.as_deref());
+    if adhoc && !opts.gate {
+        return Ok(compare::Gates::uniform(global_gate(settings)?));
     }
-    let global = global_gate(settings)?;
-    if !opts.gate {
-        return Ok(compare::Gates::uniform(global));
-    }
-    match compare_gates(settings, opts.config.as_deref()) {
-        Ok(gates) => Ok(gates),
-        Err(e) => {
-            eprintln!(
-                "  warning: could not read per-benchmark gates, so every benchmark is held to \
-                 [gate]: {e:#}"
-            );
-            Ok(compare::Gates::uniform(global))
+    compare_gates(settings, opts.config.as_deref()).with_context(|| {
+        if adhoc {
+            "--gate needs a valid tak.toml to find per-benchmark gates; run without --gate \
+             to report only"
+        } else {
+            "could not read the gates in tak.toml"
         }
-    }
+    })
 }
 
 fn open_local(opts: &RunOpts, settings: &Settings, adhoc: bool) -> Result<Local> {

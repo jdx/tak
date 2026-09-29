@@ -110,9 +110,10 @@ is never gated.
   table (see [regression gate](/guide/configuration#regression-gate)). That includes the
   `min_delta` floor. A report-only benchmark (`gate = { enabled = false }`) is flagged but
   never fails `--gate`.
-- An ad-hoc run (`tak run --baseline NAME -- CMD`) still doesn't depend on the benchmarks
-  `tak.toml` declares. It reads a benchmark's own gate only with `--gate`. If `tak.toml` can't
-  be loaded then, tak warns and holds every benchmark to `[gate]`.
+- An ad-hoc run (`tak run --baseline NAME -- CMD`) doesn't depend on the benchmarks
+  `tak.toml` declares, so an invalid benchmark in the file can't block the report. With
+  `--gate` it reads the benchmark's own gate, so `--gate` needs a `tak.toml` that loads. If it
+  doesn't, the run fails before measuring and shows the configuration error.
 - `--gate` also fails for a gated benchmark it could not check:
   - nothing ran;
   - no instruction count appears on both sides;

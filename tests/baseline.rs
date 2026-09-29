@@ -621,9 +621,8 @@ fn a_baseline_on_two_other_runners_is_named_and_not_compared() {
 }
 
 /// An ad-hoc `tak run -- CMD` never depended on the declared benchmarks, and
-/// `--baseline` must not make it: a broken, unrelated `[bench.x]` neither
-/// stops the report nor, with `--gate`, turns into a config error instead of
-/// the gate's own verdict.
+/// `--baseline` must not make it: a broken, unrelated `[bench.x]` does not
+/// stop the report. `--gate` is different: its verdict needs the real gates.
 #[test]
 fn an_invalid_unrelated_benchmark_does_not_block_an_ad_hoc_baseline_run() {
     let repo = Repo::new();
@@ -652,19 +651,26 @@ fn an_invalid_unrelated_benchmark_does_not_block_an_ad_hoc_baseline_run() {
         stderr(&out)
     );
 
-    // Gated: warned about, held to [gate], and failed by the gate itself —
-    // there is no instruction count without valgrind — not by the file.
+    // Gated: the verdict needs the file's gates, so a file that will not
+    // load fails the run up front — the command never runs — rather than
+    // gating against a threshold the project did not choose.
+    let marker = repo.dir.join("ran");
     let out = tak_run(
         &repo.dir,
         &[NC, "--bench", "s", "--baseline", "x", "--gate"],
-        &["true"],
+        &["touch", marker.to_str().unwrap()],
     );
     let err = fail(&out);
     assert!(
-        err.contains("could not read per-benchmark gates, so every benchmark is held to [gate]"),
+        err.contains("--gate needs a valid tak.toml to find per-benchmark gates"),
         "{err}"
     );
-    assert!(err.contains("nothing to gate"), "{err}");
+    assert!(err.contains("broken"), "the config error is shown: {err}");
+    assert!(!err.contains("nothing to gate"), "{err}");
+    assert!(
+        !marker.exists(),
+        "the command ran before the file was checked"
+    );
 }
 
 /// A shell loop of `n` iterations: about 11,500 instructions each, so 2000
