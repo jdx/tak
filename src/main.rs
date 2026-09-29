@@ -3,11 +3,12 @@
 //! Pre-v1: interfaces and behavior are not finalized and may change between releases.
 
 use anyhow::{Context, Result, bail};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use usage_rs::{Args, Cli, Subcommands};
 
 use tak_cli::backfill;
+use tak_cli::baseline::{self, Baseline, Store};
 use tak_cli::compare;
 use tak_cli::config::{
     self, AutoRuns, Config, DEFAULT_BUDGET, DEFAULT_MAX_RUNS, DEFAULT_MIN_RUNS, DEFAULT_RUNS,
@@ -111,6 +112,20 @@ enum Cmd {
         /// Write every sample and summary to PATH as hyperfine-compatible JSON.
         #[usage(long, value_name = "PATH")]
         export_json: Option<std::path::PathBuf>,
+        /// Save the results as a named local baseline, kept in the git
+        /// directory rather than in refs/notes/tak. Replaces what NAME held
+        /// for the benchmarks measured and keeps the rest.
+        #[usage(long, value_name = "NAME")]
+        save_baseline: Option<String>,
+        /// Compare the results against a saved local baseline and print the
+        /// report `tak compare` prints. Reports only; add --gate to fail on a
+        /// regression.
+        #[usage(long, value_name = "NAME")]
+        baseline: Option<String>,
+        /// With --baseline, fail when an instruction count rose by more than
+        /// gate_pct, or when no instruction count could be compared at all.
+        #[usage(long)]
+        gate: bool,
         /// Command to benchmark, after `--`. Omit to run what tak.toml declares.
         #[usage(arg, double_dash = "required")]
         cmd: Vec<String>,
@@ -288,6 +303,44 @@ struct RunOpts {
     export_json: Option<std::path::PathBuf>,
     config: Option<std::path::PathBuf>,
     dry_run: bool,
+    save_baseline: Option<String>,
+    baseline: Option<String>,
+    gate: bool,
+}
+
+/// What `--baseline` and `--save-baseline` resolved to, decided before
+/// anything is measured: a mistyped name or a missing repository should fail
+/// in a second, not after the whole run.
+#[derive(Default)]
+struct Local {
+    /// Present whenever either flag was given.
+    store: Option<Store>,
+    against: Option<Baseline>,
+}
+
+fn open_local(opts: &RunOpts) -> Result<Local> {
+    if opts.gate && opts.baseline.is_none() {
+        bail!(
+            "--gate applies to --baseline; to gate against another commit's recorded \
+             measurements, use `tak compare`"
+        );
+    }
+    for name in [&opts.baseline, &opts.save_baseline].into_iter().flatten() {
+        baseline::validate_name(name)?;
+    }
+    if opts.baseline.is_none() && opts.save_baseline.is_none() {
+        return Ok(Local::default());
+    }
+    let store = Store::locate()?;
+    let against = opts
+        .baseline
+        .as_deref()
+        .map(|name| store.load(name))
+        .transpose()?;
+    Ok(Local {
+        store: Some(store),
+        against,
+    })
 }
 
 /// One subject's successful measurement.
@@ -302,10 +355,11 @@ struct Measured {
 }
 
 fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
+    let local = open_local(&opts)?;
     // An explicit command always wins; tak.toml is only consulted when none is
     // given, so ad-hoc measurement never depends on repository state.
     if cmd.is_empty() {
-        return run_declared(opts, settings);
+        return run_declared(opts, settings, &local);
     }
     if !opts.subjects.is_empty() {
         bail!(
@@ -346,11 +400,11 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         return Ok(());
     }
     let (measured, _) = measure_bench(&bench, &[subject], false, seed, &opts, settings)?;
-    finish(measured, Vec::new(), &opts, seed, settings)
+    finish(measured, Vec::new(), &opts, seed, settings, &local)
 }
 
 /// Run the benchmarks declared in `tak.toml`.
-fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
+fn run_declared(opts: RunOpts, settings: &Settings, local: &Local) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let found = match &opts.config {
         // Absolute, so the directory commands are anchored to is too: a
@@ -535,10 +589,18 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
         // CI job recording or exporting must not look like it measured
         // something when every benchmark was switched off.
         // A dry run writes neither, so there is nothing for it to fail over.
-        if !opts.dry_run && (opts.record || opts.export_json.is_some()) {
+        if !opts.dry_run
+            && (opts.record || opts.export_json.is_some() || opts.save_baseline.is_some())
+        {
             bail!(
                 "nothing to {}: every selected benchmark or subject has a false `when`",
-                if opts.record { "record" } else { "export" }
+                if opts.record {
+                    "record"
+                } else if opts.save_baseline.is_some() {
+                    "save"
+                } else {
+                    "export"
+                }
             );
         }
         println!("nothing to run: every selected benchmark or subject has a false `when`");
@@ -561,7 +623,7 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
         measured.extend(m);
         failed.extend(f);
     }
-    finish(measured, failed, &opts, seed, settings)
+    finish(measured, failed, &opts, seed, settings, local)
 }
 
 /// A random seed below 2^53, so it survives any JSON reader — JavaScript and
@@ -653,6 +715,7 @@ fn finish(
     opts: &RunOpts,
     seed: u64,
     settings: &Settings,
+    local: &Local,
 ) -> Result<()> {
     // The export is written even when a subject failed: it is this run's
     // results, the failed subject is simply absent, and a consumer comparing
@@ -692,16 +755,31 @@ fn finish(
             path.display()
         );
     }
+    // Reported before a failed subject stops the run: the question this
+    // answers is whether an edit helped, and the subjects that did measure
+    // answer it.
+    let compared = local
+        .against
+        .as_ref()
+        .map(|b| report_against(b, &measured, settings));
+    // What a failure below keeps from being written, named so the message
+    // says which store was left untouched.
+    let storing = match (opts.record, &opts.save_baseline) {
+        (true, Some(name)) => Some(format!("recording or saving baseline `{name}`")),
+        (true, None) => Some("recording".to_string()),
+        (false, Some(name)) => Some(format!("saving baseline `{name}`")),
+        (false, None) => None,
+    };
     if !failed.is_empty() {
         // Everything is measured before anything is written, and that holds
         // here too: a run missing a subject is stored whole or not at all,
         // because a partial set left in history looks like a complete one.
-        if opts.record {
-            eprintln!("\n  not recording: a run with a failed subject would be stored incomplete");
+        if let Some(storing) = &storing {
+            eprintln!("\n  not {storing}: a run with a failed subject would be stored incomplete");
         }
         bail!("{} subject(s) failed: {}", failed.len(), failed.join(", "));
     }
-    if opts.record {
+    if let Some(storing) = &storing {
         // Git notes keep the timings but not the check verdicts, which do not
         // fit how recorded metrics are read: `compare` keeps each metric's
         // minimum and treats lower as better. So a failed check has to stop
@@ -709,7 +787,8 @@ fn finish(
         // that did the work wrong with nothing marking it. Only this run's
         // verdicts can vouch for this run's timings, so there is no way to
         // clear it but a run whose checks all pass. The export above is still
-        // written: it carries the verdicts.
+        // written: it carries the verdicts. A baseline holds the same records
+        // and is read by the same `compare`, so the same rule applies to it.
         let failing: Vec<String> = measured
             .iter()
             .filter(|m| m.samples.passed() < m.samples.checks.len())
@@ -729,14 +808,139 @@ fn finish(
         if !failing.is_empty() {
             eprintln!(
                 "
-  not recording: git notes keep timings without check verdicts, so a run \
-                 with a failed check would be stored as if it had passed"
+  not {storing}: stored measurements keep timings without check verdicts, so a \
+                 run with a failed check would be stored as if it had passed"
             );
             bail!("check failed: {}", failing.join(", "));
         }
         let records: Vec<Record> = measured.into_iter().map(|m| m.record).collect();
-        record_all(&records)?;
+        if opts.record {
+            record_all(&records)?;
+        }
+        if let (Some(name), Some(store)) = (&opts.save_baseline, &local.store) {
+            save_baseline(store, name, &records)?;
+        }
     }
+    // Last, after anything asked for was stored: a regression is exactly the
+    // measurement a `--record` run exists to keep, and gating first would
+    // throw it away.
+    if opts.gate
+        && let (Some(against), Some(comparison)) = (&local.against, &compared)
+    {
+        gate_against(against, comparison, settings)?;
+    }
+    Ok(())
+}
+
+/// Print how this run compares with a saved baseline, and return the
+/// comparison for `--gate`.
+///
+/// The same [`compare::compare`] and [`compare::markdown`] as `tak compare`,
+/// so a local report and a pull request's read the same way and are kept
+/// correct in one place.
+fn report_against(
+    against: &Baseline,
+    measured: &[Measured],
+    settings: &Settings,
+) -> compare::Comparison {
+    let current: Vec<Record> = measured.iter().map(|m| m.record.clone()).collect();
+    let base = baseline::relevant(&against.records, &current);
+    let comparison = compare::compare(&base, &current);
+
+    // The table already refuses to line up different runner classes; this
+    // says why in terms of the baseline, since a baseline saved with another
+    // `--runner`, or on the other side of a CI boundary, is the usual cause.
+    let here: BTreeSet<&str> = current.iter().map(|r| r.runner.as_str()).collect();
+    let there: BTreeSet<&str> = base
+        .iter()
+        .map(|r| r.runner.as_str())
+        .filter(|r| !here.contains(r))
+        .collect();
+    if !there.is_empty() {
+        eprintln!(
+            "  warning: baseline `{}` holds measurements from runner class {}, and this run is \
+             on {}. Runner classes are never compared with each other.",
+            against.name,
+            quoted(&there),
+            quoted(&here)
+        );
+    }
+
+    println!(
+        "\n  compared against baseline `{}` ({})\n",
+        against.name,
+        against.path.display()
+    );
+    // No trend: a baseline is one point, not a history. No credit line
+    // either: it says the numbers live in git notes, which these do not, and
+    // a terminal report is not headed for a stranger's pull request.
+    print!(
+        "{}",
+        compare::markdown(
+            &comparison,
+            &compare::Trend::new(),
+            settings.gate_pct,
+            false
+        )
+    );
+    comparison
+}
+
+fn quoted(names: &BTreeSet<&str>) -> String {
+    names
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Fail on a regression against a baseline, for `--gate`.
+///
+/// Stricter than `tak compare` about comparing nothing. There, a base with no
+/// measurements is a normal state — a commit CI has not reached yet. Here the
+/// baseline was named and loaded, so nothing to compare means a runner or tool
+/// mismatch, or a run without valgrind, and a gate that passed then would pass
+/// every edit: `git bisect run` would blame the wrong commit.
+fn gate_against(
+    against: &Baseline,
+    comparison: &compare::Comparison,
+    settings: &Settings,
+) -> Result<()> {
+    if !comparison
+        .changes
+        .iter()
+        .any(|c| c.metric == compare::GATED_METRIC)
+    {
+        bail!(
+            "nothing to gate: no instruction count was measured both in this run and in \
+             baseline `{}`",
+            against.name
+        );
+    }
+    let regressions = comparison.regressions(settings.gate_pct);
+    if !regressions.is_empty() {
+        bail!(
+            "{} benchmark(s) regressed by more than {}% against baseline `{}`",
+            regressions.len(),
+            settings.gate_pct,
+            against.name
+        );
+    }
+    Ok(())
+}
+
+/// Save records as a local baseline and say where they went.
+fn save_baseline(store: &Store, name: &str, records: &[Record]) -> Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let path = store.save(name, records)?;
+    println!(
+        "\n  saved {} measurement(s) to baseline `{name}` ({})",
+        records.len(),
+        path.display()
+    );
+    println!("  compare against it with: tak run --baseline {name}");
     Ok(())
 }
 
@@ -1392,6 +1596,9 @@ fn main() -> Result<()> {
             export_json,
             config,
             dry_run,
+            save_baseline,
+            baseline,
+            gate,
             cmd,
         } => {
             let settings = Settings::from_process_at(&overrides, config.as_deref())?;
@@ -1408,6 +1615,9 @@ fn main() -> Result<()> {
                     export_json,
                     config,
                     dry_run,
+                    save_baseline,
+                    baseline,
+                    gate,
                 },
                 cmd,
                 &settings,

@@ -50,6 +50,13 @@ cmd run help="Benchmark a command, or everything declared in tak.toml." {
     flag --export-json help="Write every sample and summary to PATH as hyperfine-compatible JSON." {
         arg <PATH>
     }
+    flag --save-baseline help="Save the results as a named local baseline, kept in the git directory rather than in refs/notes/tak. Replaces what NAME held for the benchmarks measured and keeps the rest." {
+        arg <NAME>
+    }
+    flag --baseline help="Compare the results against a saved local baseline and print the report `tak compare` prints. Reports only; add --gate to fail on a regression." {
+        arg <NAME>
+    }
+    flag --gate help="With --baseline, fail when an instruction count rose by more than gate_pct, or when no instruction count could be compared at all."
     flag "-h --help" help="Print help" action=help builtin=#true
     arg "[CMD]..." help="Command to benchmark, after `--`. Omit to run what tak.toml declares." double_dash=required
 }

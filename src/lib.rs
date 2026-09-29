@@ -8,6 +8,7 @@
 
 pub mod artifact;
 pub mod backfill;
+pub mod baseline;
 pub mod compare;
 pub mod condition;
 pub mod config;

@@ -59,6 +59,52 @@ tak run --bench startup
 String commands are split on whitespace. There is no shell, quoting, globbing, or pipeline
 syntax. Use an argument list when boundaries matter.
 
+## Measure a local change
+
+`tak compare` compares commits whose measurements were recorded in git notes. While you are
+editing, there is no commit yet. Save a named local baseline instead, make the change, and
+measure against it:
+
+```sh
+tak run --save-baseline before
+# edit and rebuild
+tak run --baseline before
+```
+
+The second run prints the same table `tak compare` prints, with the saved measurement as the
+base and this run as the head. For a benchmark named `loop` whose change removed a quarter of
+its work:
+
+```text
+  compared against baseline `before` (/tmp/demo/.git/tak/baselines/before.jsonl)
+
+| benchmark | instructions | Δ | wall (min) | Δ |
+|---|---:|---:|---:|---:|
+| loop | 23,142,252 → 17,378,752 | **-24.90%** | 1.53 → 1.20ms | -21.59% |
+
+No instruction-count regression above 1%.
+```
+
+Without Valgrind the instruction columns show `—` and only wall clock is compared. Wall clock
+is never gated.
+
+- Baselines are stored under the repository's git directory, in `tak/baselines/NAME.jsonl`.
+  They are never committed or pushed, `git clean` does not remove them, and every worktree of
+  a clone sees the same ones. tak does not create baselines outside a git repository.
+- `--baseline` only reads. It never writes to `refs/notes/tak`. Add `--record` to record the
+  run as well, or `--save-baseline NAME` to replace a baseline after comparing against it.
+- `--save-baseline` replaces what the baseline held for the benchmarks this run measured and
+  keeps the rest, so `tak run --bench startup --save-baseline before` updates one benchmark.
+  Like `--record`, it saves nothing when a subject fails or a check fails.
+- The report covers only the benchmarks this run measured. Runner class still partitions the
+  results: a baseline saved under another runner class is named in a warning and not compared.
+- `--baseline` reports and exits 0 whatever the numbers say. Add `--gate` to fail when an
+  instruction count rose by more than `gate_pct`. `--gate` also fails when no instruction
+  count could be compared at all, because a gate that passes without instruction counts
+  would pass every change.
+- A mistyped `--baseline` name fails before anything is measured, and the error lists the saved
+  baselines. To delete a baseline, remove its file.
+
 Continue with [adopting tak in a project](/guide/adopting),
 [benchmark configuration](/guide/configuration), or
 [recording results in git notes](/guide/ci).

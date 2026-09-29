@@ -261,7 +261,8 @@ run the concurrent fixers lost an edit every time, and were faster for it:
   rate fits neither rule, so it isn't stored alongside them. Instead, tak names each subject
   whose check failed and how many of its samples failed, writes no notes, and exits
   non-zero, as it does when a subject is dropped. `--export-json` is still written, with the
-  verdicts.
+  verdicts. `--save-baseline` follows the same rule, because a
+  [local baseline](/guide/getting-started#measure-a-local-change) stores the same records.
 
 ## Comparing several programs
 

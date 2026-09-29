@@ -20,4 +20,7 @@ Benchmark a command, or everything declared in tak.toml.
 - **`--config <PATH>`** — Read this file instead of searching for tak.toml.
 - **`--dry-run`** — Print what would run — every subject's command, setup, prepare, check, directory, environment and run count, templates rendered — without running any of it.
 - **`--export-json <PATH>`** — Write every sample and summary to PATH as hyperfine-compatible JSON.
+- **`--save-baseline <NAME>`** — Save the results as a named local baseline, kept in the git directory rather than in refs/notes/tak. Replaces what NAME held for the benchmarks measured and keeps the rest.
+- **`--baseline <NAME>`** — Compare the results against a saved local baseline and print the report `tak compare` prints. Reports only; add --gate to fail on a regression.
+- **`--gate`** — With --baseline, fail when an instruction count rose by more than gate_pct, or when no instruction count could be compared at all.
 - **`-h --help`** — Print help
