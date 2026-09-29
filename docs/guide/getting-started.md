@@ -93,6 +93,10 @@ is never gated.
   a clone sees the same ones. tak does not create baselines outside a git repository.
 - `--baseline` only reads. It never writes to `refs/notes/tak`. Add `--record` to record the
   run as well, or `--save-baseline NAME` to replace a baseline after comparing against it.
+  With `--gate`, a baseline is not replaced by a run that failed the gate against it. For
+  example, `tak run --baseline good --save-baseline good --gate` keeps `good` when the gate
+  fails, so a retry doesn't compare the regression with itself. The error says so. Saving
+  under a different name happens either way.
 - `--save-baseline` replaces what the baseline held for the benchmarks this run measured and
   keeps the rest, so `tak run --bench startup --save-baseline before` updates one benchmark.
   Like `--record`, it saves nothing when a subject fails or a check fails. With both flags,

@@ -504,6 +504,23 @@ fn the_gate_fires_on_an_instruction_count_regression() {
         &slow,
     ));
     assert_no_notes(&repo.dir);
+
+    // Saving over `b` on a failed gate keeps `b`, so a retry fails again
+    // rather than comparing the regression with itself.
+    let replace = [
+        "--bench",
+        "loop",
+        "--baseline",
+        "b",
+        "--save-baseline",
+        "b",
+        "--gate",
+    ];
+    for _ in 0..2 {
+        let err = fail(&tak_run(&repo.dir, &replace, &slow));
+        assert!(err.contains("regressed by more than"), "{err}");
+        assert!(err.contains("baseline `b` was not replaced"), "{err}");
+    }
 }
 
 /// The partial case on real counts: `a` compares cleanly, `b` was counted in
@@ -671,6 +688,41 @@ fn an_invalid_unrelated_benchmark_does_not_block_an_ad_hoc_baseline_run() {
         !marker.exists(),
         "the command ran before the file was checked"
     );
+}
+
+/// Saving over the baseline a run was gated against, when the gate fails,
+/// would make a retry compare the failure with itself and pass. So the
+/// baseline is kept, and the error says so. Another name is saved as usual.
+#[test]
+fn a_failed_gate_does_not_replace_the_baseline_it_was_gated_against() {
+    let repo = Repo::new();
+    write_baseline(&repo, "good", &[&counted_line("s")]);
+    let before = std::fs::read_to_string(repo.baseline_file("good")).unwrap();
+
+    // No counters here, so the gate fails: `s` is not counted in this run.
+    let flags = [NC, "--bench", "s", "--baseline", "good", "--gate"];
+    let err = fail(&tak_run(
+        &repo.dir,
+        &[&flags[..], &["--save-baseline", "good"]].concat(),
+        &["true"],
+    ));
+    assert!(
+        err.contains("baseline `good` was not replaced because the gate failed"),
+        "{err}"
+    );
+    assert!(err.contains("not counted in this run"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(repo.baseline_file("good")).unwrap(),
+        before
+    );
+
+    let err = fail(&tak_run(
+        &repo.dir,
+        &[&flags[..], &["--save-baseline", "other"]].concat(),
+        &["true"],
+    ));
+    assert!(!err.contains("was not replaced"), "{err}");
+    assert!(repo.baseline_file("other").exists());
 }
 
 /// A shell loop of `n` iterations: about 11,500 instructions each, so 2000

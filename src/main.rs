@@ -870,6 +870,22 @@ fn finish(
         }
         bail!("{} subject(s) failed: {}", failed.len(), failed.join(", "));
     }
+    // Decided before anything is stored, reported after: a regression is
+    // exactly the measurement a `--record` run exists to keep, and failing
+    // before storing would throw it away. The one exception is a baseline
+    // saved over the one it was gated against. Replacing `good` with the run
+    // that just failed against it would make a retry — or the next `git
+    // bisect run` step — compare the regression with itself and pass.
+    let verdict = match (&local.against, &compared, &local.gates) {
+        (Some(against), Some(compared), Some(gates)) if opts.gate => {
+            gate_against(against, compared, &failing, gates)
+        }
+        _ => Ok(()),
+    };
+    let kept = match &opts.save_baseline {
+        Some(name) if verdict.is_err() && opts.baseline.as_ref() == Some(name) => Some(name),
+        _ => None,
+    };
     if let Some(storing) = &storing {
         // Git notes keep the timings but not the check verdicts, which do not
         // fit how recorded metrics are read: `compare` keeps each metric's
@@ -894,30 +910,27 @@ fn finish(
         // leaves two records. With that order, a failed second write is
         // fixed by re-running the same command; the other order would
         // double-record every retry of a failed baseline save.
-        if let (Some(name), Some(store)) = (&opts.save_baseline, &local.store) {
+        if let (Some(name), Some(store)) = (&opts.save_baseline, &local.store)
+            && kept.is_none()
+        {
             save_baseline(store, name, &records)?;
         }
         if opts.record {
             record_all(&records).with_context(|| match &opts.save_baseline {
-                Some(name) => format!(
+                Some(name) if kept.is_none() => format!(
                     "baseline `{name}` was saved, but nothing was recorded to {}; \
                      re-running the same command saves the baseline again and records",
                     notes::NOTES_REF
                 ),
-                None => format!("nothing was recorded to {}", notes::NOTES_REF),
+                _ => format!("nothing was recorded to {}", notes::NOTES_REF),
             })?;
         }
     }
-    // Last, after anything asked for was stored: a regression is exactly the
-    // measurement a `--record` run exists to keep, and gating first would
-    // throw it away.
-    if opts.gate
-        && let (Some(against), Some(compared), Some(gates)) =
-            (&local.against, &compared, &local.gates)
-    {
-        gate_against(against, compared, &failing, gates)?;
+    match kept {
+        Some(name) => verdict
+            .with_context(|| format!("baseline `{name}` was not replaced because the gate failed")),
+        None => verdict,
     }
-    Ok(())
 }
 
 /// A subject whose check failed on at least one sample.
