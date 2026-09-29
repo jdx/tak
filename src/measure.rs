@@ -270,21 +270,26 @@ pub fn custom_metric(source: &MetricSource, s: &Subject, settings: &Settings) ->
 fn metric_cmd_once(argv: &[String], site: &Site) -> Result<f64> {
     let bin = &argv[0];
     let out = capture(argv, site, None, METRIC_OUTPUT_MAX, true)?;
+    // Either way the metric is lost, and whatever the command started is
+    // stopped, unlike after a `version_cmd`: a metric is taken between
+    // benchmarks, and a leftover would compete with the next one's samples.
+    // `capture` stops the group only while the command itself runs, so a
+    // background writer that crosses the cap after it exited, or that still
+    // holds stdout, is stopped here. Harmless when nothing is left.
+    if out.overflowed || out.stdout_open {
+        stop_leftovers(out.pgid);
+    }
     // Before the status: a command stopped for printing too much died of
     // tak's signal, and saying so would hide why it was stopped.
     if out.overflowed {
         bail!(
-            "`{bin}` printed more than {METRIC_OUTPUT_MAX} bytes, so it was stopped; a metric \
-             command prints one number and nothing else"
+            "`{bin}` and what it started printed more than {METRIC_OUTPUT_MAX} bytes, so they were \
+             stopped; a metric command prints one number and nothing else"
         );
     }
     // Something the command left running still holds its stdout and may
-    // print more, so what arrived so far is not known to be the whole
-    // answer. It is stopped too, unlike after a `version_cmd`: a metric is
-    // taken between benchmarks, and a leftover would compete with the next
-    // one's samples.
+    // print more, so what arrived so far is not known to be the whole answer.
     if out.stdout_open {
-        stop_leftovers(out.pgid);
         bail!(
             "`{bin}` exited but left a process holding its stdout open, so that was stopped; \
              a metric command must finish its output before it exits"
@@ -1930,7 +1935,7 @@ mod tests {
         // left to fill memory or a disk; `exec` so it is the command itself.
         let start = Instant::now();
         let err = format!("{:#}", sh("exec yes 1").unwrap_err());
-        assert!(err.contains("so it was stopped"), "{err}");
+        assert!(err.contains("so they were stopped"), "{err}");
         assert!(start.elapsed() < Duration::from_secs(4));
         // The error at the end of a long log is the one reported, not a line
         // from its start.
@@ -1950,36 +1955,51 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_metric_cmd_leaving_stdout_open_fails_and_is_stopped() {
+        let err = leftover_metric("sleep 30 & echo $! > pid; echo 7");
+        assert!(err.contains("stdout open"), "{err}");
+    }
+
+    /// A background writer that goes past the cap only after the command has
+    /// exited — too late for `capture` to stop the command itself — is still
+    /// stopped, and the error says what happened.
+    #[cfg(unix)]
+    #[test]
+    fn a_leftover_that_floods_stdout_after_exit_is_stopped() {
+        let err = leftover_metric("(sleep 0.1; exec yes 1) & echo $! > pid; echo 7");
+        assert!(
+            err.contains("more than 1024 bytes") && err.contains("what it started"),
+            "{err}"
+        );
+    }
+
+    /// Runs `script` as a metric command whose background process writes its
+    /// pid to `pid`, and checks that the metric fails promptly and the
+    /// background process does not outlive it. Returns the error.
+    #[cfg(unix)]
+    fn leftover_metric(script: &str) -> String {
         let dir = tempfile::tempdir().unwrap();
         let s = with_metrics(dir.path(), &[]);
         let start = Instant::now();
         let err = custom_metric(
-            &MetricSource::Cmd(vec![
-                "sh".into(),
-                "-c".into(),
-                "sleep 30 & echo $! > pid; echo 7".into(),
-            ]),
+            &MetricSource::Cmd(vec!["sh".into(), "-c".into(), script.into()]),
             &s,
             &Settings::default(),
         )
         .unwrap_err();
         assert!(start.elapsed() < Duration::from_secs(4));
-        assert!(format!("{err:#}").contains("stdout open"), "{err:#}");
         let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
+        let pid = pid.trim();
         // SIGKILL is delivered asynchronously; give it a moment to land.
-        let alive = |pid: &str| {
-            Command::new("kill")
-                .args(["-0", pid.trim()])
-                .stderr(Stdio::null())
-                .status()
-                .unwrap()
-                .success()
-        };
+        // `running`, not `kill -0`: the orphan may linger as a zombie.
         let until = Instant::now() + Duration::from_secs(2);
-        while alive(&pid) && Instant::now() < until {
+        while running(pid) && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(!alive(&pid), "the background process was left running");
+        assert!(
+            !running(pid),
+            "the background process {pid} was left running"
+        );
+        format!("{err:#}")
     }
 
     /// Runs `sh -c script` as a `version_cmd` with the given deadline.
