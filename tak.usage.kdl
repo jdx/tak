@@ -147,7 +147,7 @@ cmd compare help="Compare this commit's measurements against another's." {
     long_help #"""
 Compare this commit's measurements against another's.
 
-Fails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate` in the working tree's tak.toml. Wall clock is reported and never gated. A regression in a benchmark named by `--accept` is reported as accepted and does not fail. So is one named by a `Tak-Accept:` trailer on a commit in BASE..REV, but only when the `accept_trailers` setting is on.
+Fails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate` in the working tree's tak.toml, or when no series was measured on both sides. Wall clock is reported and never gated. A regression in a benchmark named by `--accept` is reported as accepted and does not fail. So is one named by a `Tak-Accept:` trailer on a commit in BASE..REV, but only when the `accept_trailers` setting is on.
 """#
     flag --rev help="Revision to compare. Defaults to HEAD." default=HEAD {
         arg <REV>
@@ -155,10 +155,11 @@ Fails when an instruction count has risen by more than `gate_pct` and `gate_min_
     flag --remote help="Remote to refresh notes from." default=origin {
         arg <REMOTE>
     }
-    flag --no-gate help="Report without failing, whatever the numbers say."
+    flag --no-gate help="Report without failing, whatever the numbers say. Takes precedence over `--allow-empty`: an empty comparison passes too."
     flag --accept help="Accept a regression in this benchmark: report it, but do not fail on it. Repeatable; each value is one exact benchmark name. Honoured whatever `accept_trailers` says." var=#true {
         arg <BENCH>
     }
+    flag --allow-empty help="Pass when no series was measured on both sides, instead of failing. For the first pull request after adopting tak, or a runner-class migration. A regression still fails."
     flag "-h --help" help="Print help" action=help builtin=#true
     arg "[BASE]" help="Revision to compare against." default="origin/main"
 }

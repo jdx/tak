@@ -207,7 +207,9 @@ jobs:
       # `--no-gate`, so the exit code means only "did the comparison run": a
       # plain `tak compare` exits 1 for a regression and for an error alike,
       # and here a rise is reported while an error must still fail. Whether
-      # counts rose comes from the report's own gate line instead. Status:
+      # counts rose comes from the report's own gate line instead. `--no-gate`
+      # also passes a comparison that found no series on both sides, so that
+      # is read from the report too, and fails like one that never ran. Status:
       # 0 clean, 1 rose beyond the gate (reported), 2 the comparison failed.
       #
       # Both verdict forms: `above the 1% gate` when every row is held to
@@ -230,6 +232,8 @@ jobs:
           ran=$?
           set -e
           if [ "$ran" -ne 0 ]; then
+            echo 2 > /tmp/tak-gate-status
+          elif grep -Fq '**Nothing was compared' /tmp/tak-report.md; then
             echo 2 > /tmp/tak-gate-status
           elif grep -Eq '(benchmark|accepted regression)\(s\) above (the .*% gate|their gate)' /tmp/tak-report.md; then
             echo 1 > /tmp/tak-gate-status

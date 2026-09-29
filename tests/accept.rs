@@ -332,6 +332,24 @@ fn a_trailer_outside_the_final_paragraph_is_not_one() {
     assert!(!stdout.contains("accepted"), "{stdout}");
 }
 
+/// An acceptance waives a regression; it is not a way to pass a comparison
+/// that compared nothing. With no series on both sides, `tak compare` fails
+/// whatever was accepted, and the acceptance is reported as naming nothing.
+#[test]
+fn an_acceptance_does_not_pass_an_empty_comparison() {
+    let dir = repo();
+    let base = commit(dir.path(), "base");
+    let head = commit(dir.path(), "slower");
+    note(dir.path(), &head, &[("startup", 1.1e6)]);
+    let (ok, stdout, stderr) = compare(dir.path(), &[&base, "--accept", "startup"]);
+    assert!(!ok, "{stdout}");
+    assert!(stderr.contains("nothing was compared"), "{stderr}");
+    assert!(
+        stdout.contains("no benchmark by that name was compared on both sides: `startup`"),
+        "{stdout}"
+    );
+}
+
 /// Acceptance layers on the per-benchmark gates in `tak.toml`: each series is
 /// judged against its own gate first. `startup` at 20% did not regress, so
 /// accepting it accepted nothing; `resolve` at the global 1% did, and a

@@ -290,6 +290,8 @@ jobs:
           set -e
           cat /tmp/tak-report.md
           cat /tmp/tak-report.md >> "$GITHUB_STEP_SUMMARY"
+          # Older tak releases exit 0 when nothing was compared; this keeps the
+          # gate failing on them. Drop it when passing --allow-empty.
           if grep -Fq '**Nothing was compared' /tmp/tak-report.md; then
             echo "::error::no comparable baseline was found"
             status=1
@@ -311,11 +313,23 @@ it. `tak compare` falls back
 to the prefetched local notes when its unauthenticated refresh fails. This keeps private
 repositories readable without exposing their token to pull-request-controlled code.
 
-An empty comparison is not a passing gate: it can mean that the base was never recorded or
-that the runner classes differ. The explicit report check fails either case. If the workflow
-also posts a sticky pull-request comment, keep the write token in a separate reporting job
-that checks out no code and executes nothing from the pull request. Pass the Markdown report
-and exit status to it as an artifact. mise's
+An empty comparison is not a passing gate. When no series was measured on both the merge base
+and the pull request, because the base was never recorded or the runner classes differ,
+`tak compare` prints the full report and then exits non-zero. Older releases print the same
+report and exit 0, which is why the example also checks the report for `**Nothing was compared`:
+the gate then fails whichever version the workflow pins.
+
+Two situations produce an empty comparison legitimately: the first pull request after adopting
+tak, whose merge base predates any main-branch measurement, and a runner-class migration, where
+every base series is on the old class. Pass `--allow-empty` for those pull requests, and remove
+the report check while it is passed, or the check still fails the job. Restore both once main has
+measurements on the current class. Left in place, `--allow-empty` lets a workflow that has
+stopped recording pass without comparing anything. A regression still fails under
+`--allow-empty`; only `--no-gate` reports without ever failing.
+
+If the workflow also posts a sticky pull-request comment, keep the write token in a separate
+reporting job that checks out no code and executes nothing from the pull request. Pass the
+Markdown report and exit status to it as an artifact. mise's
 [pull-request workflow](https://github.com/jdx/mise/blob/main/.github/workflows/perf-pr.yml)
 shows that separation.
 
@@ -339,6 +353,16 @@ A `Tak-Accept: startup` commit trailer can do the same, but only after the proje
 with `[gate] accept_trailers = true`. Trailers are written by the change being gated, so they
 are ignored by default. If the project opts in and squash-merges pull requests, keep the
 trailer in the final paragraph of the squashed commit message.
+
+`tak compare` reads `tak.toml` from the pull request's checkout, so a pull request can turn
+trailers on for itself. Set `TAK_ACCEPT_TRAILERS: "0"` in the environment of the job that
+compares, as the workflow above does. The environment takes precedence over the file. With
+[jdx/tak-action](#use-the-github-action), put it in the compare job's `env:` so that it
+reaches the action's steps. Whether the action can pass `--accept` depends on its release;
+its README lists its inputs.
+
+An acceptance never makes an empty comparison pass. When nothing was measured on both sides,
+`tak compare` still fails unless `--allow-empty` or `--no-gate` is given.
 
 ## Backfill published releases
 

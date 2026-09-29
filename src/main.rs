@@ -191,10 +191,11 @@ enum Cmd {
     ///
     /// Fails when an instruction count has risen by more than `gate_pct` and
     /// `gate_min_delta`, or by more than a benchmark's own `gate` in the
-    /// working tree's tak.toml. Wall clock is reported and never gated. A
-    /// regression in a benchmark named by `--accept` is reported as accepted
-    /// and does not fail. So is one named by a `Tak-Accept:` trailer on a
-    /// commit in BASE..REV, but only when the `accept_trailers` setting is on.
+    /// working tree's tak.toml, or when no series was measured on both
+    /// sides. Wall clock is reported and never gated. A regression in a
+    /// benchmark named by `--accept` is reported as accepted and does not
+    /// fail. So is one named by a `Tak-Accept:` trailer on a commit in
+    /// BASE..REV, but only when the `accept_trailers` setting is on.
     Compare {
         /// Revision to compare against.
         #[usage(arg, default = "origin/main")]
@@ -205,7 +206,8 @@ enum Cmd {
         /// Remote to refresh notes from.
         #[usage(long, default = "origin")]
         remote: String,
-        /// Report without failing, whatever the numbers say.
+        /// Report without failing, whatever the numbers say. Takes precedence
+        /// over `--allow-empty`: an empty comparison passes too.
         #[usage(long)]
         no_gate: bool,
         /// Accept a regression in this benchmark: report it, but do not fail
@@ -213,6 +215,11 @@ enum Cmd {
         /// whatever `accept_trailers` says.
         #[usage(long, value_name = "BENCH")]
         accept: Vec<String>,
+        /// Pass when no series was measured on both sides, instead of failing.
+        /// For the first pull request after adopting tak, or a runner-class
+        /// migration. A regression still fails.
+        #[usage(long)]
+        allow_empty: bool,
     },
     /// Diagnose the git-notes plumbing.
     Doctor,
@@ -1108,6 +1115,7 @@ fn cmd_compare(
     remote: String,
     no_gate: bool,
     accept_flags: Vec<String>,
+    allow_empty: bool,
     settings: &Settings,
 ) -> Result<()> {
     let gates = compare_gates(settings)?;
@@ -1156,9 +1164,26 @@ fn cmd_compare(
         compare::markdown(&comparison, &trend, &gates, settings.credit)
     );
 
+    if no_gate {
+        return Ok(());
+    }
+    // An empty comparison has no regressions, so the check below would pass
+    // it — and a gate that passed because it never ran reads exactly like one
+    // that ran clean. Opting out is a flag, not the default, because the usual
+    // causes are a broken workflow rather than a state worth accepting.
+    if comparison.is_empty() && !allow_empty {
+        bail!(
+            "nothing was compared: no series was measured on both {base} and {rev}. \
+             Either one side has no measurements recorded (the base predates \
+             adopting tak, or its notes were never pushed or fetched), or the two \
+             were measured on different runner classes, which are deliberately \
+             not comparable. Pass --allow-empty to accept this, as on the first \
+             pull request after adopting tak or across a runner-class migration"
+        )
+    }
     // Accepted regressions are reported above and do not count here.
     let regressions = comparison.failures(&gates);
-    if regressions.is_empty() || no_gate {
+    if regressions.is_empty() {
         return Ok(());
     }
     // A non-zero exit is the gate. The table above already says which and by
@@ -1668,12 +1693,14 @@ fn main() -> Result<()> {
             remote,
             no_gate,
             accept,
+            allow_empty,
         } => cmd_compare(
             base,
             rev,
             remote,
             no_gate,
             accept,
+            allow_empty,
             &resolve_settings(&overrides)?,
         ),
         // Tolerant on purpose: doctor diagnoses a broken setup, so a tak.toml
