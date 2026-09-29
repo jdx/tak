@@ -70,6 +70,27 @@ cmd history help="Show recorded history for a commit." {
     flag "-h --help" help="Print help" action=help builtin=#true
     arg "[REV]" help="Revision to read. Defaults to HEAD." default=HEAD
 }
+cmd log help="Show each benchmark's measurements over first-parent history." {
+    long_help #"""
+Show each benchmark's measurements over first-parent history.
+
+One table per benchmark and runner class, newest commit first, with the change in instruction count from the previous measurement. Commits with nothing recorded are skipped. `--html` writes the same history as a self-contained page of charts instead.
+"""#
+    flag "-n --limit" help="Most recent recorded commits to show." default="30" {
+        arg <LIMIT>
+    }
+    flag --bench help="Show only this benchmark. Repeatable." var=#true {
+        arg <NAME>
+    }
+    flag --html help="Write a self-contained HTML report to PATH instead of printing." {
+        arg <PATH>
+    }
+    flag --remote help="Remote to refresh notes from." default=origin {
+        arg <REMOTE>
+    }
+    flag "-h --help" help="Print help" action=help builtin=#true
+    arg "[REV]" help="Revision to walk back from. Defaults to HEAD." default=HEAD
+}
 cmd push help="Push recorded measurements to the remote." {
     flag --remote help="Remote to use for git-notes synchronization." default=origin {
         arg <REMOTE>
@@ -133,7 +154,7 @@ cmd compare help="Compare this commit's measurements against another's." {
     long_help #"""
 Compare this commit's measurements against another's.
 
-Fails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate` in the working tree's tak.toml. Wall clock is reported and never gated.
+Fails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate` in the working tree's tak.toml, or when no series was measured on both sides. Wall clock is reported and never gated.
 """#
     flag --rev help="Revision to compare. Defaults to HEAD." default=HEAD {
         arg <REV>
@@ -141,7 +162,8 @@ Fails when an instruction count has risen by more than `gate_pct` and `gate_min_
     flag --remote help="Remote to refresh notes from." default=origin {
         arg <REMOTE>
     }
-    flag --no-gate help="Report without failing, whatever the numbers say."
+    flag --no-gate help="Report without failing, whatever the numbers say. Takes precedence over `--allow-empty`: an empty comparison passes too."
+    flag --allow-empty help="Pass when no series was measured on both sides, instead of failing. For the first pull request after adopting tak, or a runner-class migration. A regression still fails."
     flag "-h --help" help="Print help" action=help builtin=#true
     arg "[BASE]" help="Revision to compare against." default="origin/main"
 }
