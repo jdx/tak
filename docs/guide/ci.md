@@ -79,5 +79,9 @@ different runner classes. Pass `--allow-empty` when that is expected: on the fir
 after adopting tak, or while a runner-class migration has left the base on the old class.
 `--no-gate` also passes an empty comparison, since it never fails.
 
+Older tak releases print the same report and exit 0. A workflow that may run one should also
+fail when the report contains `**Nothing was compared`, as the
+[pull-request example](/guide/adopting#gate-pull-requests) does.
+
 Always keep measurements partitioned by runner class. Comparing numbers across runner classes
 turns an infrastructure change into an apparent code regression.
