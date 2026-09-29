@@ -180,6 +180,19 @@ pub fn render(mut s: Subject, bench: &str, env: &BTreeMap<String, String>) -> Re
     for (k, v) in &mut s.env {
         *v = one(&ctx, &format!("env.{k}"), v)?;
     }
+    for (k, source) in &mut s.metrics {
+        match source {
+            crate::config::MetricSource::File(p) => {
+                let text = p.to_string_lossy().into_owned();
+                *p = one(&ctx, &format!("metric.{k}.file"), &text)?.into();
+            }
+            crate::config::MetricSource::Cmd(argv) => {
+                for a in argv {
+                    *a = one(&ctx, &format!("metric.{k}.cmd"), a)?;
+                }
+            }
+        }
+    }
     Ok(s)
 }
 
@@ -248,6 +261,33 @@ mod tests {
         );
         let r = render(s, "b", &env(&[("AUBE_BIN", "/opt/aube")])).unwrap();
         assert_eq!(r.version_cmd.unwrap(), ["/opt/aube", "--version"]);
+    }
+
+    /// A metric in `[defaults]` can name each subject's own file.
+    #[test]
+    fn metrics_are_rendered() {
+        use crate::config::MetricSource;
+        let s = subject(
+            r#"
+            [defaults.metric.binary_bytes]
+            file = "{{ env.BIN_DIR }}/{{ subject }}"
+            [defaults.metric.bundle_kb]
+            cmd = ["./size", "{{ vars.entry }}"]
+
+            [bench.b.subject.aube]
+            cmd = ["aube"]
+            vars = { entry = "main.js" }
+            "#,
+        );
+        let r = render(s, "b", &env(&[("BIN_DIR", "/opt/bin")])).unwrap();
+        assert_eq!(
+            r.metrics["binary_bytes"],
+            MetricSource::File("/opt/bin/aube".into())
+        );
+        assert_eq!(
+            r.metrics["bundle_kb"],
+            MetricSource::Cmd(vec!["./size".into(), "main.js".into()])
+        );
     }
 
     #[test]

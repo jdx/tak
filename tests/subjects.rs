@@ -1758,3 +1758,262 @@ fn a_failing_step_with_long_stderr_reports_its_last_line() {
         .unwrap();
     assert!(line.trim_end().ends_with(": final line"), "{line}");
 }
+
+/// Commit identity for the tests that record, so they do not depend on the
+/// host's git configuration.
+const IDENT: [(&str, &str); 4] = [
+    ("GIT_AUTHOR_NAME", "tak-test"),
+    ("GIT_AUTHOR_EMAIL", "t@example.com"),
+    ("GIT_COMMITTER_NAME", "tak-test"),
+    ("GIT_COMMITTER_EMAIL", "t@example.com"),
+];
+
+impl Project {
+    /// Run git in the project, failing the test if it fails.
+    fn git(&self, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&self.dir)
+            .envs(IDENT)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", stderr(&out));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// Commit everything, returning the new commit's sha.
+    fn commit(&self, msg: &str) -> String {
+        self.git(&["add", "-A"]);
+        self.git(&["commit", "-q", "--allow-empty", "-m", msg]);
+        self.git(&["rev-parse", "HEAD"]).trim().to_string()
+    }
+
+    /// Run a tak subcommand other than `run`.
+    fn tak(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_tak"))
+            .args(args)
+            .current_dir(&self.dir)
+            .envs(IDENT)
+            .output()
+            .expect("failed to run tak")
+    }
+}
+
+/// A benchmark with a file-size metric and a command metric. The command
+/// only prints its number when the token tak removes is really gone, and
+/// runs in the subject's `dir`, while the file is found from tak.toml.
+const METRICS_TOML: &str = r#"
+[bench.startup]
+cmd = ["true"]
+runs = 2
+warmup = 0
+dir = "fixture"
+
+[bench.startup.metric.binary_bytes]
+file = "bin"
+
+[bench.startup.metric.lines_count]
+cmd = ["sh", "-c", "test -z \"$GITHUB_TOKEN\" && wc -l < data | tr -d ' '"]
+"#;
+
+/// Custom metrics go through --record into the note beside the timings, and
+/// `tak compare` reports them in their own table without gating on them,
+/// however far they move.
+#[test]
+fn custom_metrics_are_recorded_and_compared_but_never_gate() {
+    let p = Project::new("metrics-record", METRICS_TOML);
+    std::fs::create_dir_all(p.path("fixture")).unwrap();
+    std::fs::write(p.path("bin"), vec![0u8; 1000]).unwrap();
+    std::fs::write(p.path("fixture/data"), "a\nb\nc\n").unwrap();
+    p.git(&["init", "-q"]);
+    let base = p.commit("base");
+
+    let out = p.run_env(
+        &["--no-progress", "--record", "--export-json", "r.json"],
+        &IDENT,
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("binary_bytes               1000"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("lines_count                   3"),
+        "{stdout}"
+    );
+    let note = p.git(&["notes", "--ref=tak", "show", &base]);
+    assert!(
+        note.contains("\"binary_bytes\":1000.0") && note.contains("\"lines_count\":3.0"),
+        "{note}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    assert_eq!(
+        json["results"][0]["metrics"],
+        serde_json::json!({"binary_bytes": 1000.0, "lines_count": 3.0})
+    );
+
+    std::fs::write(p.path("bin"), vec![0u8; 3000]).unwrap();
+    std::fs::write(p.path("fixture/data"), "a\nb\nc\nd\n").unwrap();
+    let head = p.commit("head");
+    let out = p.run_env(&["--no-progress", "--record"], &IDENT);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let out = p.tak(&["compare", &base, "--rev", &head, "--no-credit"]);
+    let report = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "a tripled binary must not fail the gate: {report}{}",
+        stderr(&out)
+    );
+    assert!(
+        report.contains("| startup | binary_bytes | 1,000 → 3,000 | +200.00% |"),
+        "{report}"
+    );
+    assert!(
+        report.contains("| startup | lines_count | 3 → 4 | +33.33% |"),
+        "{report}"
+    );
+}
+
+/// A declared metric that cannot be taken fails the run, and --record writes
+/// nothing: a commit missing the metric would look as if it had been
+/// dropped. The export is still written, with the broken metric as null.
+#[test]
+fn a_failing_metric_fails_the_run_and_records_nothing() {
+    let p = Project::new(
+        "metrics-fail",
+        r#"
+[bench.a]
+cmd = ["true"]
+runs = 1
+warmup = 0
+[bench.a.metric.size_bytes]
+file = "missing.bin"
+
+[bench.b]
+cmd = ["true"]
+runs = 1
+warmup = 0
+[bench.b.metric.bundle_kb]
+cmd = ["sh", "-c", "echo 'bundle: 12 kB'"]
+[bench.b.metric.ok_count]
+cmd = ["echo", "5"]
+"#,
+    );
+    p.git(&["init", "-q"]);
+    p.commit("init");
+
+    let out = p.run_env(
+        &["--no-progress", "--record", "--export-json", "r.json"],
+        &IDENT,
+    );
+    assert!(!out.status.success(), "a failed metric must fail the run");
+    let err = stderr(&out);
+    assert!(
+        err.contains("a: metric `size_bytes` failed") && err.contains("missing.bin"),
+        "{err}"
+    );
+    assert!(
+        err.contains("b: metric `bundle_kb` failed") && err.contains("not one number"),
+        "{err}"
+    );
+    assert!(err.contains("not recording"), "{err}");
+    assert!(err.contains("2 metric(s) failed"), "{err}");
+    assert!(
+        p.git(&["notes", "--ref=tak", "list"]).is_empty(),
+        "nothing recorded"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    let results = json["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2, "both benchmarks were still measured");
+    assert_eq!(
+        results[1]["metrics"],
+        serde_json::json!({"bundle_kb": null, "ok_count": 5.0})
+    );
+
+    // Without --record it still fails: a broken metric is a broken
+    // benchmark, not a result.
+    let out = p.run(&["--no-progress", "--bench", "a"]);
+    assert!(!out.status.success());
+    assert!(!stderr(&out).contains("not recording"), "{}", stderr(&out));
+}
+
+/// Metrics layer through `[defaults]` and templates, so one table can name
+/// each subject's own file, and each subject's value is on its summary line.
+#[test]
+fn a_default_metric_covers_every_subject() {
+    let p = Project::new(
+        "metrics-subjects",
+        r#"
+[defaults]
+runs = 1
+warmup = 0
+[defaults.metric.size_bytes]
+file = "{{ subject }}.bin"
+
+[bench.cmp.subject.small]
+cmd = ["true"]
+[bench.cmp.subject.large]
+cmd = ["true"]
+"#,
+    );
+    std::fs::write(p.path("small.bin"), vec![0u8; 10]).unwrap();
+    std::fs::write(p.path("large.bin"), vec![0u8; 2048]).unwrap();
+    let out = p.run(&["--no-progress", "--export-json", "r.json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = |name: &str| {
+        stdout
+            .lines()
+            .find(|l| l.trim_start().starts_with(name))
+            .unwrap_or_else(|| panic!("no {name} line: {stdout}"))
+            .to_string()
+    };
+    assert!(line("small").ends_with("size_bytes 10"), "{stdout}");
+    assert!(line("large").ends_with("size_bytes 2048"), "{stdout}");
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
+    let by = |s: &str| {
+        json["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["subject"] == s)
+            .unwrap()["metrics"]
+            .clone()
+    };
+    assert_eq!(by("large"), serde_json::json!({"size_bytes": 2048.0}));
+    assert_eq!(by("small"), serde_json::json!({"size_bytes": 10.0}));
+}
+
+/// --dry-run lists each metric where it would be taken from, and takes none.
+#[test]
+fn dry_run_shows_metrics_without_taking_them() {
+    let p = Project::new(
+        "metrics-dry",
+        r#"
+[bench.startup]
+cmd = ["true"]
+[bench.startup.metric.binary_bytes]
+file = "target/release/mycli"
+[bench.startup.metric.bundle_kb]
+cmd = ["sh", "-c", "echo ran >> log; echo 1"]
+"#,
+    );
+    let out = p.run(&["--dry-run"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let file = p.path("target/release/mycli");
+    assert!(
+        stdout.contains(&format!("metric   binary_bytes  file {}", file.display())),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("metric   bundle_kb  cmd sh -c 'echo ran >> log; echo 1'"),
+        "{stdout}"
+    );
+    assert!(p.log().is_empty(), "nothing ran");
+}

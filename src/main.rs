@@ -298,6 +298,9 @@ struct Measured {
     /// `Some(None)` when it failed.
     version: Option<Option<String>>,
     samples: measure::Samples,
+    /// Each declared custom metric's value, `None` when it could not be
+    /// taken. Also in `record.metrics` when it could.
+    custom: BTreeMap<String, Option<f64>>,
     record: Record,
 }
 
@@ -334,6 +337,7 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         warmup: opts.warmup.unwrap_or(DEFAULT_WARMUP),
         counters: true,
         ok_exit_codes: config::DEFAULT_OK_EXIT_CODES.to_vec(),
+        metrics: BTreeMap::new(),
     };
     let seed = opts.seed.unwrap_or_else(random_seed);
     if opts.dry_run {
@@ -625,6 +629,16 @@ fn print_plan(bench: &str, multi: bool, subjects: &[Subject], no_counters: bool)
         if s.counters && !no_counters {
             println!("{pad}counters on");
         }
+        for (name, source) in &s.metrics {
+            match source {
+                config::MetricSource::File(p) => {
+                    println!("{pad}metric   {name}  file {}", p.display())
+                }
+                config::MetricSource::Cmd(c) => {
+                    println!("{pad}metric   {name}  cmd {}", shell_words(c))
+                }
+            }
+        }
     }
 }
 
@@ -669,6 +683,7 @@ fn finish(
                 let mut r = ExportResult::new(&m.bench, &m.subject.name, command, &m.samples.times)
                     .with_exit_codes(&m.samples.exit_codes);
                 r.version = m.version.clone();
+                r.metrics = m.custom.clone();
                 if m.subject.check.is_some() {
                     r.with_checks(&m.samples.checks)
                 } else {
@@ -701,6 +716,28 @@ fn finish(
         }
         bail!("{} subject(s) failed: {}", failed.len(), failed.join(", "));
     }
+    // A declared metric that could not be taken fails the run, recording or
+    // not. Unlike a failed check it is not a finding about the subject — a
+    // missing file or a broken script is a broken benchmark — and recording
+    // the rest would leave a commit with the metric silently absent, which
+    // reads as the metric having been dropped rather than having failed.
+    let broken: Vec<String> = measured
+        .iter()
+        .flat_map(|m| {
+            m.custom
+                .iter()
+                .filter(|(_, v)| v.is_none())
+                .map(|(name, _)| format!("{} `{name}`", label(m)))
+        })
+        .collect();
+    if !broken.is_empty() {
+        if opts.record {
+            eprintln!(
+                "\n  not recording: a run missing a declared metric would be stored incomplete"
+            );
+        }
+        bail!("{} metric(s) failed: {}", broken.len(), broken.join(", "));
+    }
     if opts.record {
         // Git notes keep the timings but not the check verdicts, which do not
         // fit how recorded metrics are read: `compare` keeps each metric's
@@ -714,13 +751,9 @@ fn finish(
             .iter()
             .filter(|m| m.samples.passed() < m.samples.checks.len())
             .map(|m| {
-                let label = if m.subject.name == SELF_TOOL {
-                    m.bench.clone()
-                } else {
-                    format!("{} ({})", m.bench, m.subject.name)
-                };
                 format!(
-                    "{label} failed {} of {}",
+                    "{} failed {} of {}",
+                    label(m),
                     m.samples.checks.len() - m.samples.passed(),
                     m.samples.checks.len()
                 )
@@ -738,6 +771,26 @@ fn finish(
         record_all(&records)?;
     }
     Ok(())
+}
+
+/// How a measured subject is named in messages: the benchmark, plus the
+/// subject when it is one of several.
+fn label(m: &Measured) -> String {
+    if m.subject.name == SELF_TOOL {
+        m.bench.clone()
+    } else {
+        format!("{} ({})", m.bench, m.subject.name)
+    }
+}
+
+/// A metric value for the summary: whole numbers without a fraction, since
+/// most custom metrics are sizes and counts, and anything else as written.
+fn metric_value(v: f64) -> String {
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        format!("{v:.0}")
+    } else {
+        v.to_string()
+    }
 }
 
 /// Append every record in one write, so a run is stored whole or not at all.
@@ -866,6 +919,25 @@ fn measure_bench(
         if s.counters && !opts.no_counters {
             count_into(&mut metrics, s, settings);
         }
+        // Last, once the subject is done running: setup or the samples may
+        // be what produced the file or output being measured. A failure is
+        // reported here and fails the run in `finish`, after every other
+        // benchmark has been measured, so one broken script does not throw
+        // away the rest of a long run.
+        let mut custom = BTreeMap::new();
+        for (name, source) in &s.metrics {
+            let value = match measure::custom_metric(source, s, settings) {
+                Ok(v) => {
+                    metrics.insert(name.clone(), v);
+                    Some(v)
+                }
+                Err(e) => {
+                    eprintln!("  error: {label}: metric `{name}` failed: {e:#}");
+                    None
+                }
+            };
+            custom.insert(name.clone(), value);
+        }
 
         if multi {
             // One line per subject, in the order of a quick read: the floor
@@ -876,8 +948,12 @@ fn measure_bench(
                 .get("instructions")
                 .map_or(String::new(), |i| format!("  instructions {i:.0}"));
             let checked = checks.map_or(String::new(), |(p, t)| format!("  checks {p}/{t}"));
+            let extra: String = custom
+                .iter()
+                .filter_map(|(k, v)| v.map(|v| format!("  {k} {}", metric_value(v))))
+                .collect();
             println!(
-                "    {:<width$}  min {:>9.2}  p50 {:>9.2}  mean {:>9.2} ± {:<8.2} max {:>9.2} ms  n={}{checked}{count}",
+                "    {:<width$}  min {:>9.2}  p50 {:>9.2}  mean {:>9.2} ± {:<8.2} max {:>9.2} ms  n={}{checked}{count}{extra}",
                 s.name,
                 metrics["wall_min_ms"],
                 metrics["wall_p50_ms"],
@@ -896,6 +972,8 @@ fn measure_bench(
             }
             if k == "instructions" {
                 println!("  {k:<16} {v:>14.0}");
+            } else if s.metrics.contains_key(k) {
+                println!("  {k:<16} {:>14}", metric_value(*v));
             } else {
                 println!("  {k:<16} {v:>14.2}");
             }
@@ -917,6 +995,7 @@ fn measure_bench(
             subject: s.clone(),
             version: version.clone(),
             samples,
+            custom,
             record: Record {
                 v: SCHEMA_VERSION,
                 bench: bench.to_string(),

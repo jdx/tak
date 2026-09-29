@@ -13,7 +13,7 @@
 //! clock (~1%) but not deterministic, because they move with thread scheduling.
 //! They are recorded, and may be flagged, but must not gate at a tight threshold.
 
-use crate::config::{AutoRuns, DEFAULT_OK_EXIT_CODES, Runs, SELF_TOOL, Subject};
+use crate::config::{AutoRuns, DEFAULT_OK_EXIT_CODES, MetricSource, Runs, SELF_TOOL, Subject};
 use crate::settings::Settings;
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
@@ -221,6 +221,152 @@ fn untimed(step: &str, cmd: &[String], site: &Site) -> Result<Option<String>> {
         Some(last) => format!("{step} `{bin}` exited with {status}: {}", last.trim()),
         None => format!("{step} `{bin}` exited with {status}"),
     }))
+}
+
+/// The most a metric command may print. One number and a newline is a few
+/// dozen bytes; anything near this is a log or a report, not a value, and
+/// guessing which part of it was meant would record the wrong thing.
+const METRIC_OUTPUT_MAX: usize = 1024;
+
+/// A subject's custom metric: a file's size in bytes, or the one number a
+/// command prints.
+///
+/// Taken once, after the subject's samples and instruction counts, and not
+/// part of either. After, because `setup` or the samples themselves may be
+/// what produces the file or the output being measured.
+///
+/// A file is `stat`ed, following symlinks, and must be a regular file: a
+/// directory's size is filesystem bookkeeping, not the size of what is in it.
+///
+/// A command runs like `setup` or `check`: in the subject's `dir` and `env`,
+/// with the same variables removed, no shell, and no deadline. It must exit 0
+/// and print exactly one number; see [`parse_metric_value`]. Both streams go
+/// to anonymous files rather than pipes for the reason [`untimed`] gives: a
+/// script that leaves something running in the background must not hang the
+/// run by holding a pipe open.
+pub fn custom_metric(source: &MetricSource, s: &Subject, settings: &Settings) -> Result<f64> {
+    match source {
+        MetricSource::File(path) => {
+            let meta = std::fs::metadata(path)
+                .with_context(|| format!("could not read the size of {}", path.display()))?;
+            if !meta.is_file() {
+                bail!("{} is not a regular file", path.display());
+            }
+            Ok(meta.len() as f64)
+        }
+        MetricSource::Cmd(argv) => {
+            let site = Site {
+                dir: s.dir.as_deref(),
+                env: &s.env,
+                settings,
+            };
+            metric_cmd_once(argv, &site)
+        }
+    }
+}
+
+fn metric_cmd_once(argv: &[String], site: &Site) -> Result<f64> {
+    let mut c = command(argv, site)?;
+    let bin = &argv[0];
+    let file = || {
+        tempfile::tempfile()
+            .with_context(|| format!("failed to create a file for `{bin}`'s output"))
+    };
+    let (out, err) = (file()?, file()?);
+    let (out_reader, err_reader) = (
+        out.try_clone()
+            .with_context(|| format!("failed to create a file for `{bin}`'s output"))?,
+        err.try_clone()
+            .with_context(|| format!("failed to create a file for `{bin}`'s output"))?,
+    );
+    let status = c
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(out))
+        .stderr(Stdio::from(err))
+        .status()
+        .with_context(|| format!("failed to spawn `{bin}`"))?;
+    if !status.success() {
+        let tail = stderr_tail(&err_reader).unwrap_or_default();
+        let stderr = String::from_utf8_lossy(&tail);
+        match stderr.lines().rfind(|l| !l.trim().is_empty()) {
+            Some(last) => bail!("`{bin}` exited with {status}: {}", last.trim()),
+            None => bail!("`{bin}` exited with {status}"),
+        }
+    }
+    let len = out_reader
+        .metadata()
+        .with_context(|| format!("could not read `{bin}`'s output"))?
+        .len();
+    if len > METRIC_OUTPUT_MAX as u64 {
+        bail!("`{bin}` printed {len} bytes; a metric command prints one number and nothing else");
+    }
+    let mut buf = vec![0u8; len as usize];
+    let mut filled = 0;
+    while filled < buf.len() {
+        let n = read_at(&out_reader, &mut buf[filled..], filled as u64)
+            .with_context(|| format!("could not read `{bin}`'s output"))?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    buf.truncate(filled);
+    let text = std::str::from_utf8(&buf)
+        .map_err(|_| anyhow::anyhow!("`{bin}` printed something that is not UTF-8"))?;
+    parse_metric_value(text).with_context(|| format!("`{bin}`"))
+}
+
+/// Read a metric command's stdout as one number.
+///
+/// Deliberately strict. Surrounding whitespace, a trailing newline included,
+/// is ignored; what is left must be a single non-negative decimal: digits,
+/// optionally a fraction, optionally an exponent — `1234`, `12.5`, `1.2e6`.
+/// No sign, no `inf` or `nan`, no hex, no thousands separators, no unit, and
+/// nothing else on the line or on another one. A script that prints
+/// `bundle: 42 kB` or two numbers has a bug worth hearing about, and pulling
+/// the first number out of it would record whichever one happened to come
+/// first. Negative values are refused because `compare` reports a change as a
+/// percentage of the base, which is meaningless against a negative one, and
+/// nothing a size or a count measures goes below zero.
+pub fn parse_metric_value(text: &str) -> Result<f64> {
+    let t = text.trim_matches(|c: char| c.is_ascii_whitespace());
+    if t.is_empty() {
+        bail!("printed nothing; a metric command prints one number");
+    }
+    let bytes = t.as_bytes();
+    let digits = |i: &mut usize| {
+        let start = *i;
+        while *i < bytes.len() && bytes[*i].is_ascii_digit() {
+            *i += 1;
+        }
+        *i > start
+    };
+    let mut i = 0;
+    let mut ok = digits(&mut i);
+    if ok && i < bytes.len() && bytes[i] == b'.' {
+        i += 1;
+        ok = digits(&mut i);
+    }
+    if ok && i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
+        i += 1;
+        if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+            i += 1;
+        }
+        ok = digits(&mut i);
+    }
+    if !ok || i != bytes.len() {
+        bail!(
+            "printed {t:?}, not one number; a metric command prints a single non-negative \
+             number such as `1234` or `12.5`, and nothing else"
+        );
+    }
+    let v: f64 = t
+        .parse()
+        .with_context(|| format!("printed {t:?}, which is not a number"))?;
+    if !v.is_finite() {
+        bail!("printed {t:?}, which is too large to record");
+    }
+    Ok(v)
 }
 
 /// The last [`UNTIMED_STDERR_TAIL`] bytes of a step's stderr file.
@@ -697,6 +843,7 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
         warmup: plan.warmup,
         counters: false,
         ok_exit_codes: DEFAULT_OK_EXIT_CODES.to_vec(),
+        metrics: BTreeMap::new(),
     };
     // One subject has one possible order, so the seed is irrelevant.
     let samples = interleaved(
@@ -1540,6 +1687,7 @@ mod tests {
             warmup: 1,
             counters: false,
             ok_exit_codes: vec![0],
+            metrics: BTreeMap::new(),
         };
         let res = interleaved(
             &[mk("ok", &["true"]), mk("bad", &["false"])],
@@ -1549,6 +1697,113 @@ mod tests {
         );
         assert_eq!(res[0].as_ref().unwrap().times.len(), 4);
         assert!(format!("{:#}", res[1].as_ref().unwrap_err()).contains("exited with"));
+    }
+
+    /// One number and nothing else; anything a script might print around it
+    /// is refused rather than picked apart.
+    #[test]
+    fn a_metric_value_is_exactly_one_non_negative_number() {
+        for (text, want) in [
+            ("1234", 1234.0),
+            ("1234\n", 1234.0),
+            ("  \t12.5\r\n", 12.5),
+            ("0", 0.0),
+            ("1.5e3", 1500.0),
+            ("2E-2", 0.02),
+            ("007", 7.0),
+        ] {
+            assert_eq!(parse_metric_value(text).unwrap(), want, "{text:?}");
+        }
+        for bad in [
+            "", "\n", "-1", "+1", ".5", "5.", "1e", "1e+", "nan", "inf", "0x10", "1,234", "12 kB",
+            "1 2", "1\n2", "size: 3", "1e999",
+        ] {
+            assert!(parse_metric_value(bad).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    fn with_metrics(dir: &Path, env: &[(&str, &str)]) -> Subject {
+        Subject {
+            name: "s".into(),
+            cmd: vec!["true".into()],
+            prepare: None,
+            setup: None,
+            setup_dir: None,
+            check: None,
+            dir: Some(dir.to_path_buf()),
+            version_cmd: None,
+            env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            vars: BTreeMap::new(),
+            when: None,
+            runs: Runs::Fixed(1),
+            auto: AutoRuns {
+                budget: Duration::from_secs(30),
+                min: 5,
+                max: 50,
+            },
+            warmup: 0,
+            counters: false,
+            ok_exit_codes: vec![0],
+            metrics: BTreeMap::new(),
+        }
+    }
+
+    /// A file's size is its length in bytes; a directory has none worth
+    /// recording, and a missing file is an error that names it.
+    #[test]
+    fn a_file_metric_is_its_size_in_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("bin");
+        std::fs::write(&file, vec![0u8; 4321]).unwrap();
+        let s = with_metrics(dir.path(), &[]);
+        let settings = Settings::default();
+        assert_eq!(
+            custom_metric(&MetricSource::File(file), &s, &settings).unwrap(),
+            4321.0
+        );
+        let err = custom_metric(&MetricSource::File(dir.path().into()), &s, &settings).unwrap_err();
+        assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
+        let missing = dir.path().join("missing");
+        let err = custom_metric(&MetricSource::File(missing), &s, &settings).unwrap_err();
+        assert!(format!("{err:#}").contains("missing"), "{err:#}");
+    }
+
+    /// A metric command runs where the subject does, with its env, and must
+    /// exit 0 and print one number. The scrub is checked end to end in
+    /// `tests/subjects.rs`, which can set a token for tak without touching
+    /// this test binary's environment.
+    #[cfg(unix)]
+    #[test]
+    fn a_cmd_metric_runs_in_the_subjects_dir_and_env() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("here"), "").unwrap();
+        let s = with_metrics(dir.path(), &[("N", "42")]);
+        let settings = Settings::default();
+        let sh = |script: &str| {
+            custom_metric(
+                &MetricSource::Cmd(vec!["sh".into(), "-c".into(), script.into()]),
+                &s,
+                &settings,
+            )
+        };
+        assert_eq!(sh("test -e here && echo $N").unwrap(), 42.0);
+        let err = format!("{:#}", sh("echo 5; echo broke >&2; exit 3").unwrap_err());
+        assert!(
+            err.contains("exit status: 3") && err.contains("broke"),
+            "{err}"
+        );
+        let err = format!("{:#}", sh("echo 'bundle: 12 kB'").unwrap_err());
+        assert!(err.contains("not one number"), "{err}");
+        let err = format!("{:#}", sh("yes 1 | head -c 4096").unwrap_err());
+        assert!(err.contains("4096 bytes"), "{err}");
+        // Something left running in the background holding stdout open must
+        // not hold up the run.
+        let start = Instant::now();
+        assert_eq!(sh("sleep 5 & echo 7").unwrap(), 7.0);
+        assert!(start.elapsed() < Duration::from_secs(4));
     }
 
     /// Runs `sh -c script` as a `version_cmd` with the given deadline.
@@ -1744,6 +1999,7 @@ mod tests {
                 warmup: 0,
                 counters: false,
                 ok_exit_codes: vec![0],
+                metrics: BTreeMap::new(),
             }],
             0,
             &Settings::default(),
@@ -1787,6 +2043,7 @@ mod tests {
             warmup,
             counters: false,
             ok_exit_codes: vec![0],
+            metrics: BTreeMap::new(),
         }
     }
 
@@ -1944,6 +2201,7 @@ mod tests {
             warmup: 1,
             counters: false,
             ok_exit_codes: vec![0],
+            metrics: BTreeMap::new(),
         };
         let mut log = Log::default();
         let res = interleaved(
@@ -1994,6 +2252,7 @@ mod tests {
             warmup,
             counters: false,
             ok_exit_codes: vec![0],
+            metrics: BTreeMap::new(),
         };
         let mut log = Log::default();
         // The slow one has no warmup, so its first kept sample sizes it.

@@ -8,10 +8,12 @@
 //! holds several benchmarks. `user` and `system` are omitted because tak does
 //! not measure CPU time. Everything tak adds is an extra key, and none of
 //! hyperfine's changes meaning: `checks` is present only for a subject with a
-//! `check`, and `version` only for one with a `version_cmd`.
+//! `check`, `version` only for one with a `version_cmd`, and `metrics` only
+//! for one with custom metrics.
 
 use anyhow::{Context, Result};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 #[derive(Debug, Serialize)]
@@ -69,6 +71,12 @@ pub struct ExportResult {
     /// The outcome of the subject's `check`, when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checks: Option<Checks>,
+    /// The subject's custom metrics by name, each `null` when it could not
+    /// be taken. Absent for a subject that declares none, so the hyperfine
+    /// shape is unchanged for everyone else. A BTreeMap so the keys come
+    /// out in the same order every run.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub metrics: BTreeMap<String, Option<f64>>,
 }
 
 /// How a subject's timed samples fared against its `check`.
@@ -122,6 +130,7 @@ impl ExportResult {
             exit_codes: vec![0; n],
             times,
             checks: None,
+            metrics: BTreeMap::new(),
         }
     }
 
@@ -189,6 +198,23 @@ mod tests {
         assert!(serde_json::to_value(&r).unwrap()["version"].is_null());
         r.version = Some(Some("tool 1.2.3".into()));
         assert_eq!(serde_json::to_value(&r).unwrap()["version"], "tool 1.2.3");
+    }
+
+    /// Custom metrics appear only for a subject that declares some, and a
+    /// failed one is `null` rather than missing, so a reader can tell "not
+    /// declared" from "declared and broken".
+    #[test]
+    fn metrics_are_exported_only_when_declared() {
+        let mut r = ExportResult::new("b", "s", "s", &[5.0]);
+        assert!(serde_json::to_value(&r).unwrap().get("metrics").is_none());
+        r.metrics = BTreeMap::from([
+            ("binary_bytes".to_string(), Some(1234.0)),
+            ("bundle_kb".to_string(), None),
+        ]);
+        assert_eq!(
+            serde_json::to_value(&r).unwrap()["metrics"],
+            serde_json::json!({"binary_bytes": 1234.0, "bundle_kb": null})
+        );
     }
 
     #[test]

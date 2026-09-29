@@ -9,7 +9,7 @@
 //! Rendering lives in [`markdown`], separate from the comparison itself, so a
 //! chart or a different report format is a new function rather than a rewrite.
 
-use crate::record::Record;
+use crate::record::{Record, is_builtin_metric};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The only metric a gate may fire on.
@@ -291,6 +291,7 @@ pub fn markdown(c: &Comparison, trend: &Trend, gate_pct: f64, credit: bool) -> S
         );
     } else {
         out.push_str(&table(c, trend, gate_pct));
+        out.push_str(&custom_table(c));
     }
 
     out.push_str(&outliers(c));
@@ -398,6 +399,60 @@ fn table(c: &Comparison, trend: &Trend, gate_pct: f64) -> String {
     }
 
     out
+}
+
+/// Custom metrics — anything a project declared in `tak.toml` rather than
+/// something tak measured itself — as a table of their own, or nothing when
+/// there are none.
+///
+/// Separate from the main table rather than more columns on it: the set of
+/// custom metrics differs from project to project and from benchmark to
+/// benchmark, so columns would be mostly empty, and a project without any
+/// keeps exactly the table it had. One row per series and metric, in the
+/// order `compare` produced them, which groups a series' metrics together.
+///
+/// Never flagged: nothing here gates, whatever it did. A declared metric is a
+/// number from a file or a script tak knows nothing about, and nothing has
+/// shown it to be as repeatable as an instruction count.
+fn custom_table(c: &Comparison) -> String {
+    let rows: Vec<&Change> = c
+        .changes
+        .iter()
+        .filter(|ch| !is_builtin_metric(&ch.metric))
+        .collect();
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n| benchmark | metric | value | Δ |\n|---|---|---:|---:|\n");
+    for ch in rows {
+        let name = if ch.tool == "self" {
+            ch.bench.clone()
+        } else {
+            format!("{} ({})", ch.bench, ch.tool)
+        };
+        out.push_str(&format!(
+            "| {name} | {} | {} → {} | {} |\n",
+            ch.metric,
+            plain(ch.base),
+            plain(ch.head),
+            signed_pct(ch.pct())
+        ));
+    }
+    out.push_str(
+        "\n<sub>Metrics declared in tak.toml are reported, never gated. As for every \
+         metric, lower is taken as better.</sub>\n",
+    );
+    out
+}
+
+/// A custom metric's value: separated like a count when it is whole, which
+/// sizes and counts are, and as written otherwise.
+fn plain(v: f64) -> String {
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        thousands(v)
+    } else {
+        v.to_string()
+    }
 }
 
 /// How a series is named in prose: bench, plus the tool when it is not the
@@ -722,6 +777,67 @@ mod tests {
         let md = markdown(&c, &trend, 1.0, false);
         assert!(md.contains("| trend |"), "{md}");
         assert!(md.contains('█'), "{md}");
+    }
+
+    /// Declared metrics get a table of their own and never gate, however far
+    /// they move; the main table is exactly what it was without them.
+    #[test]
+    fn custom_metrics_are_a_separate_table_and_never_gate() {
+        let with = |bytes: f64, kb: f64| {
+            let mut r = rec("a", "gha", 1_000_000.0, 10.0);
+            r.metrics.insert("binary_bytes".into(), bytes);
+            r.metrics.insert("bundle_kb".into(), kb);
+            r
+        };
+        let c = compare(&[with(4_000_000.0, 10.5)], &[with(8_000_000.0, 12.25)]);
+        assert!(
+            c.regressions(0.0).is_empty(),
+            "a doubled binary must not fail the gate"
+        );
+        let md = markdown(&c, &Trend::new(), 1.0, false);
+        assert!(md.contains("| benchmark | metric | value | Δ |"), "{md}");
+        assert!(
+            md.contains("| a | binary_bytes | 4,000,000 → 8,000,000 | +100.00% |"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| a | bundle_kb | 10.5 → 12.25 | +16.67% |"),
+            "{md}"
+        );
+        assert!(md.contains("No instruction-count regression"), "{md}");
+        assert!(md.contains("never gated"), "{md}");
+
+        let plain = compare(
+            &[rec("a", "gha", 1_000_000.0, 10.0)],
+            &[rec("a", "gha", 1_000_000.0, 10.0)],
+        );
+        let md = markdown(&plain, &Trend::new(), 1.0, false);
+        assert!(!md.contains("| metric |"), "{md}");
+        assert!(!md.contains("tak.toml"), "{md}");
+        // The main table has the same columns with or without them.
+        let header = |md: &str| md.lines().next().unwrap().to_string();
+        assert_eq!(
+            header(&markdown(&c, &Trend::new(), 1.0, false)),
+            header(&md)
+        );
+    }
+
+    /// Timing statistics other than the minimum are recorded but were never
+    /// shown; they must not start appearing as if they were declared.
+    #[test]
+    fn built_in_metrics_stay_out_of_the_custom_table() {
+        let with = |p50: f64| {
+            let mut r = rec("a", "gha", 1_000_000.0, 10.0);
+            r.metrics.insert("wall_p50_ms".into(), p50);
+            r
+        };
+        let md = markdown(
+            &compare(&[with(11.0)], &[with(12.0)]),
+            &Trend::new(),
+            1.0,
+            false,
+        );
+        assert!(!md.contains("wall_p50_ms"), "{md}");
     }
 
     #[test]
