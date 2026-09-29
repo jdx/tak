@@ -753,11 +753,23 @@ fn finish(
     // reports as a profile on one side only.
     if let Some(dir) = &opts.profile_dir {
         let runner = runner_class(settings);
+        // What `--record` would attach the counts to, so `tak explain` can
+        // find them. Outside a repository there is nothing to check against.
+        let commit = notes::rev_parse("HEAD").ok();
         let mut written = 0usize;
         for m in &measured {
             if let Some(raw) = &m.profile {
                 let dest = tak_cli::profile::path_for(dir, &m.bench, &m.subject.name)?;
-                tak_cli::profile::write(&dest, raw, &runner)?;
+                let origin = tak_cli::profile::Origin {
+                    runner: runner.clone(),
+                    commit: commit.clone(),
+                    bench: m.bench.clone(),
+                    // The series name the record uses, which is what the notes
+                    // are looked up by; for a single command that may be
+                    // TAK_TOOL rather than `self`.
+                    subject: m.record.tool.clone(),
+                };
+                tak_cli::profile::write(&dest, raw, &origin)?;
                 written += 1;
             }
         }
@@ -1023,6 +1035,19 @@ fn count_into(
     };
     match counted {
         Ok(Some((c, profile))) => {
+            // The count stands without its profile; only the explanation is
+            // lost, and saying so beats a missing file nobody notices.
+            let profile = match profile {
+                Some(Ok(raw)) => Some(raw),
+                Some(Err(e)) => {
+                    eprintln!(
+                        "warning: {}: instruction count kept, but its profile was not: {e:#}",
+                        s.name
+                    );
+                    None
+                }
+                None => None,
+            };
             metrics.insert("instructions".into(), c.min as f64);
             if c.is_suspect() {
                 eprintln!(
@@ -1153,7 +1178,21 @@ fn cmd_explain(base: &Path, head: &Path, top: usize) -> Result<()> {
         bail!("--top must be at least 1");
     }
     let (pairs, unpaired) = tak_cli::profile::load(base, head)?;
-    print!("{}", tak_cli::profile::markdown(&pairs, &unpaired, top));
+    // Local notes only, no fetch: the check is a warning, and a report that
+    // waits on the network, or fails without one, costs more than it adds.
+    let recorded = |o: &tak_cli::profile::Origin| {
+        let records = notes::read(None, o.commit.as_deref()?).ok()?;
+        records
+            .iter()
+            .filter(|r| r.bench == o.bench && r.tool == o.subject && r.runner == o.runner)
+            .filter_map(|r| r.metrics.get(compare::GATED_METRIC))
+            .map(|v| *v as u64)
+            .min()
+    };
+    print!(
+        "{}",
+        tak_cli::profile::markdown(&pairs, &unpaired, top, &recorded)
+    );
     Ok(())
 }
 

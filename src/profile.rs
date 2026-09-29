@@ -26,15 +26,26 @@ use std::path::{Path, PathBuf};
 /// here and would stop a base and a head from pairing up by name.
 pub const EXTENSION: &str = ".cachegrind.out";
 
-/// The `desc:` line naming the runner class a profile was taken on.
+/// Where a profile came from, written into it as `desc: tak <key>: <value>`
+/// lines.
 ///
 /// `desc:` is the format's own slot for free-form description, and
 /// `cg_annotate` prints it, so a profile that has been copied out of its
-/// directory still says where it came from. It matters for the same reason
-/// the notes are partitioned on runner: between runner classes a different
-/// glibc picks a different `memcpy`, and an attribution across them reads as
-/// one function vanishing and another appearing.
-const RUNNER_DESC: &str = "tak runner: ";
+/// directory still says where it came from.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Origin {
+    /// The runner class. It matters for the same reason the notes are
+    /// partitioned on it: between runner classes a different glibc picks a
+    /// different `memcpy`, and an attribution across them reads as one
+    /// function vanishing and another appearing.
+    pub runner: String,
+    /// The commit measured, when there was one. With the benchmark and
+    /// subject, it lets `tak explain` find what the notes recorded for the
+    /// same series and say when a later run replaced the profile behind it.
+    pub commit: Option<String>,
+    pub bench: String,
+    pub subject: String,
+}
 
 /// Where `tak run --profile-dir DIR` keeps a subject's profile:
 /// `DIR/<bench>/<subject>.cachegrind.out`.
@@ -43,36 +54,57 @@ const RUNNER_DESC: &str = "tak runner: ";
 /// string. A name that is not a single, ordinary path component is refused
 /// rather than escaped: `[bench."../x"]` writing outside the directory is
 /// the failure being prevented, and an escaped name would no longer be the
-/// name a reader looks for.
+/// name a reader looks for. Control characters are refused too: a newline
+/// would split the `desc:` line the name is written into, and ends up in a
+/// report heading.
 pub fn path_for(dir: &Path, bench: &str, subject: &str) -> Result<PathBuf> {
     for (what, name) in [("benchmark", bench), ("subject", subject)] {
-        let plain =
-            !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0']);
+        let plain = !name.is_empty()
+            && name != "."
+            && name != ".."
+            && !name.contains(['/', '\\'])
+            && !name.chars().any(char::is_control);
         if !plain {
             bail!(
-                "--profile-dir cannot name a file after {what} `{name}`: it is not a plain file name"
+                "--profile-dir cannot name a file after {what} {name:?}: it is not a plain file name"
             );
         }
     }
     Ok(dir.join(bench).join(format!("{subject}{EXTENSION}")))
 }
 
-/// Write a profile to `dest`, naming the runner class it was taken on.
+/// Write a profile to `dest`, with where it came from.
 ///
 /// Through a temporary file in the same directory and a rename, so an
 /// interrupted run leaves the previous profile or the new one, never half of
 /// one that parses as a function set with most of its functions missing.
-pub fn write(dest: &Path, raw: &[u8], runner: &str) -> Result<()> {
+pub fn write(dest: &Path, raw: &[u8], origin: &Origin) -> Result<()> {
     let parent = dest.parent().context("a profile path has a directory")?;
     std::fs::create_dir_all(parent)
         .with_context(|| format!("could not create {}", parent.display()))?;
     let mut tmp = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("could not write a profile in {}", parent.display()))?;
-    // `desc:` lines lead the file in the format's grammar, so prepending one
-    // leaves it readable by cachegrind's own tools.
+    // `desc:` lines lead the file in the format's grammar, so prepending them
+    // leaves it readable by cachegrind's own tools. One line each, whatever
+    // a value holds.
+    let mut head = String::new();
+    let fields = [
+        ("runner", Some(origin.runner.as_str())),
+        ("commit", origin.commit.as_deref()),
+        ("bench", Some(origin.bench.as_str())),
+        ("subject", Some(origin.subject.as_str())),
+    ];
+    for (key, value) in fields {
+        if let Some(v) = value {
+            let v: String = v
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect();
+            head.push_str(&format!("desc: tak {key}: {v}\n"));
+        }
+    }
     use std::io::Write;
-    let runner = runner.replace(['\n', '\r'], " ");
-    writeln!(tmp, "desc: {RUNNER_DESC}{runner}")
+    tmp.write_all(head.as_bytes())
         .and_then(|()| tmp.write_all(raw))
         .with_context(|| format!("could not write {}", dest.display()))?;
     tmp.persist(dest)
@@ -119,9 +151,28 @@ pub struct Profile {
 }
 
 impl Profile {
+    /// What `tak run --profile-dir` recorded about where this came from, when
+    /// it wrote the file. `None` for a profile from anywhere else.
+    pub fn origin(&self) -> Option<Origin> {
+        let get = |key: &str| {
+            self.desc.iter().find_map(|d| {
+                d.strip_prefix("tak ")?
+                    .strip_prefix(key)?
+                    .strip_prefix(": ")
+                    .map(str::to_string)
+            })
+        };
+        Some(Origin {
+            runner: get("runner")?,
+            commit: get("commit"),
+            bench: get("bench").unwrap_or_default(),
+            subject: get("subject").unwrap_or_default(),
+        })
+    }
+
     /// The runner class `tak run --profile-dir` recorded, if it wrote this.
-    pub fn runner(&self) -> Option<&str> {
-        self.desc.iter().find_map(|d| d.strip_prefix(RUNNER_DESC))
+    pub fn runner(&self) -> Option<String> {
+        self.origin().map(|o| o.runner)
     }
 
     pub fn load(path: &Path) -> Result<Profile> {
@@ -194,7 +245,10 @@ pub fn parse(text: &str) -> Result<Profile> {
 
     for (i, line) in text.lines().enumerate() {
         let n = i + 1;
-        let line = line.trim_end();
+        // Both ends: cachegrind writes no indentation, but a converted or
+        // hand-edited profile may, and an indented cost line skipped as
+        // unrecognised would understate its function while the total stood.
+        let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -367,15 +421,39 @@ fn scan(dir: &Path) -> Result<BTreeMap<String, PathBuf>> {
     Ok(out)
 }
 
-/// `bench/subject.cachegrind.out` as the comparison table names it.
+/// `bench/subject.cachegrind.out` as the comparison table names it, as
+/// markdown.
+///
+/// Escaped, because names come from `tak.toml` and file names, and in CI the
+/// pull request being reported on controls both. A name must stay a label:
+/// one that could open a heading or a link could write its own claims into
+/// the step summary.
 fn label(rel: &str) -> String {
     let (bench, file) = rel.split_once('/').unwrap_or(("", rel));
     let subject = file.strip_suffix(EXTENSION).unwrap_or(file);
     match bench {
-        "" => subject.to_string(),
-        _ if subject == crate::config::SELF_TOOL => bench.to_string(),
-        _ => format!("{bench} ({subject})"),
+        "" => text(subject),
+        _ if subject == crate::config::SELF_TOOL => text(bench),
+        _ => format!("{} ({})", text(bench), text(subject)),
     }
+}
+
+/// Untrusted text as inert markdown: control characters, newlines among
+/// them, become spaces, and anything markdown could read as syntax is
+/// backslash-escaped.
+fn text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() {
+            out.push(' ');
+            continue;
+        }
+        if "\\`*_[]<>#|!~&".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Pair up what to explain: two directories `tak run --profile-dir` wrote,
@@ -424,11 +502,43 @@ pub fn load(base: &Path, head: &Path) -> Result<(Vec<Pair>, Unpaired)> {
     }
 }
 
-/// A name inside a markdown table cell. Rust and C++ names carry `|` in
-/// closures and `<`…`>` in generics; the pipe would end the cell, and a
-/// backtick would end the code span.
+/// A name as a code span, fit for a table cell. Rust and C++ names carry `|`
+/// in closures and `<`…`>` in generics; the pipe would end the cell, a
+/// backtick would end the code span, and a newline would end the row.
 fn cell(name: &str) -> String {
-    format!("`{}`", name.replace('`', "'").replace('|', "\\|"))
+    let name: String = name
+        .chars()
+        .map(|c| match c {
+            '`' => '\'',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+    format!("`{}`", name.replace('|', "\\|"))
+}
+
+/// A warning when a profile is not from the run whose count the notes hold.
+///
+/// Profiles are overwritten by the next run, while `tak compare` takes the
+/// lowest of every count recorded for a commit. Measure twice — a rebuilt
+/// binary on the same commit, or a subject whose work varies — and the
+/// profile left behind can describe a different count from the one the gate
+/// used, which is worth saying rather than explaining the wrong number.
+fn mismatch(side: &str, p: &Profile, recorded: &dyn Fn(&Origin) -> Option<u64>) -> String {
+    let Some(origin) = p.origin() else {
+        return String::new();
+    };
+    match (origin.commit.as_deref(), recorded(&origin)) {
+        (Some(commit), Some(n)) if n != p.total => format!(
+            "\n> [!WARNING]\n> The {side} profile totals {} instructions, but the lowest count \
+             recorded for {} in git notes is {}. The profile is not from the run that count \
+             came from.\n",
+            crate::compare::thousands(p.total as f64),
+            cell(&commit[..commit.len().min(12)]),
+            crate::compare::thousands(n as f64),
+        ),
+        _ => String::new(),
+    }
 }
 
 fn signed(v: i128) -> String {
@@ -445,7 +555,16 @@ fn signed(v: i128) -> String {
 ///
 /// The rows shown and a final row for the rest add up to the total change,
 /// so a reader can see how much of it the table accounts for.
-pub fn markdown(pairs: &[Pair], unpaired: &Unpaired, top: usize) -> String {
+///
+/// `recorded` looks up the instruction count git notes hold for a profile's
+/// series, so a profile replaced since that count was recorded is called out.
+/// It is a parameter so this stays free of git.
+pub fn markdown(
+    pairs: &[Pair],
+    unpaired: &Unpaired,
+    top: usize,
+    recorded: &dyn Fn(&Origin) -> Option<u64>,
+) -> String {
     let mut out = String::from("## Where the instructions went\n");
     if pairs.is_empty() {
         out.push_str("\nNo benchmark has a profile on both sides, so nothing was explained.\n");
@@ -473,11 +592,15 @@ pub fn markdown(pairs: &[Pair], unpaired: &Unpaired, top: usize) -> String {
             && b != h
         {
             out.push_str(&format!(
-                "\n> [!WARNING]\n> Profiled on different runner classes (`{b}` and `{h}`). \
+                "\n> [!WARNING]\n> Profiled on different runner classes ({} and {}). \
                  Library code differs between machines, so some of what follows is the \
-                 machine rather than the change.\n"
+                 machine rather than the change.\n",
+                cell(&b),
+                cell(&h)
             ));
         }
+        out.push_str(&mismatch("base", &pair.base, recorded));
+        out.push_str(&mismatch("head", &pair.head, recorded));
         let deltas = diff(&pair.base, &pair.head);
         if deltas.is_empty() {
             out.push_str("\nNo function's instruction count changed.\n");
@@ -517,10 +640,7 @@ pub fn markdown(pairs: &[Pair], unpaired: &Unpaired, top: usize) -> String {
         if !list.is_empty() {
             out.push_str(&format!(
                 "\nOnly in the {side}, so not explained: {}\n",
-                list.iter()
-                    .map(|p| format!("`{p}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                list.iter().map(|p| cell(p)).collect::<Vec<_>>().join(", ")
             ));
         }
     }
@@ -659,15 +779,47 @@ fn=callee
         assert!(parse("hello\n").is_err());
     }
 
+    fn origin(runner: &str) -> Origin {
+        Origin {
+            runner: runner.into(),
+            commit: Some("0123456789abcdef".into()),
+            bench: "startup".into(),
+            subject: "self".into(),
+        }
+    }
+
+    /// No notes to check against.
+    fn unrecorded(_: &Origin) -> Option<u64> {
+        None
+    }
+
     #[test]
-    fn the_runner_is_read_back_from_the_description() {
+    fn the_origin_is_read_back_from_the_description() {
         let dir = tempfile::tempdir().unwrap();
         let dest = path_for(dir.path(), "startup", "self").unwrap();
-        write(&dest, BASE.as_bytes(), "gha-linux-x64").unwrap();
+        write(&dest, BASE.as_bytes(), &origin("gha-linux-x64")).unwrap();
         let p = Profile::load(&dest).unwrap();
-        assert_eq!(p.runner(), Some("gha-linux-x64"));
+        assert_eq!(p.origin(), Some(origin("gha-linux-x64")));
+        assert_eq!(p.runner().as_deref(), Some("gha-linux-x64"));
         // The rest is untouched.
         assert_eq!(p.total, parse(BASE).unwrap().total);
+        // And a profile tak did not write has none.
+        assert_eq!(parse(BASE).unwrap().origin(), None);
+    }
+
+    /// A value cannot add a `desc:` line of its own, or a cost line.
+    #[test]
+    fn an_origin_stays_on_its_own_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("p");
+        let o = Origin {
+            runner: "r\nfl=x\nfn=y\n1 999".into(),
+            ..origin("r")
+        };
+        write(&dest, BASE.as_bytes(), &o).unwrap();
+        let p = Profile::load(&dest).unwrap();
+        assert_eq!(p.total, 1_500);
+        assert!(!p.functions.contains_key("y"));
     }
 
     #[test]
@@ -683,6 +835,9 @@ fn=callee
             ("a", ""),
             ("a", "."),
             ("a", "b\\c"),
+            ("a\nb", "x"),
+            ("a", "x\r"),
+            ("a\0", "x"),
         ] {
             assert!(
                 path_for(dir, bench, subject).is_err(),
@@ -701,6 +856,17 @@ fn=callee
         assert_eq!(label("mine.cachegrind.out"), "mine");
     }
 
+    /// A name from a pull request's `tak.toml` stays a label: it cannot open
+    /// a heading, a link or an HTML tag in the step summary.
+    #[test]
+    fn a_label_cannot_add_markdown() {
+        assert_eq!(
+            label("x\n## All clear/[ok](http:\\/e)<b>.cachegrind.out"),
+            "x \\#\\# All clear (\\[ok\\](http:\\\\/e)\\<b\\>)"
+        );
+        assert_eq!(cell("a\nb`c"), "`a b'c`");
+    }
+
     #[test]
     fn directories_pair_on_benchmark_and_subject() {
         let (b, h) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -712,7 +878,7 @@ fn=callee
                 write(
                     &path_for(dir.path(), "startup", s).unwrap(),
                     text.as_bytes(),
-                    "r",
+                    &origin("r"),
                 )
                 .unwrap();
             }
@@ -733,7 +899,7 @@ fn=callee
             base: parse(BASE).unwrap(),
             head: parse(HEAD).unwrap(),
         };
-        let md = markdown(&[pair], &Unpaired::default(), 2);
+        let md = markdown(&[pair], &Unpaired::default(), 2, &unrecorded);
         assert!(
             md.contains("1,500 → 2,110 instructions (+610, **+40.67%**)"),
             "{md}"
@@ -752,14 +918,14 @@ fn=callee
     fn different_runners_are_called_out() {
         let mut base = parse(BASE).unwrap();
         let mut head = base.clone();
-        base.desc.push(format!("{RUNNER_DESC}a"));
-        head.desc.push(format!("{RUNNER_DESC}b"));
+        base.desc.push("tak runner: a".into());
+        head.desc.push("tak runner: b".into());
         let pair = Pair {
             label: "x".into(),
             base,
             head,
         };
-        let md = markdown(&[pair], &Unpaired::default(), 10);
+        let md = markdown(&[pair], &Unpaired::default(), 10, &unrecorded);
         assert!(
             md.contains("different runner classes (`a` and `b`)"),
             "{md}"
@@ -768,6 +934,58 @@ fn=callee
             md.contains("No function's instruction count changed."),
             "{md}"
         );
+    }
+
+    /// A profile replaced by a later run on the same commit no longer
+    /// describes the count the gate used, and the report says so. One that
+    /// matches, or has nothing recorded, says nothing.
+    #[test]
+    fn a_profile_that_is_not_the_recorded_count_is_called_out() {
+        let with_origin = |text: &str| {
+            let mut p = parse(text).unwrap();
+            p.desc = vec![
+                "tak runner: r".into(),
+                "tak commit: 0123456789abcdef".into(),
+                "tak bench: startup".into(),
+                "tak subject: self".into(),
+            ];
+            p
+        };
+        let pair = Pair {
+            label: "startup".into(),
+            base: with_origin(BASE),
+            head: with_origin(HEAD),
+        };
+        let asked = std::cell::RefCell::new(Vec::new());
+        // The base matches its note; the head's note is lower.
+        let recorded = |o: &Origin| {
+            asked.borrow_mut().push(o.clone());
+            Some(if asked.borrow().len() == 1 {
+                1_500
+            } else {
+                2_000
+            })
+        };
+        let md = markdown(&[pair], &Unpaired::default(), 10, &recorded);
+        assert!(
+            md.contains(
+                "The head profile totals 2,110 instructions, but the lowest count recorded \
+                 for `0123456789ab` in git notes is 2,000."
+            ),
+            "{md}"
+        );
+        assert!(!md.contains("The base profile"), "{md}");
+        assert_eq!(asked.borrow()[0].bench, "startup");
+        assert_eq!(asked.borrow()[0].subject, "self");
+    }
+
+    /// cachegrind writes no indentation, but an indented cost line must not
+    /// be skipped as unrecognised while the total stays as it was.
+    #[test]
+    fn an_indented_line_is_read_like_any_other() {
+        let p = parse("events: Ir\n  fl=a.c\n\tfn=f\n   1 5\n  2 7  \n summary: 12\n").unwrap();
+        assert_eq!(p.functions["f"].ir, 12);
+        assert_eq!(p.functions["f"].files["a.c"], 12);
     }
 
     #[test]

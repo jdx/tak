@@ -804,15 +804,21 @@ pub fn subject_instructions(s: &Subject, settings: &Settings) -> Result<Option<C
 /// whose count is reported. That is the minimum, so the profile's total is
 /// the number recorded, and attributing a change to its functions explains
 /// exactly the change the gate saw.
-pub fn subject_profile(s: &Subject, settings: &Settings) -> Result<Option<(Counted, Vec<u8>)>> {
+///
+/// The profile is a separate result: failing to keep it must not cost the
+/// count, which is the one metric that gates.
+pub fn subject_profile(s: &Subject, settings: &Settings) -> Result<Option<(Counted, Profiled)>> {
     Ok(subject_count(s, settings, true)?.map(|(c, p)| (c, p.expect("a profile was asked for"))))
 }
+
+/// The raw cachegrind profile behind a count, or why it could not be kept.
+pub type Profiled = Result<Vec<u8>>;
 
 fn subject_count(
     s: &Subject,
     settings: &Settings,
     profile: bool,
-) -> Result<Option<(Counted, Option<Vec<u8>>)>> {
+) -> Result<Option<(Counted, Option<Profiled>)>> {
     count(
         &s.cmd,
         s.prepare.as_deref(),
@@ -1288,23 +1294,34 @@ fn version_once(argv: &[String], site: &Site, timeout: Duration) -> Result<Strin
 /// file, and the one from the run at the minimum is returned. Without it the
 /// profile goes to `/dev/null` as it always has. cachegrind writes it after
 /// the client exits, so keeping it cannot move the count.
+///
+/// Anything that stops the profile being kept is returned in its place
+/// rather than failing the count: an instruction count is still the gate
+/// with or without the profile that explains it.
 fn count(
     cmd: &[String],
     prepare: Option<&[String]>,
     site: &Site,
     ok: &[i32],
     profile: bool,
-) -> Result<Option<(Counted, Option<Vec<u8>>)>> {
+) -> Result<Option<(Counted, Option<Profiled>)>> {
     if !valgrind_available() {
         return Ok(None);
     }
 
     // An absolute path, since the subject may run in its own `dir`; removed
-    // with the directory on every exit path.
-    let scratch = if profile {
-        Some(tempfile::tempdir().context("could not create a directory for cachegrind profiles")?)
-    } else {
-        None
+    // with the directory on every exit path. When it cannot be created the
+    // runs go to `/dev/null` as they would without `profile`.
+    let (scratch, unkept) = match profile.then(tempfile::tempdir) {
+        Some(Ok(d)) => (Some(d), None),
+        Some(Err(e)) => (
+            None,
+            Some(
+                anyhow::Error::new(e)
+                    .context("could not create a directory for cachegrind profiles"),
+            ),
+        ),
+        None => (None, None),
     };
     let mut samples: Vec<u64> = Vec::with_capacity(COUNTER_RUNS as usize);
     for run in 0..COUNTER_RUNS {
@@ -1340,6 +1357,15 @@ fn count(
         let stderr = String::from_utf8_lossy(&out.stderr);
         let bin = cmd.first().map(String::as_str).unwrap_or("(empty command)");
         accepted(bin, out.status, ok, " under valgrind")?;
+        // cachegrind that cannot open its output file still exits with the
+        // client's code, and reports `I refs: 0` — a count that would record
+        // as the largest improvement ever measured. Seen with valgrind 3.24
+        // when the subject removed the directory the profile was going to.
+        if stderr.contains("can't open output data file") {
+            bail!(
+                "cachegrind could not write its profile to {out_file}, and counts nothing when that happens"
+            );
+        }
         match parse_irefs(&stderr) {
             Some(n) => samples.push(n),
             // Valgrind is installed but produced no summary — a real failure,
@@ -1364,13 +1390,17 @@ fn count(
         .iter()
         .position(|n| *n == counted.min)
         .expect("the minimum is one of the samples");
-    let kept = scratch
-        .map(|d| {
+    let kept = match (scratch, unkept) {
+        (Some(d), _) => {
             let path = d.path().join(format!("run-{best}"));
-            std::fs::read(&path)
-                .with_context(|| format!("cachegrind wrote no profile to {}", path.display()))
-        })
-        .transpose()?;
+            Some(
+                std::fs::read(&path)
+                    .with_context(|| format!("cachegrind wrote no profile to {}", path.display())),
+            )
+        }
+        (None, Some(e)) => Some(Err(e)),
+        (None, None) => None,
+    };
     Ok(Some((counted, kept)))
 }
 

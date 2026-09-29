@@ -68,6 +68,7 @@ fn a_kept_profile_adds_up_to_the_reported_count() {
     let (counted, raw) = measure::subject_profile(&echo(), &Settings::default())
         .expect("cachegrind invocation failed")
         .expect("valgrind present but nothing counted");
+    let raw = raw.expect("the profile was kept");
     let p = profile::parse(&String::from_utf8(raw).unwrap()).expect("cachegrind's own output");
 
     assert_eq!(p.total, counted.min);
@@ -169,29 +170,117 @@ fn profiles_need_counters() {
 }
 
 /// A benchmark name that is not a plain file name fails before anything runs,
-/// rather than writing outside the profile directory.
+/// rather than writing outside the profile directory — or, with a newline,
+/// writing a heading of its own into the report.
 #[test]
-fn a_benchmark_name_that_is_a_path_is_refused_up_front() {
+fn a_benchmark_name_that_is_not_a_file_name_is_refused_up_front() {
+    for bench in ["../escape", "a\n## All clear"] {
+        let dir = tempfile::tempdir().unwrap();
+        let out = tak(
+            dir.path(),
+            &[
+                "run",
+                "--bench",
+                bench,
+                "--profile-dir",
+                "p",
+                "--",
+                "/bin/sh",
+                "-c",
+                "touch ran",
+            ],
+        );
+        assert!(!out.status.success(), "{bench:?}");
+        assert!(
+            text(&out).contains("not a plain file name"),
+            "{}",
+            text(&out)
+        );
+        assert!(!dir.path().join("ran").exists(), "nothing was measured");
+    }
+}
+
+/// cachegrind that cannot write its profile reports zero instructions. A
+/// subject that removes the scratch directory must cost the count, loudly,
+/// never record as zero.
+#[cfg(unix)]
+#[test]
+fn a_profile_cachegrind_could_not_write_is_not_a_count_of_zero() {
+    if !valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
-    let out = tak(
-        dir.path(),
-        &[
-            "run",
-            "--bench",
-            "../escape",
-            "--profile-dir",
-            "p",
-            "--",
-            "/bin/sh",
-            "-c",
-            "touch ran",
-        ],
-    );
-    assert!(!out.status.success());
+    let tmp = dir.path().join("tmp");
+    std::fs::create_dir(&tmp).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_tak"))
+        .args(["run", "--no-progress", "--runs", "1", "--warmup", "0"])
+        .args(["--profile-dir", "p", "--", "/bin/sh", "-c"])
+        .arg("rm -rf \"$TMPDIR\"/.tmp*")
+        .current_dir(dir.path())
+        .env("TMPDIR", &tmp)
+        .output()
+        .unwrap();
+    let all = text(&out);
+    assert!(all.contains("could not write its profile"), "{all}");
+    assert!(!all.contains("instructions "), "{all}");
+    assert!(all.contains("wrote 0 profile(s)"), "{all}");
+}
+
+#[cfg(unix)]
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(["-c", "user.name=tak-test", "-c", "user.email=t@example.com"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git failed to spawn");
+    assert!(out.status.success(), "git {args:?}: {}", text(&out));
+}
+
+/// Measure the same commit twice and the profile left behind is the second
+/// run's, while the notes' lowest count is the first's. `explain` says so
+/// instead of attributing a count the gate never used.
+#[cfg(unix)]
+#[test]
+fn a_profile_replaced_after_the_recorded_minimum_is_called_out() {
+    if !valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["commit", "-q", "--allow-empty", "-m", "c"]);
+    // Less work first, then more, both recorded against the same commit.
+    for arg in ["/usr", "/"] {
+        let out = tak(
+            dir.path(),
+            &[
+                "run",
+                "--no-progress",
+                "--runs",
+                "1",
+                "--warmup",
+                "0",
+                "--bench",
+                "list",
+                "--record",
+                "--profile-dir",
+                "p",
+                "--",
+                "/bin/ls",
+                "-l",
+                arg,
+            ],
+        );
+        assert!(out.status.success(), "{}", text(&out));
+    }
+    let out = tak(dir.path(), &["explain", "p", "p"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let md = String::from_utf8_lossy(&out.stdout);
     assert!(
-        text(&out).contains("not a plain file name"),
-        "{}",
-        text(&out)
+        md.contains("The base profile totals") && md.contains("The head profile totals"),
+        "{md}"
     );
-    assert!(!dir.path().join("ran").exists(), "nothing was measured");
+    assert!(md.contains("in git notes is"), "{md}");
 }

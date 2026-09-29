@@ -27,14 +27,23 @@ Each subject whose instructions were counted gets one file:
 profiles/<bench>/<subject>.cachegrind.out
 ```
 
-A single-command benchmark's subject is `self`. The file is cachegrind's own output format with
-one `desc: tak runner: <class>` line added at the top, so `cg_annotate` and similar tools can
-read it too. tak runs cachegrind three times per subject and reports the minimum; the profile
-kept is from that run, so its total is the recorded `instructions` value.
+A single-command benchmark's subject is `self`. Benchmark and subject names must be usable as
+file names: a name containing `/`, `\` or a control character, or one that is `.` or `..`,
+stops the run before anything is measured.
+
+The file is cachegrind's own output format with `desc: tak runner: …`, `desc: tak commit: …`,
+`desc: tak bench: …` and `desc: tak subject: …` lines added at the top, so `cg_annotate` and
+similar tools can read it too. tak runs cachegrind three times per subject and reports the
+minimum; the profile kept is from that run, so its total is the recorded `instructions` value.
+If the profile cannot be kept, tak prints a warning and keeps the instruction count.
 
 tak overwrites the files it writes and leaves everything else in the directory alone. Use a
 fresh directory for each run, or a benchmark that has since been removed will still be found
-there.
+there. Measuring the same commit again also replaces its profile, while `tak compare` uses the
+lowest count recorded for the commit. `tak explain` looks up the lowest count the local git
+notes hold for the profile's commit, benchmark, subject and runner class, without fetching.
+When that differs from the profile's own total, it prints a warning that the profile is not
+from the run that count came from.
 
 Profiles are not stored in git notes, and `tak artifact export` does not include them. A profile
 is hundreds of kilobytes, while notes hold one-line records.
