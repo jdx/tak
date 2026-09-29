@@ -297,15 +297,18 @@ fn now_rfc3339() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    rfc3339(secs)
+    rfc3339(i64::try_from(secs).unwrap_or(i64::MAX))
 }
 
 /// `secs` since the epoch as RFC 3339 in UTC, the one shape `ts` is written in.
-fn rfc3339(secs: u64) -> String {
-    let days = secs / 86_400;
-    let rem = secs % 86_400;
+///
+/// Signed, because a commit can be dated before 1970 (`git commit --date`),
+/// and flooring division keeps such a time on the right day.
+fn rfc3339(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
     // Civil-from-days (Howard Hinnant's algorithm), epoch shifted to 0000-03-01.
-    let z = days as i64 + 719_468;
+    let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
@@ -1811,6 +1814,15 @@ fn backfill_commit(
         }
     };
     let root = wt.path().join(rel);
+    // Read before building, so a date that cannot be read costs this commit
+    // and not a finished build, and never the rest of the range.
+    let committed = match tak_cli::worktree::commit_time(&p.sha) {
+        Ok(t) => t,
+        Err(e) => {
+            println!("  not recorded — {e:#}");
+            return Ok(Outcome::NotRecorded);
+        }
+    };
 
     let mut build = build.clone();
     build.anchor(&root);
@@ -1883,7 +1895,7 @@ fn backfill_commit(
 
     // The commit's own date, as release backfill uses the release's: this
     // is when the code existed, which is what a series is plotted against.
-    let ts = rfc3339(tak_cli::worktree::commit_time(&p.sha)?);
+    let ts = rfc3339(committed);
     for r in &mut records {
         r.ts = ts.clone();
     }
@@ -2268,6 +2280,16 @@ mod tests {
         assert!(ts.ends_with('Z'));
         assert_eq!(&ts[4..5], "-");
         assert_eq!(&ts[10..11], "T");
+    }
+
+    /// A backfilled commit can be dated before 1970, and must land on the
+    /// right day rather than failing the backfill.
+    #[test]
+    fn timestamps_before_the_epoch_are_formatted() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339(-1), "1969-12-31T23:59:59Z");
+        assert_eq!(rfc3339(-86_400 * 365), "1969-01-01T00:00:00Z");
+        assert_eq!(rfc3339(1_700_000_000), "2023-11-14T22:13:20Z");
     }
 
     #[cfg(unix)]

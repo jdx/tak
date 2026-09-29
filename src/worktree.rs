@@ -51,7 +51,7 @@ fn git_str(args: &[&str]) -> Result<String> {
 /// timestamp would no longer be the first thing printed. The value is marked
 /// with a prefix no verification line starts with, and the last such line is
 /// read, so text that still gets through cannot be mistaken for the date.
-pub fn commit_time(sha: &str) -> Result<u64> {
+pub fn commit_time(sha: &str) -> Result<i64> {
     let out = git_str(&[
         "-c",
         "log.showSignature=false",
@@ -64,7 +64,7 @@ pub fn commit_time(sha: &str) -> Result<u64> {
     parse_commit_time(&out).with_context(|| format!("unexpected commit time for {sha}: {out:?}"))
 }
 
-fn parse_commit_time(out: &str) -> Option<u64> {
+fn parse_commit_time(out: &str) -> Option<i64> {
     out.lines()
         .rev()
         .find_map(|l| l.strip_prefix("tak-ct:"))?
@@ -413,6 +413,11 @@ mod tests {
     fn a_commit_time_is_read_from_its_marked_line() {
         assert_eq!(parse_commit_time("tak-ct:1700000000"), Some(1_700_000_000));
         assert_eq!(parse_commit_time("tak-ct:soon"), None);
+        assert_eq!(
+            parse_commit_time("tak-ct:-86400"),
+            Some(-86_400),
+            "before 1970"
+        );
     }
 
     /// With `log.showSignature` set somewhere tak's override does not reach,
