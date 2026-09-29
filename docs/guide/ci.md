@@ -86,8 +86,8 @@ regress:
 tak compare "$BASE_SHA" --accept startup
 ```
 
-`--accept` is repeatable. Each value is one exact benchmark name and is not split on commas,
-so it can accept any name. It accepts only the benchmarks it names. Every other benchmark still gates. An acceptance names a benchmark and covers each of
+`--accept` is repeatable. Each value is one exact benchmark name. It is neither split on
+commas nor trimmed, so it can accept any name, and an empty value is an error. It accepts only the benchmarks it names. Every other benchmark still gates. An acceptance names a benchmark and covers each of
 its tools and runner classes. It has no size limit.
 
 An accepted regression still appears in the report. Its row is marked `(accepted)`, and a

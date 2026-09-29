@@ -233,6 +233,48 @@ fn the_flag_accepts_a_name_containing_a_comma() {
     assert!(stdout.contains("**1 accepted regression(s)"), "{stdout}");
 }
 
+/// `" startup "` and `startup` are different benchmarks. Trimming the flag
+/// value accepted the wrong one's regression and left the named one failing.
+#[test]
+fn the_flag_accepts_only_the_exact_name() {
+    let dir = repo();
+    let base = commit(dir.path(), "base");
+    note(dir.path(), &base, &[(" startup ", 1e6), ("startup", 1e6)]);
+    let head = commit(dir.path(), "slower");
+    note(
+        dir.path(),
+        &head,
+        &[(" startup ", 1.1e6), ("startup", 1.1e6)],
+    );
+    let (ok, stdout, stderr) = compare(dir.path(), &[&base, "--accept", " startup "]);
+    assert!(
+        !ok,
+        "`startup` was not accepted and must still fail: {stdout}"
+    );
+    assert!(stderr.contains("1 benchmark(s) regressed"), "{stderr}");
+    assert!(
+        stdout.contains("**1 benchmark(s) above the 1% gate:** `startup` +10.00%"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("` startup ` on `test` +10.00% (`--accept`)"),
+        "{stdout}"
+    );
+}
+
+/// An empty value is almost always an unset variable in a CI script. Failing
+/// says so; skipping it would quietly accept nothing.
+#[test]
+fn an_empty_flag_value_is_an_error() {
+    let (dir, base, _) = regressed("slower");
+    let (ok, _, stderr) = compare(dir.path(), &[&base, "--accept", ""]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("--accept needs a benchmark name"),
+        "{stderr}"
+    );
+}
+
 /// Only the compared range speaks for the change. A trailer that landed before
 /// the base was about some earlier change, and must not keep a benchmark
 /// ungated forever after.

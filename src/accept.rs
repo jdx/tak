@@ -24,6 +24,7 @@
 //! syntax is a second thing to get wrong in a line nobody tests. An accepted
 //! benchmark still shows its full change in the report.
 
+use anyhow::{Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The trailer key. git matches trailer keys case-insensitively, so
@@ -70,22 +71,35 @@ impl Acceptances {
     /// benchmark that does not exist and is reported as such, which fails
     /// closed — the real `startup` regression still gates — rather than
     /// guessing which word was meant.
+    ///
+    /// Each name is trimmed, unlike a flag value. git has already normalised
+    /// the whitespace of a trailer — it strips the value and, with `unfold`,
+    /// joins continuation lines — so the spaces left around a name are the
+    /// ones after `,`, and keeping them would make `a, b` name ` b`.
     pub fn add(&mut self, list: &str, source: Source) {
-        for name in list.split(',') {
-            self.add_name(name, source.clone());
+        for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+            self.insert(name, source.clone());
         }
     }
 
     /// Add one exact name, as `--accept` gives it.
     ///
-    /// Not split on commas. Benchmark names are unrestricted, so a name that
-    /// contains a comma would otherwise have no spelling that accepts it; the
-    /// flag is repeatable, which covers every list without needing a separator.
-    pub fn add_name(&mut self, name: &str, source: Source) {
-        let name = name.trim();
+    /// Not split on commas and not trimmed. Benchmark names are unrestricted,
+    /// so `" startup "` is a different benchmark from `startup`, and trimming
+    /// would accept the wrong one's regression — waiving a gate nobody asked
+    /// to waive. The flag is repeatable, which covers every list without a
+    /// separator. An empty value is an error rather than skipped: it is
+    /// almost always an unset variable in a CI script, and silently accepting
+    /// nothing hides that.
+    pub fn add_name(&mut self, name: &str, source: Source) -> Result<()> {
         if name.is_empty() {
-            return;
+            bail!("--accept needs a benchmark name, and was given an empty one");
         }
+        self.insert(name, source);
+        Ok(())
+    }
+
+    fn insert(&mut self, name: &str, source: Source) {
         self.0.entry(name.to_string()).or_default().insert(source);
     }
 
@@ -173,9 +187,26 @@ mod tests {
     #[test]
     fn a_flag_value_is_one_name() {
         let mut a = Acceptances::default();
-        a.add_name("parse a,b", Source::Flag);
+        a.add_name("parse a,b", Source::Flag).unwrap();
         assert!(a.covers("parse a,b"));
         assert_eq!(a.iter().count(), 1);
+    }
+
+    /// Exact means exact: surrounding spaces are part of the name, and
+    /// dropping them would accept a different benchmark.
+    #[test]
+    fn a_flag_value_is_not_trimmed() {
+        let mut a = Acceptances::default();
+        a.add_name(" startup ", Source::Flag).unwrap();
+        assert!(a.covers(" startup "));
+        assert!(!a.covers("startup"));
+    }
+
+    #[test]
+    fn an_empty_flag_value_is_an_error() {
+        let mut a = Acceptances::default();
+        assert!(a.add_name("", Source::Flag).is_err());
+        assert!(a.is_empty());
     }
 
     /// A reason written after the name is not quietly dropped. The whole value

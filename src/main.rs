@@ -1036,7 +1036,7 @@ fn cmd_compare(
 
     let mut accepted = Acceptances::default();
     for name in &accept_flags {
-        accepted.add_name(name, accept::Source::Flag);
+        accepted.add_name(name, accept::Source::Flag)?;
     }
     // Read either way; only honoured when the setting says so. The commits
     // under comparison are the change being gated, so by default their own
