@@ -598,22 +598,25 @@ fn verdict(c: &Comparison, gates: &Gates, uniform: bool) -> String {
 
     let regressions = c.regressions(gates);
     if uniform {
+        // Named on both verdicts. Without it, a failing report can show one 2%
+        // rise failing beside another passing and give no reason; the floor is
+        // the reason. After the `N% gate` wording, which scripts match on.
+        let floor = if global.min_delta == 0 {
+            String::new()
+        } else {
+            format!(
+                " (rises of {} instructions or fewer are not counted)",
+                thousands(global.min_delta as f64)
+            )
+        };
         if regressions.is_empty() {
             out.push_str(&format!(
-                "No instruction-count regression above {}%{}.\n",
+                "No instruction-count regression above {}%{floor}.\n",
                 global.pct,
-                if global.min_delta == 0 {
-                    String::new()
-                } else {
-                    format!(
-                        " (rises of {} instructions or fewer are not counted)",
-                        thousands(global.min_delta as f64)
-                    )
-                }
             ));
         } else {
             out.push_str(&format!(
-                "**{} benchmark(s) above the {}% gate:** {}\n",
+                "**{} benchmark(s) above the {}% gate{floor}:** {}\n",
                 regressions.len(),
                 global.pct,
                 listed(&regressions, false)
@@ -989,7 +992,10 @@ mod tests {
             "the global gate needs no column: {md}"
         );
         assert!(
-            md.contains("**1 benchmark(s) above the 1% gate:** `install` +2.00%"),
+            md.contains(
+                "**1 benchmark(s) above the 1% gate \
+                 (rises of 20,000 instructions or fewer are not counted):** `install` +2.00%"
+            ),
             "{md}"
         );
         let c = compare(

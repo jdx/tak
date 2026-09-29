@@ -212,11 +212,79 @@ fn a_global_floor_from_tak_toml_applies_to_every_series() {
     let report = stdout(&out);
     assert!(!out.status.success(), "{report}");
     assert!(
-        report.contains("**1 benchmark(s) above the 1% gate:** `install` +2.00%"),
+        report.contains("**1 benchmark(s) above the 1% gate (rises of 20,000 instructions or fewer are not counted):** `install` +2.00%"),
         "{report}"
+    );
+    assert!(
+        stderr(&out).contains("1 benchmark(s) regressed by more than 1% and 20000 instructions"),
+        "{}",
+        stderr(&out)
     );
     let out = compare(dir.path(), &base, &["--gate-min-delta", "5000000"]);
     assert!(out.status.success(), "{}", stdout(&out));
+}
+
+/// `tak run` checks the global gate too, from every source, before measuring
+/// anything: a bad `TAK_GATE_PCT` in CI should not wait for the comparison
+/// after a long run to be found.
+#[test]
+fn a_bad_global_gate_fails_a_run_before_it_measures() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |toml: Option<&str>, flags: &[&str], env: &[(&str, &str)]| {
+        if let Some(t) = toml {
+            std::fs::write(dir.path().join("tak.toml"), t).unwrap();
+        }
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_tak"));
+        cmd.arg("run")
+            .args(flags)
+            .env_remove("TAK_GATE_PCT")
+            .env_remove("TAK_GATE_MIN_DELTA")
+            .envs(env.iter().copied())
+            .current_dir(dir.path());
+        cmd.output().expect("failed to run tak run")
+    };
+    let adhoc = [
+        "--no-counters",
+        "--runs",
+        "1",
+        "--warmup",
+        "0",
+        "--",
+        "true",
+    ];
+
+    // The same run succeeds with a good gate, so the failures below are the
+    // gate's and nothing else's.
+    let ok = run(None, &adhoc, &[]);
+    assert!(ok.status.success(), "{}", stderr(&ok));
+
+    for (label, out) in [
+        ("TAK_GATE_PCT", run(None, &adhoc, &[("TAK_GATE_PCT", "-1")])),
+        (
+            "--gate-pct",
+            run(None, &[&["--gate-pct=nan"], &adhoc[..]].concat(), &[]),
+        ),
+        (
+            "[gate] in tak.toml",
+            run(
+                Some("[gate]\npct = -1.0\n\n[bench.a]\ncmd = \"true\"\n"),
+                &["--no-counters", "--runs", "1", "--warmup", "0"],
+                &[],
+            ),
+        ),
+    ] {
+        assert!(!out.status.success(), "{label}: {}", stdout(&out));
+        assert!(
+            stdout(&out).is_empty(),
+            "{label} measured: {}",
+            stdout(&out)
+        );
+        assert!(
+            stderr(&out).contains("gate percentage"),
+            "{label}: {}",
+            stderr(&out)
+        );
+    }
 }
 
 /// A gate that cannot be read is an error before anything is fetched or

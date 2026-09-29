@@ -306,6 +306,7 @@ struct Measured {
 }
 
 fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
+    global_gate(settings)?;
     // An explicit command always wins; tak.toml is only consulted when none is
     // given, so ad-hoc measurement never depends on repository state.
     if cmd.is_empty() {
@@ -1050,8 +1051,12 @@ fn cmd_compare(
     // A non-zero exit is the gate. The table above already says which and by
     // how much, so this only has to be unambiguous about why the job failed.
     if comparison.gated_uniformly(&gates) {
+        let floor = match gates.global.min_delta {
+            0 => String::new(),
+            n => format!(" and {n} instructions"),
+        };
         bail!(
-            "{} benchmark(s) regressed by more than {}%",
+            "{} benchmark(s) regressed by more than {}%{floor}",
             regressions.len(),
             gates.global.pct
         )
@@ -1076,12 +1081,21 @@ fn cmd_compare(
 /// gate, as before per-benchmark gates existed — but one that does not parse
 /// is an error rather than a quiet fallback to a gate the file did not ask for.
 fn compare_gates(settings: &Settings) -> Result<compare::Gates> {
-    let global =
-        compare::Gate::new(settings.gate_pct, settings.gate_min_delta).context("gate_pct")?;
+    let global = global_gate(settings)?;
     Ok(match Config::find(&std::env::current_dir()?)? {
         Some((_, cfg)) => cfg.gates(global),
         None => compare::Gates::uniform(global),
     })
+}
+
+/// The `[gate]` settings, checked, from whichever source set them.
+///
+/// Checked by `tak run` as well as `tak compare`. A `TAK_GATE_PCT=-1` exported
+/// in CI would otherwise let a run spend minutes measuring and fail only at
+/// the comparison afterwards, which is the late failure `tak.toml` validation
+/// exists to prevent.
+fn global_gate(settings: &Settings) -> Result<compare::Gate> {
+    compare::Gate::new(settings.gate_pct, settings.gate_min_delta).context("gate_pct")
 }
 
 /// Diagnose the plumbing.

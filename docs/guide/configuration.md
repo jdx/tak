@@ -613,7 +613,9 @@ gate = { enabled = false }   # report only
   variables set the `[gate]` values, which are what a benchmark without its own gate uses. They
   don't override a benchmark that declares its own.
 - **Validated when the file loads.** `tak run` and `tak compare` both reject a negative, NaN or
-  infinite `pct`, a negative or fractional `min_delta`, and unknown keys in a `gate` table.
+  infinite `pct`, a negative or fractional `min_delta`, and unknown keys in a `gate` table. The
+  same check covers `[gate]` itself, whether it comes from `tak.toml`, a flag or an environment
+  variable, so a bad value fails `tak run` before anything is measured.
 
 When any row in a comparison has a gate other than `[gate]`, the report adds a `gate` column
 that shows every row's gate, and the verdict lists each regression with its gate:
