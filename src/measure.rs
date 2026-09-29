@@ -220,7 +220,7 @@ fn untimed(step: &str, cmd: &[String], site: &Site) -> Result<Option<String>> {
     // A check like `git diff --quiet` says nothing on failure by design, so
     // silence is reported as the status alone. An unreadable file is treated
     // the same way: the status is the finding, the stderr only decoration.
-    let tail = stderr_tail(&reader, UNTIMED_STDERR_TAIL).unwrap_or_default();
+    let tail = stderr_tail(&reader).unwrap_or_default();
     let stderr = String::from_utf8_lossy(&tail);
     Ok(Some(match stderr.lines().rfind(|l| !l.trim().is_empty()) {
         Some(last) => format!("{step} `{bin}` exited with {status}: {}", last.trim()),
@@ -228,16 +228,16 @@ fn untimed(step: &str, cmd: &[String], site: &Site) -> Result<Option<String>> {
     }))
 }
 
-/// The last `cap` bytes of a step's stderr file.
+/// The last [`UNTIMED_STDERR_TAIL`] bytes of a step's stderr file.
 ///
 /// Read by position, not through the file cursor: the handle is a duplicate
 /// of the one a leftover process may still be writing through, and on Unix
 /// they share the cursor, so seeking would move where that process writes.
 /// Windows has no positional read that leaves the cursor alone; there a
 /// leftover writer may overwrite part of a file nobody reads again.
-fn stderr_tail(f: &std::fs::File, cap: usize) -> std::io::Result<Vec<u8>> {
+fn stderr_tail(f: &std::fs::File) -> std::io::Result<Vec<u8>> {
     let len = f.metadata()?.len();
-    let start = len.saturating_sub(cap as u64);
+    let start = len.saturating_sub(UNTIMED_STDERR_TAIL as u64);
     let mut buf = vec![0u8; (len - start) as usize];
     let mut filled = 0;
     while filled < buf.len() {
@@ -1274,33 +1274,74 @@ fn version_once(argv: &[String], site: &Site, timeout: Duration) -> Result<Strin
 /// stderr would not be bounded at all.
 const VALGRIND_STDERR_TAIL: usize = 1 << 20;
 
+/// Read `r` to the end, keeping only its last `cap` bytes in `kept`. Like
+/// [`keep_prefix`], it drains everything, so the writer never blocks on a
+/// full pipe.
+fn keep_suffix(mut r: impl std::io::Read, cap: usize, kept: &Mutex<Vec<u8>>) {
+    let mut buf = [0u8; 8192];
+    loop {
+        match r.read(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => {
+                let Ok(mut k) = kept.lock() else { return };
+                k.extend_from_slice(&buf[..n]);
+                // Trimmed in steps of `cap`, not on every read, so a flood
+                // costs amortised constant work per byte.
+                if k.len() > 2 * cap {
+                    let excess = k.len() - cap;
+                    k.drain(..excess);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
+}
+
 /// Run a valgrind command to completion: its exit status, its pid, and the
 /// tail of its stderr, where the tool writes its summary.
 ///
-/// stderr goes to an anonymous temporary file rather than a pipe, for the
-/// reason [`untimed`] gives: a subject that starts something in the
-/// background — `sleep 600 &`, a daemon, a build server — leaves it holding
-/// the write end, and reading a pipe to EOF then waits for that process
-/// rather than for the subject, hanging the run. The run is over when the
-/// process spawned here exits, and the summary is written by then.
+/// The run is over when the process spawned here exits, not when its stderr
+/// closes. A subject that starts something in the background — `sleep 600
+/// &`, a daemon, a build server — leaves it holding the write end, and
+/// reading to EOF waited for that process instead, hanging the run. So the
+/// pipe is read on a thread that is never joined, as [`version_once`] does:
+/// once valgrind exits, what it wrote is already in the pipe, and after a
+/// short grace the tail read so far is taken. The thread goes on draining
+/// into its bounded tail until the leftover process closes the pipe, so the
+/// process is neither blocked nor killed by SIGPIPE, and nothing it writes
+/// accumulates anywhere: not in memory past the cap, and not on disk.
+///
+/// A pipe rather than the temporary file [`untimed`] uses, because a file
+/// is exactly where a leftover process that keeps logging would grow without
+/// bound, and because instruction counts are the gated metric: they should
+/// not start failing, and a gated benchmark quietly become timing-only,
+/// because a temporary directory is full or read-only.
 ///
 /// The pid is the subject's: valgrind replaces itself with the tool rather
 /// than forking, so its `==PID==` prefix is the pid spawned here.
 fn under_valgrind(mut c: Command) -> Result<(std::process::ExitStatus, u32, String)> {
-    let err = tempfile::tempfile().context("failed to create a file for valgrind's stderr")?;
-    let reader = err
-        .try_clone()
-        .context("failed to create a file for valgrind's stderr")?;
     let mut child = c
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::from(err))
+        .stderr(Stdio::piped())
         .spawn()
         .context("failed to run valgrind")?;
     let pid = child.id();
+    let kept = Arc::new(Mutex::new(Vec::new()));
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    if let Some(err) = child.stderr.take() {
+        let kept = Arc::clone(&kept);
+        std::thread::spawn(move || {
+            keep_suffix(err, VALGRIND_STDERR_TAIL, &kept);
+            let _ = done_tx.send(());
+        });
+    }
     let status = child.wait().context("failed to run valgrind")?;
-    let tail =
-        stderr_tail(&reader, VALGRIND_STDERR_TAIL).context("failed to read valgrind's stderr")?;
+    // Normally EOF arrives with the exit; only a leftover holding the pipe
+    // makes this wait out the grace.
+    let _ = done_rx.recv_timeout(VERSION_OUTPUT_GRACE);
+    let tail = kept.lock().map(|k| k.clone()).unwrap_or_default();
     Ok((status, pid, String::from_utf8_lossy(&tail).into_owned()))
 }
 
@@ -1952,6 +1993,25 @@ git version 2.43.0
             src.position(),
             100,
             "the rest is read, not left in the pipe"
+        );
+    }
+
+    /// A valgrind run keeps the end of its stderr, where the summary is,
+    /// however much came before it, and the buffer stays bounded.
+    #[test]
+    fn a_suffix_keeps_the_end_of_a_flood() {
+        let mut flood = vec![b'x'; 100_000];
+        flood.extend_from_slice(b"summary");
+        let kept = Mutex::new(Vec::new());
+        let mut src = std::io::Cursor::new(flood);
+        keep_suffix(&mut src, 10, &kept);
+        let k = kept.lock().unwrap();
+        assert!(k.len() <= 20, "bounded: {}", k.len());
+        assert!(k.ends_with(b"summary"), "{:?}", String::from_utf8_lossy(&k));
+        assert_eq!(
+            src.position(),
+            100_007,
+            "all of it read, none left in the pipe"
         );
     }
 

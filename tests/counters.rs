@@ -413,6 +413,45 @@ fn a_background_process_holding_stderr_does_not_hang_valgrind_runs() {
     );
 }
 
+/// A leftover that keeps writing to the stderr it inherited neither holds
+/// up the valgrind runs nor hides their summaries behind its output. It is
+/// left running, as tak leaves any leftover, until this test stops it.
+#[cfg(unix)]
+#[test]
+fn a_background_process_flooding_stderr_does_not_hang_valgrind_runs() {
+    if !valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = allocating(&[
+        "/bin/sh",
+        "-c",
+        "(while :; do echo spam >&2; done) & echo $! >> bg; exit 0",
+    ]);
+    s.dir = Some(dir.path().to_path_buf());
+    let began = std::time::Instant::now();
+    let allocated = measure::subject_allocations(&s, &Settings::default());
+    let counted = measure::subject_instructions(&s, &Settings::default());
+    let took = began.elapsed();
+    let pids = std::fs::read_to_string(dir.path().join("bg")).unwrap_or_default();
+    for pid in pids.split_whitespace() {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", pid])
+            .status();
+    }
+    allocated
+        .expect("DHAT invocation failed")
+        .expect("no DHAT summary parsed");
+    counted
+        .expect("cachegrind invocation failed")
+        .expect("no I refs parsed");
+    assert!(
+        took < std::time::Duration::from_secs(20),
+        "six valgrind runs took {took:?}"
+    );
+}
+
 /// End to end: `--allocations` on an ad-hoc command prints the counts and
 /// exports them. Without valgrind it says why they are missing, and the
 /// export carries no `allocations` key rather than zeros.
