@@ -256,8 +256,10 @@ fn the_flag_accepts_only_the_exact_name() {
         stdout.contains("**1 benchmark(s) above the 1% gate:** `startup` +10.00%"),
         "{stdout}"
     );
+    // Padded so CommonMark's one-space strip leaves ` startup ` as written,
+    // rather than rendering it identically to `startup`.
     assert!(
-        stdout.contains("` startup ` on `test` +10.00% (`--accept`)"),
+        stdout.contains("`  startup  ` on `test` +10.00% (`--accept`)"),
         "{stdout}"
     );
 }

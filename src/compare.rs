@@ -767,8 +767,15 @@ fn accepted_line(
 /// Acceptance names come from commit messages and flags, not from a validated
 /// config, so a backtick in one is plausible; a single-backtick span would close
 /// early and garble the rest of the line. CommonMark allows a fence of any
-/// length that does not occur inside, padded with spaces when the text starts
-/// or ends with a backtick.
+/// length that does not occur inside.
+///
+/// Padded with one space each side whenever the text holds a backtick or starts
+/// or ends with a space. CommonMark strips one leading and one trailing space
+/// from a span that has both, so unpadded, `" startup "` renders exactly like
+/// `startup` — two benchmark names the flag deliberately keeps apart would
+/// read as one in the report. The padding is what gets stripped, leaving the
+/// name as written. A span of only spaces is never stripped, so it is left
+/// unpadded.
 fn code(text: &str) -> String {
     let mut longest = 0;
     let mut run = 0;
@@ -776,11 +783,14 @@ fn code(text: &str) -> String {
         run = if ch == '`' { run + 1 } else { 0 };
         longest = longest.max(run);
     }
-    if longest == 0 {
-        return format!("`{text}`");
-    }
     let fence = "`".repeat(longest + 1);
-    format!("{fence} {text} {fence}")
+    let edge_space = text.starts_with(' ') || text.ends_with(' ');
+    let only_spaces = text.chars().all(|c| c == ' ');
+    if (longest > 0 || edge_space) && !only_spaces {
+        format!("{fence} {text} {fence}")
+    } else {
+        format!("{fence}{text}{fence}")
+    }
 }
 
 /// One line naming trailers that were ignored, so an author whose trailer did
@@ -1672,6 +1682,19 @@ mod tests {
         let c = compare(&[], &[]).with_accepted(accepting("we`ird", Source::Flag));
         let md = markdown(&c, &Trend::new(), &g(1.0), false);
         assert!(md.contains("`` we`ird `` (`--accept`)"), "{md}");
+    }
+
+    /// CommonMark strips one space from each side of a span that has both, so
+    /// a name with edge spaces is padded to survive that and render as itself.
+    /// Unpadded, `" startup "` and `startup` rendered identically on GitHub.
+    #[test]
+    fn a_name_with_edge_spaces_keeps_them() {
+        assert_eq!(code(" startup "), "`  startup  `");
+        assert_eq!(code(" startup"), "`  startup `");
+        assert_eq!(code("startup "), "` startup  `");
+        assert_ne!(code(" startup "), code("startup"));
+        // A span of only spaces is not stripped, so it needs no padding.
+        assert_eq!(code("  "), "`  `");
     }
 
     /// Two runner classes of one accepted benchmark are two entries, and the
