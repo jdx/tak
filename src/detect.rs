@@ -478,7 +478,9 @@ fn drift(
     })
 }
 
-fn short(sha: &str) -> &str {
+/// The first 12 characters of a SHA, for display. Bounded rather than sliced
+/// at a fixed 12, so an abbreviated or empty name can never panic a report.
+pub fn short(sha: &str) -> &str {
     &sha[..sha.len().min(12)]
 }
 

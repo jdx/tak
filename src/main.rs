@@ -1241,7 +1241,7 @@ fn cmd_detect(
     if found.empty_fails() {
         bail!(
             "nothing was compared at {}; pass --allow-empty if that is expected",
-            &head[..12]
+            detect::short(&head)
         );
     }
     let failures = found.failures();
@@ -1257,13 +1257,13 @@ fn cmd_detect(
             "{} benchmark(s) stepped up by more than {}%{floor} at {}",
             failures.len(),
             gates.global.pct,
-            &head[..12]
+            detect::short(&head)
         )
     }
     bail!(
         "{} benchmark(s) stepped beyond their gate at {}",
         failures.len(),
-        &head[..12]
+        detect::short(&head)
     )
 }
 

@@ -150,10 +150,12 @@ build needs another action first, such as `jdx/mise-action`, run the action with
 `workflow_run` reporting job, every input, and the security model and limitations.
 
 None of the three modes runs `tak detect`, which checks whether a push to main introduced an
-instruction-count step. To add that check to the main-branch job, give its checkout
-`fetch-depth: 0` and add a later step that runs `tak detect` with tak on `PATH`, as described
-under [Record the main branch](#record-the-main-branch). The manual workflow there already
-includes it.
+instruction-count step. `tak detect` needs a tak release that includes it, and tak 0.0.13,
+pinned in the examples above, does not. To add the check to the main-branch job, raise
+`version: 0.0.13` to such a release (`version: X.Y.Z`), give the checkout `fetch-depth: 0`,
+and add a later step that runs `tak detect` with that tak on `PATH`, as described under
+[Record the main branch](#record-the-main-branch). The manual workflow there already includes
+the step.
 
 Pin the action to the full commit SHA of a release you have reviewed; the tags above are for
 readability. The sections below show the same workflows without the action, for projects that
@@ -224,6 +226,9 @@ merging if another writer wins the race, but serialisation avoids unnecessary re
 cancel an in-progress main run: that would leave a hole in the push-tip history. A push that
 contains multiple commits records only its final commit; use one commit per push if every
 intermediate commit must have a measurement.
+
+`tak detect` needs a tak release that includes it. The `tak = "0.0.5"` pin in the mise example
+above does not, so pin such a release (`tak = "X.Y.Z"`) before adding the step.
 
 `tak detect` runs after `tak push` so the measurement is published even when the check fails.
 It fails when the step onto the commit being measured exceeds the gate, including a step
