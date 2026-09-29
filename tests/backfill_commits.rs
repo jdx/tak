@@ -637,6 +637,14 @@ fn start_slow_build(repo: &Repo) -> (std::process::Child, i32) {
     (child, pid)
 }
 
+/// A build tak killed on the way out is not the commit's fault, and must not
+/// be remembered as a failure that later runs pass over.
+fn assert_no_failure_remembered(repo: &Repo) {
+    let memory = repo.dir.join(".git/tak/backfill-build-failed");
+    let text = std::fs::read_to_string(memory).unwrap_or_default();
+    assert!(text.trim().is_empty(), "remembered: {text}");
+}
+
 /// Wait for `pid` to be gone, or for the deadline.
 fn wait_gone(pid: i32) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -678,6 +686,7 @@ fn an_interrupted_build_leaves_no_checkout_behind() {
     let status = wait_for(&mut child);
     assert_eq!(status.code(), Some(130), "{status:?}");
     assert!(wait_gone(build), "the build outlived tak");
+    assert_no_failure_remembered(&repo);
     assert_eq!(repo.worktrees(), 1, "the checkout was removed");
     assert!(repo.tmp_is_empty(), "and the scratch directory");
 }
@@ -695,6 +704,7 @@ fn a_sigterm_to_tak_alone_stops_the_build() {
     let status = wait_for(&mut child);
     assert_eq!(status.code(), Some(143), "{status:?}");
     assert!(wait_gone(build), "the build outlived tak");
+    assert_no_failure_remembered(&repo);
     assert_eq!(repo.worktrees(), 1);
     assert!(repo.tmp_is_empty());
 }

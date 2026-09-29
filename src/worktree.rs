@@ -147,6 +147,12 @@ pub fn build_started(pid: u32) {
     }
 }
 
+/// Whether an interrupt is being handled. A build that fails from here on
+/// was killed by tak, not broken by its commit.
+pub fn stopping() -> bool {
+    STOPPING.load(Ordering::SeqCst)
+}
+
 /// The build has been reaped; its group id may be reused from here on.
 #[cfg(unix)]
 pub fn build_finished() {
@@ -364,6 +370,14 @@ pub fn clean_up_on_interrupt(scratch: &Path) -> Result<()> {
         }
     }
 
+    // Once per process. The write end is deliberately never closed: the
+    // handler may fire at any moment until tak exits, and closing it would
+    // leave the handler writing to a descriptor that has been reused. A
+    // second call would replace it, leaking the first and starting a second
+    // thread, so it is a no-op instead.
+    if WRITE_FD.load(Ordering::SeqCst) >= 0 {
+        return Ok(());
+    }
     // A socket pair rather than `pipe`, because std creates it close-on-exec
     // on every Unix: the build and the measured commands must not inherit
     // either end.

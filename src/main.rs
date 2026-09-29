@@ -1653,7 +1653,14 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
             }
             Outcome::BuildFailed => {
                 build_failed.push(short);
-                failed_builds.add(&p.sha)?;
+                // The interrupt handler kills the build before it removes
+                // anything, so a build that failed while it runs says
+                // nothing about the commit. Remembering it would leave a
+                // cancelled job's commit out of every later run. The flag
+                // is set before the kill, so it is always seen here.
+                if !tak_cli::worktree::stopping() {
+                    failed_builds.add(&p.sha)?;
+                }
             }
             Outcome::NotRecorded => {
                 not_recorded.push(short);
