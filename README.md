@@ -49,6 +49,8 @@ and reasoning.
 - `tak artifact export` and `tak artifact publish` hand measurements from a
   read-only CI job to a separately trusted publisher
 - `tak compare` reports changes and gates only on instruction counts
+- `tak log` shows each benchmark's measurements over first-parent history, as Markdown or as
+  a self-contained HTML report
 - `tak backfill` measures published release binaries, or builds and measures past commits
   with `--commits`, to bootstrap history
 

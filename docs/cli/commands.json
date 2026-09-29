@@ -363,6 +363,141 @@
         "examples": [],
         "headings": []
       },
+      "log": {
+        "full_cmd": [
+          "log"
+        ],
+        "usage": "log [FLAGS] [REV]",
+        "subcommands": {},
+        "args": [
+          {
+            "name": "REV",
+            "usage": "[REV]",
+            "help": "Revision to walk back from. Defaults to HEAD.",
+            "help_first_line": "Revision to walk back from. Defaults to HEAD.",
+            "required": false,
+            "double_dash": "Optional",
+            "hide": false,
+            "default": [
+              "HEAD"
+            ]
+          }
+        ],
+        "flags": [
+          {
+            "name": "limit",
+            "usage": "-n --limit <LIMIT>",
+            "help": "Most recent recorded commits to show.",
+            "help_first_line": "Most recent recorded commits to show.",
+            "short": [
+              "n"
+            ],
+            "long": [
+              "limit"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "LIMIT",
+              "usage": "<LIMIT>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            },
+            "default": [
+              "30"
+            ]
+          },
+          {
+            "name": "bench",
+            "usage": "--bench <NAME>",
+            "help": "Show only this benchmark. Repeatable.",
+            "help_first_line": "Show only this benchmark. Repeatable.",
+            "short": [],
+            "long": [
+              "bench"
+            ],
+            "var": true,
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "NAME",
+              "usage": "<NAME>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "html",
+            "usage": "--html <PATH>",
+            "help": "Write a self-contained HTML report to PATH instead of printing.",
+            "help_first_line": "Write a self-contained HTML report to PATH instead of printing.",
+            "short": [],
+            "long": [
+              "html"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "PATH",
+              "usage": "<PATH>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "remote",
+            "usage": "--remote <REMOTE>",
+            "help": "Remote to refresh notes from.",
+            "help_first_line": "Remote to refresh notes from.",
+            "short": [],
+            "long": [
+              "remote"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "REMOTE",
+              "usage": "<REMOTE>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            },
+            "default": [
+              "origin"
+            ]
+          },
+          {
+            "name": "help",
+            "usage": "-h --help",
+            "help": "Print help",
+            "help_first_line": "Print help",
+            "short": [
+              "h"
+            ],
+            "long": [
+              "help"
+            ],
+            "hide": false,
+            "global": false,
+            "action": "help",
+            "builtin": true
+          }
+        ],
+        "mounts": [],
+        "unknown_flags": null,
+        "hide": false,
+        "args_override_self": true,
+        "help": "Show each benchmark's measurements over first-parent history.",
+        "help_long": "Show each benchmark's measurements over first-parent history.\n\nOne table per benchmark and runner class, newest commit first, with the change in instruction count from the previous measurement. Commits with nothing recorded are skipped. `--html` writes the same history as a self-contained page of charts instead.",
+        "name": "log",
+        "aliases": [],
+        "hidden_aliases": [],
+        "examples": [],
+        "headings": []
+      },
       "push": {
         "full_cmd": [
           "push"

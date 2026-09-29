@@ -44,51 +44,33 @@ fn git_str(args: &[&str]) -> Result<String> {
     git(&args)
 }
 
-/// First-parent commits in `range`, newest first.
-///
-/// First-parent for the reason [`crate::notes::rev_list`] gives: the commits
-/// on a merged branch are not points on the trunk's timeline, and CI never
-/// recorded them as such.
-///
-/// `range` is anything `git rev-list` accepts as one argument, usually
-/// `A..B`. One starting with `-` is refused rather than handed to git, where
-/// it would be read as an option.
-pub fn first_parent_commits(range: &str) -> Result<Vec<String>> {
-    if range.starts_with('-') || range.trim().is_empty() {
-        bail!("not a commit range: {range:?} (try `main~20..main`)");
-    }
-    // `--` so a range that happens to match a file name is never read as a
-    // path filter, which would silently drop every commit not touching it.
-    let out = git_str(&["rev-list", "--first-parent", range, "--"])
-        .with_context(|| format!("could not list the commits in {range}"))?;
-    Ok(out.lines().map(str::to_string).collect())
-}
-
-/// When `sha` was committed, as seconds since the epoch, and its subject line.
+/// When `sha` was committed, as seconds since the epoch.
 ///
 /// `log.showSignature` is switched off because with it set, `git show` writes
 /// a signature's verification text onto stdout ahead of the format, and the
-/// timestamp would no longer be the first thing printed. The two fields are
-/// separated by NUL, which a subject line cannot contain.
-pub fn describe(sha: &str) -> Result<(u64, String)> {
+/// timestamp would no longer be the first thing printed. The value is marked
+/// with a prefix no verification line starts with, and the last such line is
+/// read, so text that still gets through cannot be mistaken for the date.
+pub fn commit_time(sha: &str) -> Result<u64> {
     let out = git_str(&[
         "-c",
         "log.showSignature=false",
         "show",
         "-s",
         "--no-show-signature",
-        "--format=%ct%x00%s",
+        "--format=tak-ct:%ct",
         sha,
     ])?;
-    parse_description(&out).with_context(|| format!("unexpected output describing {sha}: {out:?}"))
+    parse_commit_time(&out).with_context(|| format!("unexpected commit time for {sha}: {out:?}"))
 }
 
-/// The last line holding the NUL separator, so any stray text git printed
-/// before the format cannot be mistaken for the date.
-fn parse_description(out: &str) -> Option<(u64, String)> {
-    let line = out.lines().rev().find(|l| l.contains('\0'))?;
-    let (ts, subject) = line.split_once('\0')?;
-    Some((ts.trim().parse().ok()?, subject.to_string()))
+fn parse_commit_time(out: &str) -> Option<u64> {
+    out.lines()
+        .rev()
+        .find_map(|l| l.strip_prefix("tak-ct:"))?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// The root of the work tree containing `dir`.
@@ -425,30 +407,21 @@ pub fn clean_up_on_interrupt(_scratch: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_description;
+    use super::parse_commit_time;
 
     #[test]
-    fn a_description_is_date_then_subject() {
-        assert_eq!(
-            parse_description("1700000000\0fix: a thing"),
-            Some((1_700_000_000, "fix: a thing".to_string()))
-        );
-        assert_eq!(
-            parse_description("1700000000\0"),
-            Some((1_700_000_000, String::new()))
-        );
+    fn a_commit_time_is_read_from_its_marked_line() {
+        assert_eq!(parse_commit_time("tak-ct:1700000000"), Some(1_700_000_000));
+        assert_eq!(parse_commit_time("tak-ct:soon"), None);
     }
 
     /// With `log.showSignature` set somewhere tak's override does not reach,
     /// git prints the verification ahead of the format. That text must not
-    /// be read as the date.
+    /// be read as the date, even when it starts with digits.
     #[test]
     fn signature_text_before_the_format_is_ignored() {
-        let out = "Good \"git\" signature for t@x with ED25519 key SHA256:abc\n1700000000\0v4";
-        assert_eq!(
-            parse_description(out),
-            Some((1_700_000_000, "v4".to_string()))
-        );
-        assert_eq!(parse_description("gpg: no signature"), None);
+        let out = "1234 Good \"git\" signature for t@x with ED25519 key\ntak-ct:1700000000";
+        assert_eq!(parse_commit_time(out), Some(1_700_000_000));
+        assert_eq!(parse_commit_time("gpg: no signature"), None);
     }
 }

@@ -127,6 +127,29 @@ enum Cmd {
         #[usage(long, default = "origin")]
         remote: String,
     },
+    /// Show each benchmark's measurements over first-parent history.
+    ///
+    /// One table per benchmark and runner class, newest commit first, with the
+    /// change in instruction count from the previous measurement. Commits with
+    /// nothing recorded are skipped. `--html` writes the same history as a
+    /// self-contained page of charts instead.
+    Log {
+        /// Revision to walk back from. Defaults to HEAD.
+        #[usage(arg, default = "HEAD")]
+        rev: String,
+        /// Most recent recorded commits to show.
+        #[usage(short = 'n', long, default = "30")]
+        limit: usize,
+        /// Show only this benchmark. Repeatable.
+        #[usage(long, value_name = "NAME")]
+        bench: Vec<String>,
+        /// Write a self-contained HTML report to PATH instead of printing.
+        #[usage(long, value_name = "PATH")]
+        html: Option<std::path::PathBuf>,
+        /// Remote to refresh notes from.
+        #[usage(long, default = "origin")]
+        remote: String,
+    },
     /// Push recorded measurements to the remote.
     Push(RemoteArgs),
     /// Move measurements between a read-only job and a trusted publisher.
@@ -1054,6 +1077,57 @@ fn cmd_history(rev: String, remote: String) -> Result<()> {
     Ok(())
 }
 
+/// `tak log`'s options, gathered so they travel as one value.
+struct LogOpts {
+    rev: String,
+    limit: usize,
+    bench: Vec<String>,
+    html: Option<std::path::PathBuf>,
+    remote: String,
+}
+
+/// Print, or write as a page, the series along `rev`'s first-parent history.
+fn cmd_log(opts: LogOpts, settings: &Settings) -> Result<()> {
+    if opts.limit == 0 {
+        bail!("-n must be at least 1");
+    }
+    // Resolved first so a bad revision names itself, rather than surfacing as
+    // whatever `git log` makes of it after a network round trip.
+    notes::rev_parse(&opts.rev).with_context(|| format!("cannot resolve {}", opts.rev))?;
+    // Never fatal, as in `notes::read`: offline, or a remote with no notes
+    // yet, falls back to the local ref.
+    let _ = notes::fetch(&opts.remote);
+    let walked = notes::log(&opts.rev)?;
+    // Whether the walk stopped at a graft, not whether anything in the clone
+    // is shallow: the notes fetch above is shallow by design.
+    let shallow = walked
+        .last()
+        .is_some_and(|oldest| notes::is_shallow_boundary(&oldest.sha));
+    let history = tak_cli::report::build(walked, opts.limit, &opts.bench, shallow)?;
+
+    let Some(path) = opts.html else {
+        print!(
+            "{}",
+            tak_cli::report::markdown(&history, &opts.rev, settings.credit)
+        );
+        return Ok(());
+    };
+    let page = tak_cli::report::html(
+        &history,
+        &opts.rev,
+        repo_from_origin().as_deref(),
+        settings.credit,
+    );
+    std::fs::write(&path, page).with_context(|| format!("could not write {}", path.display()))?;
+    println!(
+        "wrote {}: {} series over {} recorded commit(s)",
+        path.display(),
+        history.series.len(),
+        history.commits.len()
+    );
+    Ok(())
+}
+
 /// How many commits of trunk history the sparkline covers.
 ///
 /// A constant rather than a setting: it changes how a picture looks, not what
@@ -1398,8 +1472,6 @@ struct CommitBackfill {
 struct Pending {
     sha: String,
     subject: String,
-    /// Committed at, seconds since the epoch.
-    time: u64,
     /// Benchmark to the names of its subjects with no record for this runner
     /// class yet, or every selected one under `--force`. Empty means nothing
     /// to do.
@@ -1538,15 +1610,24 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
             )
         })?;
 
-    let commits = tak_cli::worktree::first_parent_commits(&o.range)?;
-    if commits.is_empty() {
-        println!("no commits in {}", o.range);
-        return Ok(());
+    // `notes::log` passes the range after `--end-of-options`, so a leading
+    // `-` could not become an option anyway; this only gives it a clearer
+    // error than git's.
+    if o.range.starts_with('-') || o.range.trim().is_empty() {
+        bail!("not a commit range: {:?} (try `main~20..main`)", o.range);
     }
     // So what CI already pushed counts as recorded. Without it a backfill
     // re-measures the commits the main-branch workflow did, and those get a
     // second point each. Offline or without a remote, the local ref decides.
     let _ = notes::fetch("origin");
+    // One first-parent walk with every note inlined, the same one `tak log`
+    // reads, rather than a subprocess or two per commit.
+    let commits = notes::log(&o.range)
+        .with_context(|| format!("could not list the commits in {}", o.range))?;
+    if commits.is_empty() {
+        println!("no commits in {}", o.range);
+        return Ok(());
+    }
 
     let runner = runner_class(settings);
     // A stable one-line description of the build and where it ran, so a
@@ -1563,20 +1644,18 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
     let mut failed_builds = tak_cli::worktree::FailedBuilds::load(build_key)?;
 
     let mut pending = Vec::with_capacity(commits.len());
-    for sha in commits {
-        let have: std::collections::BTreeSet<(String, String)> = notes::read(None, &sha)?
+    for c in commits {
+        let have: std::collections::BTreeSet<(String, String)> = c
+            .records
             .into_iter()
             .filter(|r| r.runner == runner)
             .map(|r| (r.bench, r.tool))
             .collect();
-        let needs = needs_for(&plans, &have, o.force);
-        let (time, subject) = tak_cli::worktree::describe(&sha)?;
         pending.push(Pending {
-            failed_before: !o.force && failed_builds.contains(&sha),
-            sha,
-            subject,
-            time,
-            needs,
+            failed_before: !o.force && failed_builds.contains(&c.sha),
+            needs: needs_for(&plans, &have, o.force),
+            sha: c.sha,
+            subject: c.subject,
         });
     }
     let recorded_before = pending.iter().filter(|p| p.needs.is_empty()).count();
@@ -1804,7 +1883,7 @@ fn backfill_commit(
 
     // The commit's own date, as release backfill uses the release's: this
     // is when the code existed, which is what a series is plotted against.
-    let ts = rfc3339(p.time);
+    let ts = rfc3339(tak_cli::worktree::commit_time(&p.sha)?);
     for r in &mut records {
         r.ts = ts.clone();
     }
@@ -1898,6 +1977,20 @@ fn spawned_path(program: &Path) -> Option<std::path::PathBuf> {
 /// it may carry `[env]` settings that change what gets scrubbed from a
 /// subject's environment, and silently applying a weaker filter than the
 /// project asked for is not a good failure.
+/// Settings for a command that must still run when tak.toml cannot be read,
+/// with a warning naming what it is doing without it.
+///
+/// Only the file is dropped. Falling all the way back to the defaults threw
+/// away the flags and the environment too, so doctor once reported a derived
+/// runner class while a recording would have used the one the user asked for.
+fn tolerant_settings(cli: &CliLayer, doing: &str) -> Settings {
+    resolve_settings(cli).unwrap_or_else(|_| {
+        eprintln!("warning: could not read tak.toml; {doing} without it");
+        Settings::resolve(cli, &EnvLayer::from_process(), &TakConfigLayer::empty())
+            .unwrap_or_default()
+    })
+}
+
 fn resolve_settings(cli: &CliLayer) -> Result<Settings> {
     Settings::from_process(cli)
 }
@@ -2021,6 +2114,25 @@ fn main() -> Result<()> {
             )
         }
         Cmd::History { rev, remote } => cmd_history(rev, remote),
+        Cmd::Log {
+            rev,
+            limit,
+            bench,
+            html,
+            remote,
+        } => cmd_log(
+            LogOpts {
+                rev,
+                limit,
+                bench,
+                html,
+                remote,
+            },
+            // Tolerant, like doctor: reading what was recorded needs nothing
+            // from tak.toml but the credit line, and a config broken on this
+            // commit must not hide the history of every commit before it.
+            &tolerant_settings(&overrides, "reading history"),
+        ),
         Cmd::Push(RemoteArgs { remote }) => {
             notes::push(&remote)?;
             println!("pushed {} to {}", notes::NOTES_REF, remote);
@@ -2118,22 +2230,8 @@ fn main() -> Result<()> {
             no_gate,
         } => cmd_compare(base, rev, remote, no_gate, &resolve_settings(&overrides)?),
         // Tolerant on purpose: doctor diagnoses a broken setup, so a tak.toml
-        // it cannot read must not stop it from running. Falling all the way
-        // back to the defaults threw away the flag and the environment too, so
-        // doctor reported a derived runner class while a recording would have
-        // used the one the user asked for.
-        Cmd::Doctor => {
-            let resolved = resolve_settings(&overrides).unwrap_or_else(|_| {
-                eprintln!("warning: could not read tak.toml; showing settings without it");
-                Settings::resolve(
-                    &overrides,
-                    &EnvLayer::from_process(),
-                    &TakConfigLayer::empty(),
-                )
-                .unwrap_or_default()
-            });
-            cmd_doctor(&resolved)
-        }
+        // it cannot read must not stop it from running.
+        Cmd::Doctor => cmd_doctor(&tolerant_settings(&overrides, "showing settings")),
         Cmd::Settings { docs } => cmd_settings(&resolve_settings(&overrides)?, docs),
         Cmd::Usage => {
             // The command tree, then the config block: the settings are part

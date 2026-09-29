@@ -88,6 +88,71 @@ Use the current tak version when adopting it; the pin above only illustrates the
 `mise run perf` locally before adding CI. `tak doctor` should report Valgrind and the intended
 runner class on the machine that will produce the shared series.
 
+## Use the GitHub Action
+
+[jdx/tak-action](https://github.com/jdx/tak-action) is the recommended way to run the loop on
+GitHub Actions. It is pre-v1 like tak, and its inputs and behavior may change between releases.
+It installs a pinned tak release and Valgrind, and provides three modes that replace the
+workflows written out by hand in the rest of this page:
+
+- `record` measures each push to main and pushes `refs/notes/tak`;
+- `compare` fetches the base branch and notes with a read-only token, removes the checkout's
+  credentials, runs your build, compares with the merge base, and fails on an
+  instruction-count regression or when nothing was compared; and
+- `comment` runs in a separate `workflow_run` job that holds the write token, and posts the
+  compare job's report as a sticky pull-request comment and a check run without checking out
+  or executing anything from the pull request.
+
+The main-branch job:
+
+```yaml
+jobs:
+  record:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/tak-action@v0.1.0
+        with:
+          mode: record
+          version: 0.0.13
+          run: |
+            cargo build --release
+            tak run --record
+          token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+The pull-request job, with only `contents: read`:
+
+```yaml
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/tak-action@v0.1.0
+        with:
+          mode: compare
+          version: 0.0.13
+          run: |
+            cargo build --release
+            tak run --record
+```
+
+`run` executes after the credentials are removed, so the whole build belongs there. When the
+build needs another action first, such as `jdx/mise-action`, run the action with
+`mode: prepare` before it and `mode: compare` after it. If `mise.toml` already pins tak, set
+`install: false` so the action uses that tak rather than a second copy. The action's
+[README](https://github.com/jdx/tak-action#readme) has the complete workflows, including the
+`workflow_run` reporting job, every input, and the security model and limitations.
+
+Pin the action to the full commit SHA of a release you have reviewed; the tags above are for
+readability. The sections below show the same workflows without the action, for projects that
+cannot use it or need to change what it does.
+
 ## Record the main branch
 
 The main-branch workflow owns the history. It measures the tip of each push after it lands,
@@ -183,23 +248,25 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
-          # Kept only for the trusted fetch below, before project code runs.
-          persist-credentials: true
+          # Nothing is written to disk. The one step that needs the token
+          # gets it through its environment, before project code runs.
+          persist-credentials: false
 
       - name: Fetch the comparison inputs
         id: base
         env:
           BASE_REF: ${{ github.base_ref }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
+          auth=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth"
           git fetch --quiet origin "+$BASE_REF:refs/remotes/origin/$BASE_REF"
           git fetch --quiet --depth 1 origin '+refs/notes/tak:refs/notes/tak'
           base=$(git merge-base "origin/$BASE_REF" HEAD)
           echo "sha=$base" >> "$GITHUB_OUTPUT"
-
-      # Remove the checkout token before any action reads PR-controlled files
-      # or any project build or benchmark command executes.
-      - name: Remove checkout credentials
-        run: git config --local --unset-all http.https://github.com/.extraheader
 
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
 
@@ -232,8 +299,13 @@ Checking out the pull request's head SHA avoids measuring GitHub's synthetic mer
 Using the merge base avoids attributing unrelated changes that landed on main after the branch
 was created to the pull request.
 
-The example fetches the base branch and notes while its read-only checkout token is available,
-then removes that credential before mise or any project command runs. `tak compare` falls back
+The example passes the read-only token to git through the environment of the one step that
+fetches the base branch and notes, so it is never written to `.git/config` and is out of reach
+once mise or any project command runs. Do not keep `persist-credentials: true` and delete the
+credential afterwards: since actions/checkout v6 the token is stored in a separate file under
+`$RUNNER_TEMP`, included from `.git/config`, and
+`git config --local --unset-all http.https://github.com/.extraheader` neither finds nor removes
+it. `tak compare` falls back
 to the prefetched local notes when its unauthenticated refresh fails. This keeps private
 repositories readable without exposing their token to pull-request-controlled code.
 
