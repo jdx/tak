@@ -185,8 +185,30 @@ impl Store {
     ///
     /// Written to a temporary file and renamed into place, so an interrupted
     /// save leaves the previous baseline whole rather than half of either.
+    ///
+    /// The read-modify-write holds an exclusive lock on a sibling lock file.
+    /// Every worktree of a clone shares this directory, so two runs saving
+    /// different benchmarks to one name at once is ordinary. Without the
+    /// lock both would read the old file, and whichever renamed last would
+    /// silently drop the other's series while both reported success. An OS
+    /// lock rather than an exclusively created marker file, because the OS
+    /// releases it when a process dies; a marker left by a killed run would
+    /// block every save after it until someone deleted it by hand.
     pub fn save(&self, name: &str, records: &[Record]) -> Result<PathBuf> {
         validate_name(name)?;
+        std::fs::create_dir_all(&self.dir)
+            .with_context(|| format!("could not create {}", self.dir.display()))?;
+        // Hidden and without the baseline extension, so `list` never shows it.
+        let lock_path = self.dir.join(format!(".{name}.lock"));
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("could not open {}", lock_path.display()))?;
+        lock.lock()
+            .with_context(|| format!("could not lock {}", lock_path.display()))?;
+
         let path = self.path(name);
         let existing = match std::fs::read_to_string(&path) {
             Ok(b) => b,
@@ -209,8 +231,6 @@ impl Store {
             lines.insert(r.to_line()?);
         }
 
-        std::fs::create_dir_all(&self.dir)
-            .with_context(|| format!("could not create {}", self.dir.display()))?;
         let mut temp = tempfile::NamedTempFile::new_in(&self.dir).with_context(|| {
             format!(
                 "could not create a temporary file in {}",
@@ -224,8 +244,30 @@ impl Store {
         temp.persist(&path)
             .map_err(|e| e.error)
             .with_context(|| format!("could not write {}", path.display()))?;
+        // Only now: the next writer must read the file this one renamed in.
+        drop(lock);
         Ok(path)
     }
+}
+
+/// Series measured on only one side with an instruction count, among those
+/// this run and its relevant baseline hold.
+///
+/// These are what `--gate` cannot check. A benchmark whose count this run
+/// failed to take, one added since the baseline was saved, or one saved on
+/// another runner class would otherwise pass a gate that checked only its
+/// neighbours. A series with no count on either side is left out: a subject
+/// with `counters = false` is wall-clock only by design and never gates.
+pub fn ungated(base: &[Record], current: &[Record]) -> Vec<Key> {
+    let counted = |records: &[Record]| -> BTreeSet<Key> {
+        records
+            .iter()
+            .filter(|r| r.metrics.contains_key(crate::compare::GATED_METRIC))
+            .map(key)
+            .collect()
+    };
+    let (b, h) = (counted(base), counted(current));
+    b.symmetric_difference(&h).cloned().collect()
 }
 
 /// The part of a baseline this run can be compared against: the records for
@@ -378,6 +420,59 @@ mod tests {
             std::fs::read(s1.path("x")).unwrap(),
             std::fs::read(s2.path("x")).unwrap()
         );
+    }
+
+    /// Concurrent saves of different benchmarks to one name, as two
+    /// worktrees would do, must all survive. Threads rather than processes:
+    /// the lock is on an open file description, so two opens in one process
+    /// contend exactly as two processes would.
+    #[test]
+    fn concurrent_saves_keep_every_series() {
+        let (_tmp, s) = store();
+        let threads: Vec<_> = (0..16)
+            .map(|i| {
+                let s = s.clone();
+                std::thread::spawn(move || {
+                    s.save("x", &[rec(&format!("b{i}"), "r", i as f64)])
+                        .unwrap();
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(s.load("x").unwrap().records.len(), 16);
+        assert_eq!(
+            s.list().unwrap(),
+            vec!["x".to_string()],
+            "the lock file is listed"
+        );
+    }
+
+    fn wall_only(bench: &str, runner: &str) -> Record {
+        let mut r = rec(bench, runner, 0.0);
+        r.metrics = BTreeMap::from([("wall_min_ms".to_string(), 1.0)]);
+        r
+    }
+
+    #[test]
+    fn a_series_counted_on_one_side_only_is_ungated() {
+        let base = [rec("a", "r", 1.0), rec("b", "r", 1.0), wall_only("w", "r")];
+        // `b` lost its count this run; `c` is new; `w` never had one.
+        let head = [
+            rec("a", "r", 1.0),
+            wall_only("b", "r"),
+            rec("c", "r", 1.0),
+            wall_only("w", "r"),
+        ];
+        let names: Vec<String> = ungated(&base, &head).into_iter().map(|k| k.0).collect();
+        assert_eq!(names, vec!["b", "c"]);
+    }
+
+    #[test]
+    fn a_count_on_another_runner_is_ungated_on_both() {
+        let got = ungated(&[rec("a", "r1", 1.0)], &[rec("a", "r2", 1.0)]);
+        assert_eq!(got.len(), 2, "{got:?}");
     }
 
     #[test]

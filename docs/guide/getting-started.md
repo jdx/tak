@@ -95,13 +95,25 @@ is never gated.
   run as well, or `--save-baseline NAME` to replace a baseline after comparing against it.
 - `--save-baseline` replaces what the baseline held for the benchmarks this run measured and
   keeps the rest, so `tak run --bench startup --save-baseline before` updates one benchmark.
-  Like `--record`, it saves nothing when a subject fails or a check fails.
+  Like `--record`, it saves nothing when a subject fails or a check fails. With both flags,
+  the baseline is saved first; if recording then fails, the error says so, and re-running the
+  same command finishes the job without duplicating anything in the baseline.
 - The report covers only the benchmarks this run measured. Runner class still partitions the
   results: a baseline saved under another runner class is named in a warning and not compared.
-- `--baseline` reports and exits 0 whatever the numbers say. Add `--gate` to fail when an
-  instruction count rose by more than `gate_pct`. `--gate` also fails when no instruction
-  count could be compared at all, because a gate that passes without instruction counts
-  would pass every change.
+- `--baseline` reports and exits 0 whatever the numbers say. If a check failed, the report
+  says so under the table, because a subject that skips its work usually looks faster.
+- Add `--gate` to fail when an instruction count rose by more than `gate_pct`. `--gate` also
+  fails in every case where it could not check everything it was asked to:
+  - nothing ran;
+  - no instruction count appears on both sides;
+  - a benchmark has an instruction count on one side only (its count failed, counters were
+    off, it is new since the baseline was saved, or the baseline is from another runner
+    class);
+  - a check failed.
+
+  A gate that passed in those cases would pass changes it never measured.
+- Saves to one baseline from several worktrees at once are serialised with a lock file in the
+  same directory, so each run's benchmarks are kept.
 - A mistyped `--baseline` name fails before anything is measured, and the error lists the saved
   baselines. To delete a baseline, remove its file.
 

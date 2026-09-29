@@ -581,6 +581,20 @@ fn run_declared(opts: RunOpts, settings: &Settings, local: &Local) -> Result<()>
     }
 
     if plans.is_empty() {
+        // A gate that measured nothing has checked nothing, and exiting 0
+        // would mark the revision good: `git bisect run` would carry on past
+        // it. Same exemption as below: a dry run gates nothing either way.
+        if opts.gate && !opts.dry_run {
+            bail!(
+                "nothing to gate against baseline `{}`: {}",
+                opts.baseline.as_deref().unwrap_or_default(),
+                if skipped.is_empty() {
+                    format!("{} declares no benchmarks", path.display())
+                } else {
+                    "every selected benchmark or subject has a false `when`".to_string()
+                }
+            );
+        }
         if skipped.is_empty() {
             println!("{} declares no benchmarks", path.display());
             return Ok(());
@@ -755,13 +769,14 @@ fn finish(
             path.display()
         );
     }
+    let failing = failing_checks(&measured);
     // Reported before a failed subject stops the run: the question this
     // answers is whether an edit helped, and the subjects that did measure
     // answer it.
     let compared = local
         .against
         .as_ref()
-        .map(|b| report_against(b, &measured, settings));
+        .map(|b| report_against(b, &measured, &failing, settings));
     // What a failure below keeps from being written, named so the message
     // says which store was left untouched.
     let storing = match (opts.record, &opts.save_baseline) {
@@ -789,22 +804,6 @@ fn finish(
         // clear it but a run whose checks all pass. The export above is still
         // written: it carries the verdicts. A baseline holds the same records
         // and is read by the same `compare`, so the same rule applies to it.
-        let failing: Vec<String> = measured
-            .iter()
-            .filter(|m| m.samples.passed() < m.samples.checks.len())
-            .map(|m| {
-                let label = if m.subject.name == SELF_TOOL {
-                    m.bench.clone()
-                } else {
-                    format!("{} ({})", m.bench, m.subject.name)
-                };
-                format!(
-                    "{label} failed {} of {}",
-                    m.samples.checks.len() - m.samples.passed(),
-                    m.samples.checks.len()
-                )
-            })
-            .collect();
         if !failing.is_empty() {
             eprintln!(
                 "
@@ -814,22 +813,61 @@ fn finish(
             bail!("check failed: {}", failing.join(", "));
         }
         let records: Vec<Record> = measured.into_iter().map(|m| m.record).collect();
-        if opts.record {
-            record_all(&records)?;
-        }
+        // The baseline first. Saving it replaces this run's series, so doing
+        // it twice leaves the same file, while appending to the notes twice
+        // leaves two records. With that order, a failed second write is
+        // fixed by re-running the same command; the other order would
+        // double-record every retry of a failed baseline save.
         if let (Some(name), Some(store)) = (&opts.save_baseline, &local.store) {
             save_baseline(store, name, &records)?;
+        }
+        if opts.record {
+            record_all(&records).with_context(|| match &opts.save_baseline {
+                Some(name) => format!(
+                    "baseline `{name}` was saved, but nothing was recorded to {}; \
+                     re-running the same command saves the baseline again and records",
+                    notes::NOTES_REF
+                ),
+                None => format!("nothing was recorded to {}", notes::NOTES_REF),
+            })?;
         }
     }
     // Last, after anything asked for was stored: a regression is exactly the
     // measurement a `--record` run exists to keep, and gating first would
     // throw it away.
     if opts.gate
-        && let (Some(against), Some(comparison)) = (&local.against, &compared)
+        && let (Some(against), Some(compared)) = (&local.against, &compared)
     {
-        gate_against(against, comparison, settings)?;
+        gate_against(against, compared, &failing, settings)?;
     }
     Ok(())
+}
+
+/// Each subject whose check failed on any sample, labelled for a message.
+fn failing_checks(measured: &[Measured]) -> Vec<String> {
+    measured
+        .iter()
+        .filter(|m| m.samples.passed() < m.samples.checks.len())
+        .map(|m| {
+            let label = if m.subject.name == SELF_TOOL {
+                m.bench.clone()
+            } else {
+                format!("{} ({})", m.bench, m.subject.name)
+            };
+            format!(
+                "{label} failed {} of {}",
+                m.samples.checks.len() - m.samples.passed(),
+                m.samples.checks.len()
+            )
+        })
+        .collect()
+}
+
+/// What a baseline comparison found, kept for `--gate`.
+struct Against {
+    comparison: compare::Comparison,
+    /// Series counted on one side only; see [`baseline::ungated`].
+    ungated: Vec<compare::Key>,
 }
 
 /// Print how this run compares with a saved baseline, and return the
@@ -841,11 +879,13 @@ fn finish(
 fn report_against(
     against: &Baseline,
     measured: &[Measured],
+    failing: &[String],
     settings: &Settings,
-) -> compare::Comparison {
+) -> Against {
     let current: Vec<Record> = measured.iter().map(|m| m.record.clone()).collect();
     let base = baseline::relevant(&against.records, &current);
     let comparison = compare::compare(&base, &current);
+    let ungated = baseline::ungated(&base, &current);
 
     // The table already refuses to line up different runner classes; this
     // says why in terms of the baseline, since a baseline saved with another
@@ -883,7 +923,30 @@ fn report_against(
             false
         )
     );
-    comparison
+    // In the report itself, not only in the warning above it: the table has
+    // no way to mark a row whose samples did the wrong work, and a check
+    // that fails fast is exactly what reads as a large improvement.
+    if !failing.is_empty() {
+        println!(
+            "\n**Check failed, so this comparison is not evidence of an improvement:** {}. \
+             Those numbers come from samples that did the wrong work.",
+            failing.join(", ")
+        );
+    }
+    if !ungated.is_empty() {
+        println!(
+            "\nCounted on one side only, so not gated: {}",
+            ungated
+                .iter()
+                .map(describe_series)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Against {
+        comparison,
+        ungated,
+    }
 }
 
 fn quoted(names: &BTreeSet<&str>) -> String {
@@ -894,6 +957,16 @@ fn quoted(names: &BTreeSet<&str>) -> String {
         .join(", ")
 }
 
+/// A series for a message, spelled as the comparison report spells one.
+fn describe_series(key: &compare::Key) -> String {
+    let (bench, tool, runner) = key;
+    if tool == SELF_TOOL {
+        format!("`{bench}` on `{runner}`")
+    } else {
+        format!("`{bench}` ({tool}) on `{runner}`")
+    }
+}
+
 /// Fail on a regression against a baseline, for `--gate`.
 ///
 /// Stricter than `tak compare` about comparing nothing. There, a base with no
@@ -901,11 +974,39 @@ fn quoted(names: &BTreeSet<&str>) -> String {
 /// baseline was named and loaded, so nothing to compare means a runner or tool
 /// mismatch, or a run without valgrind, and a gate that passed then would pass
 /// every edit: `git bisect run` would blame the wrong commit.
+///
+/// The same holds for any one series: a gate that checked only some of what
+/// this run counted has not passed. And a failed check fails the gate, since
+/// a subject that stopped doing its work retires fewer instructions, which is
+/// the one direction the gate lets through.
 fn gate_against(
     against: &Baseline,
-    comparison: &compare::Comparison,
+    compared: &Against,
+    failing: &[String],
     settings: &Settings,
 ) -> Result<()> {
+    if !failing.is_empty() {
+        bail!(
+            "check failed, so nothing is gated against baseline `{}`: {}",
+            against.name,
+            failing.join(", ")
+        );
+    }
+    if !compared.ungated.is_empty() {
+        bail!(
+            "cannot gate against baseline `{}`: an instruction count exists on one side only \
+             for {}. Save the baseline again on this runner class, with the same counters, \
+             to compare them",
+            against.name,
+            compared
+                .ungated
+                .iter()
+                .map(describe_series)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let comparison = &compared.comparison;
     if !comparison
         .changes
         .iter()

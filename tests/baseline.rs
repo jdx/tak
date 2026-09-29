@@ -51,17 +51,31 @@ impl Repo {
 
 /// `tak run` in `dir`, quick and quiet: one warmup-free pass of a few runs, no
 /// counters unless a test asks for them, and a fixed runner class so a CI host
-/// and a laptop produce the same series names.
+/// and a laptop produce the same series names. An empty `cmd` runs what the
+/// directory's tak.toml declares.
 fn tak_run(dir: &Path, flags: &[&str], cmd: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_tak"))
-        .args(["run", "--no-progress", "--runs", "3", "--warmup", "0"])
+    let mut c = Command::new(env!("CARGO_BIN_EXE_tak"));
+    c.args(["run", "--no-progress", "--runs", "3", "--warmup", "0"])
         .args(["--runner", "test-runner"])
-        .args(flags)
-        .arg("--")
-        .args(cmd)
-        .current_dir(dir)
-        .output()
-        .expect("failed to run tak")
+        .args(flags);
+    if !cmd.is_empty() {
+        c.arg("--").args(cmd);
+    }
+    c.current_dir(dir).output().expect("failed to run tak")
+}
+
+/// Write a baseline by hand, for states a host without valgrind cannot
+/// produce by measuring: an instruction count on the baseline side.
+fn write_baseline(repo: &Repo, name: &str, lines: &[&str]) {
+    let path = repo.baseline_file(name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, lines.join("\n") + "\n").unwrap();
+}
+
+fn counted_line(bench: &str) -> String {
+    format!(
+        r#"{{"v":1,"bench":"{bench}","tool":"self","runner":"test-runner","ts":"2026-09-29T00:00:00Z","metrics":{{"instructions":1000000.0,"wall_min_ms":1.0}}}}"#
+    )
 }
 
 fn stdout(o: &Output) -> String {
@@ -316,6 +330,129 @@ fn worktrees_share_baselines() {
     assert!(stdout(ok(&out)).contains("compared against baseline `main`"));
 }
 
+/// A benchmark counted in the baseline but not in this run — its count
+/// failed, or counters were turned off — has not been checked, so a gate
+/// that passed would be vouching for it anyway.
+#[test]
+fn a_gate_fails_when_a_counted_benchmark_went_uncounted() {
+    let repo = Repo::new();
+    write_baseline(&repo, "x", &[&counted_line("a"), &counted_line("b")]);
+    let out = tak_run(
+        &repo.dir,
+        &[NC, "--bench", "a", "--baseline", "x", "--gate"],
+        &["true"],
+    );
+    let err = fail(&out);
+    assert!(
+        err.contains("one side only for `a` on `test-runner`"),
+        "{err}"
+    );
+    assert!(
+        stdout(&out).contains("Counted on one side only, so not gated: `a`"),
+        "{}",
+        stdout(&out)
+    );
+    // Report only: said, not failed.
+    ok(&tak_run(
+        &repo.dir,
+        &[NC, "--bench", "a", "--baseline", "x"],
+        &["true"],
+    ));
+}
+
+/// A gate that measured nothing has checked nothing. `git bisect run` would
+/// otherwise mark the revision good.
+#[test]
+fn a_gate_with_nothing_to_run_fails() {
+    let repo = Repo::new();
+    write_baseline(&repo, "x", &[&counted_line("off")]);
+
+    std::fs::write(
+        repo.dir.join("tak.toml"),
+        "[bench.off]\ncmd = \"true\"\nwhen = \"false\"\n",
+    )
+    .unwrap();
+    let err = fail(&tak_run(&repo.dir, &["--baseline", "x", "--gate"], &[]));
+    assert!(
+        err.contains("nothing to gate against baseline `x`"),
+        "{err}"
+    );
+    assert!(err.contains("false `when`"), "{err}");
+    ok(&tak_run(&repo.dir, &["--baseline", "x"], &[]));
+
+    std::fs::write(repo.dir.join("tak.toml"), "").unwrap();
+    let err = fail(&tak_run(&repo.dir, &["--baseline", "x", "--gate"], &[]));
+    assert!(err.contains("declares no benchmarks"), "{err}");
+}
+
+/// A subject whose check fails usually got faster by skipping its work. The
+/// report has to say so beside the table, and a gate must not pass it.
+#[test]
+fn a_failed_check_is_flagged_and_fails_the_gate() {
+    let repo = Repo::new();
+    write_baseline(&repo, "x", &[&counted_line("c")]);
+    std::fs::write(
+        repo.dir.join("tak.toml"),
+        "[bench.c]\ncmd = \"true\"\ncheck = \"false\"\n",
+    )
+    .unwrap();
+
+    let out = tak_run(&repo.dir, &[NC, "--baseline", "x"], &[]);
+    let report = stdout(ok(&out));
+    assert!(
+        report.contains(
+            "Check failed, so this comparison is not evidence of an improvement:** c failed 3 of 3"
+        ),
+        "{report}"
+    );
+
+    let err = fail(&tak_run(&repo.dir, &[NC, "--baseline", "x", "--gate"], &[]));
+    assert!(err.contains("check failed, so nothing is gated"), "{err}");
+}
+
+/// The baseline is written before the notes, and a failed recording says the
+/// baseline was saved, so a retry of the same command is the whole fix.
+#[test]
+fn a_failed_record_after_a_saved_baseline_says_which_was_written() {
+    // No commit: there is no HEAD to record against.
+    let repo = Repo::new();
+    let err = fail(&tak_run(
+        &repo.dir,
+        &[NC, "--record", "--save-baseline", "x"],
+        &["true"],
+    ));
+    assert!(
+        err.contains("baseline `x` was saved, but nothing was recorded"),
+        "{err}"
+    );
+    assert!(repo.baseline_file("x").exists());
+    assert_no_notes(&repo.dir);
+}
+
+/// Several processes saving different benchmarks to one baseline at once, as
+/// parallel worktrees do, keep every benchmark.
+#[test]
+fn concurrent_saves_from_separate_processes_keep_every_benchmark() {
+    let repo = Repo::new();
+    let children: Vec<_> = (0..6)
+        .map(|i| {
+            Command::new(env!("CARGO_BIN_EXE_tak"))
+                .args(["run", NC, "--no-progress", "--runs", "1", "--warmup", "0"])
+                .args(["--bench", &format!("b{i}"), "--save-baseline", "x"])
+                .args(["--", "true"])
+                .current_dir(&repo.dir)
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for mut c in children {
+        assert!(c.wait().unwrap().success());
+    }
+    let saved = std::fs::read_to_string(repo.baseline_file("x")).unwrap();
+    assert_eq!(saved.lines().count(), 6, "{saved}");
+}
+
 /// The gate itself, on real instruction counts. Skips without valgrind, the
 /// normal state on macOS and Windows.
 #[test]
@@ -367,4 +504,31 @@ fn the_gate_fires_on_an_instruction_count_regression() {
         &slow,
     ));
     assert_no_notes(&repo.dir);
+}
+
+/// The partial case on real counts: `a` compares cleanly, `b` was counted in
+/// the baseline and not now. Passing on `a` alone would leave `b` unchecked.
+#[test]
+fn a_gate_that_could_check_only_some_benchmarks_fails() {
+    if !tak_cli::measure::valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let repo = Repo::new();
+    let toml = |b_counters: bool| {
+        format!(
+            "[bench.m.subject.a]\ncmd = [\"sh\", \"-c\", \"exit 0\"]\ncounters = true\n\n\
+             [bench.m.subject.b]\ncmd = [\"sh\", \"-c\", \"exit 0\"]\ncounters = {b_counters}\n"
+        )
+    };
+    std::fs::write(repo.dir.join("tak.toml"), toml(true)).unwrap();
+    ok(&tak_run(&repo.dir, &["--save-baseline", "x"], &[]));
+    ok(&tak_run(&repo.dir, &["--baseline", "x", "--gate"], &[]));
+
+    std::fs::write(repo.dir.join("tak.toml"), toml(false)).unwrap();
+    let err = fail(&tak_run(&repo.dir, &["--baseline", "x", "--gate"], &[]));
+    assert!(
+        err.contains("one side only for `m` (b) on `test-runner`"),
+        "{err}"
+    );
 }
