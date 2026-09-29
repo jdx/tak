@@ -724,7 +724,7 @@ fn allocations(c: &Comparison) -> String {
                     " {} → {} | {} |",
                     thousands(ch.base),
                     thousands(ch.head),
-                    signed_pct(ch.pct())
+                    count_delta(ch)
                 )),
                 None => out.push_str(" — | — |"),
             }
@@ -732,6 +732,22 @@ fn allocations(c: &Comparison) -> String {
         out.push('\n');
     }
     out
+}
+
+/// An allocation count's change, for display.
+///
+/// A zero base has no percentage, and [`signed_pct`] calls that `new`, which
+/// is right for an instruction count: a benchmark that retired nothing was
+/// not really measured. A zero allocation count is a real measurement — a
+/// command that allocated nothing — so `0 → 0` is no change and `0 → N` is
+/// the rise itself. `new` stays for a series with nothing on the base side,
+/// which never reaches this table.
+fn count_delta(ch: &Change) -> String {
+    match ch.pct() {
+        Some(p) => signed_pct(Some(p)),
+        None if ch.head == ch.base => signed_pct(Some(0.0)),
+        None => format!("+{} (from 0)", thousands(ch.head - ch.base)),
+    }
 }
 
 /// How a series is named in prose: bench, plus the tool when it is not the
@@ -1460,6 +1476,38 @@ mod tests {
         let row = md.lines().find(|l| l.contains("ci\\|arm64")).unwrap();
         let cells = row.replace("\\|", "").matches('|').count();
         assert_eq!(cells, 6, "a benchmark cell and four numbers: {row}");
+    }
+
+    /// A zero allocation count is a measurement, not a missing base: no
+    /// change reads as such, and a rise from zero gives the rise.
+    #[test]
+    fn a_zero_allocation_base_is_a_measurement_not_new() {
+        let c = compare(
+            &[with_allocs(
+                rec("a", "gha", 1_000_000.0, 10.0),
+                0.0,
+                0.0,
+                0.0,
+            )],
+            &[with_allocs(
+                rec("a", "gha", 1_000_000.0, 10.0),
+                0.0,
+                4_140.0,
+                0.0,
+            )],
+        );
+        let md = markdown(&c, &Trend::new(), &g(1.0), false);
+        let row = md
+            .lines()
+            .skip_while(|l| !l.starts_with("Heap allocations"))
+            .find(|l| l.starts_with("| a |"))
+            .unwrap();
+        assert_eq!(
+            row,
+            "| a | 0 → 0 | +0.00% | 0 → 4,140 | +4,140 (from 0) | 0 → 0 | +0.00% |"
+        );
+        assert!(!row.contains("new"), "{row}");
+        assert!(c.regressions(&g(0.001)).is_empty(), "still never gates");
     }
 
     #[test]
