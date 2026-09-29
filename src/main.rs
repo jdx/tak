@@ -191,7 +191,8 @@ enum Cmd {
     ///
     /// Fails when an instruction count has risen by more than `gate_pct` and
     /// `gate_min_delta`, or by more than a benchmark's own `gate` in the
-    /// working tree's tak.toml. Wall clock is reported and never gated.
+    /// working tree's tak.toml, or when no series was measured on both
+    /// sides. Wall clock is reported and never gated.
     Compare {
         /// Revision to compare against.
         #[usage(arg, default = "origin/main")]
@@ -202,17 +203,24 @@ enum Cmd {
         /// Remote to refresh notes from.
         #[usage(long, default = "origin")]
         remote: String,
-        /// Report without failing, whatever the numbers say.
+        /// Report without failing, whatever the numbers say. Takes precedence
+        /// over `--allow-empty`: an empty comparison passes too.
         #[usage(long)]
         no_gate: bool,
+        /// Pass when no series was measured on both sides, instead of failing.
+        /// For the first pull request after adopting tak, or a runner-class
+        /// migration. A regression still fails.
+        #[usage(long)]
+        allow_empty: bool,
     },
     /// Find instruction-count steps that already landed on a branch.
     ///
     /// Meant for the main-branch workflow, after recording. Walks REV's
     /// first-parent history and compares each series' consecutive recorded
-    /// points. Fails only when the step onto REV itself rose by more than
-    /// `gate_pct`, so a regression fails the run for the commit that introduced
-    /// it rather than every run after. Older steps and slow drift are reported
+    /// points. Fails when the step onto REV itself is beyond that series' gate
+    /// (the same per-benchmark gates as `compare`), so a regression fails the
+    /// run for the commit that introduced it rather than every run after, and
+    /// when nothing could be compared. Older steps and slow drift are reported
     /// without failing. Wall clock is shown and never gated.
     Detect {
         /// Newest commit to examine. Defaults to HEAD.
@@ -1129,6 +1137,7 @@ fn cmd_compare(
     rev: String,
     remote: String,
     no_gate: bool,
+    allow_empty: bool,
     settings: &Settings,
 ) -> Result<()> {
     let gates = compare_gates(settings)?;
@@ -1149,8 +1158,25 @@ fn cmd_compare(
         compare::markdown(&comparison, &trend, &gates, settings.credit)
     );
 
+    if no_gate {
+        return Ok(());
+    }
+    // An empty comparison has no regressions, so the check below would pass
+    // it — and a gate that passed because it never ran reads exactly like one
+    // that ran clean. Opting out is a flag, not the default, because the usual
+    // causes are a broken workflow rather than a state worth accepting.
+    if comparison.is_empty() && !allow_empty {
+        bail!(
+            "nothing was compared: no series was measured on both {base} and {rev}. \
+             Either one side has no measurements recorded (the base predates \
+             adopting tak, or its notes were never pushed or fetched), or the two \
+             were measured on different runner classes, which are deliberately \
+             not comparable. Pass --allow-empty to accept this, as on the first \
+             pull request after adopting tak or across a runner-class migration"
+        )
+    }
     let regressions = comparison.regressions(&gates);
-    if regressions.is_empty() || no_gate {
+    if regressions.is_empty() {
         return Ok(());
     }
     // A non-zero exit is the gate. The table above already says which and by
@@ -1722,7 +1748,15 @@ fn main() -> Result<()> {
             rev,
             remote,
             no_gate,
-        } => cmd_compare(base, rev, remote, no_gate, &resolve_settings(&overrides)?),
+            allow_empty,
+        } => cmd_compare(
+            base,
+            rev,
+            remote,
+            no_gate,
+            allow_empty,
+            &resolve_settings(&overrides)?,
+        ),
         Cmd::Detect {
             rev,
             window,

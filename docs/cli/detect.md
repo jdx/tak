@@ -5,7 +5,7 @@
 
 Find instruction-count steps that already landed on a branch.
 
-Meant for the main-branch workflow, after recording. Walks REV's first-parent history and compares each series' consecutive recorded points. Fails only when the step onto REV itself rose by more than `gate_pct`, so a regression fails the run for the commit that introduced it rather than every run after. Older steps and slow drift are reported without failing. Wall clock is shown and never gated.
+Meant for the main-branch workflow, after recording. Walks REV's first-parent history and compares each series' consecutive recorded points. Fails when the step onto REV itself is beyond that series' gate (the same per-benchmark gates as `compare`), so a regression fails the run for the commit that introduced it rather than every run after, and when nothing could be compared. Older steps and slow drift are reported without failing. Wall clock is shown and never gated.
 
 ## Arguments
 - **`[REV]`** — Newest commit to examine. Defaults to HEAD.
