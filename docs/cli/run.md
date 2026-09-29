@@ -20,4 +20,5 @@ Benchmark a command, or everything declared in tak.toml.
 - **`--config <PATH>`** — Read this file instead of searching for tak.toml.
 - **`--dry-run`** — Print what would run — every subject's command, setup, prepare, check, directory, environment and run count, templates rendered — without running any of it.
 - **`--export-json <PATH>`** — Write every sample and summary to PATH as hyperfine-compatible JSON.
+- **`--profile-dir <DIR>`** — Keep the cachegrind profile behind each instruction count, as `DIR/<bench>/<subject>.cachegrind.out`, for `tak explain`.
 - **`-h --help`** — Print help

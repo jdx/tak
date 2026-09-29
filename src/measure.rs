@@ -788,13 +788,31 @@ pub fn instructions(
             settings,
         },
         &DEFAULT_OK_EXIT_CODES,
+        false,
     )
+    .map(|c| c.map(|(c, _)| c))
 }
 
 /// [`instructions`] for a declared subject: its environment, its
 /// `ok_exit_codes`, and its prepare step before every cachegrind run, since
 /// each run has to start from the same state the timed samples did.
 pub fn subject_instructions(s: &Subject, settings: &Settings) -> Result<Option<Counted>> {
+    subject_count(s, settings, false).map(|c| c.map(|(c, _)| c))
+}
+
+/// [`subject_instructions`], also returning the cachegrind profile of the run
+/// whose count is reported. That is the minimum, so the profile's total is
+/// the number recorded, and attributing a change to its functions explains
+/// exactly the change the gate saw.
+pub fn subject_profile(s: &Subject, settings: &Settings) -> Result<Option<(Counted, Vec<u8>)>> {
+    Ok(subject_count(s, settings, true)?.map(|(c, p)| (c, p.expect("a profile was asked for"))))
+}
+
+fn subject_count(
+    s: &Subject,
+    settings: &Settings,
+    profile: bool,
+) -> Result<Option<(Counted, Option<Vec<u8>>)>> {
     count(
         &s.cmd,
         s.prepare.as_deref(),
@@ -804,6 +822,7 @@ pub fn subject_instructions(s: &Subject, settings: &Settings) -> Result<Option<C
             settings,
         },
         &s.ok_exit_codes,
+        profile,
     )
 }
 
@@ -1264,30 +1283,54 @@ fn version_once(argv: &[String], site: &Site, timeout: Duration) -> Result<Strin
 
 /// `ok` applies to the subject under valgrind: cachegrind exits with its
 /// client's code, and re-raises the signal a client died of.
+///
+/// With `profile`, each run writes its per-function profile to a scratch
+/// file, and the one from the run at the minimum is returned. Without it the
+/// profile goes to `/dev/null` as it always has. cachegrind writes it after
+/// the client exits, so keeping it cannot move the count.
 fn count(
     cmd: &[String],
     prepare: Option<&[String]>,
     site: &Site,
     ok: &[i32],
-) -> Result<Option<Counted>> {
+    profile: bool,
+) -> Result<Option<(Counted, Option<Vec<u8>>)>> {
     if !valgrind_available() {
         return Ok(None);
     }
 
+    // An absolute path, since the subject may run in its own `dir`; removed
+    // with the directory on every exit path.
+    let scratch = if profile {
+        Some(tempfile::tempdir().context("could not create a directory for cachegrind profiles")?)
+    } else {
+        None
+    };
     let mut samples: Vec<u64> = Vec::with_capacity(COUNTER_RUNS as usize);
-    for _ in 0..COUNTER_RUNS {
+    for run in 0..COUNTER_RUNS {
         if let Some(p) = prepare {
             prepare_once(p, site)?;
         }
+        let out_file = match &scratch {
+            // valgrind expands `%p` and `%q{VAR}` in this path and reads `%%`
+            // as a literal one. A temporary directory seldom holds a `%`, but
+            // TMPDIR is the user's to set.
+            Some(d) => d
+                .path()
+                .join(format!("run-{run}"))
+                .to_string_lossy()
+                .replace('%', "%%"),
+            None => "/dev/null".to_string(),
+        };
         let mut argv: Vec<String> = [
             "valgrind",
             "--tool=cachegrind",
             "--cache-sim=no",
             "--branch-sim=no",
-            "--cachegrind-out-file=/dev/null",
         ]
         .map(String::from)
         .to_vec();
+        argv.push(format!("--cachegrind-out-file={out_file}"));
         argv.extend_from_slice(cmd);
         let mut c = command(&argv, site)?;
         c.stdout(Stdio::null());
@@ -1309,11 +1352,26 @@ fn count(
         }
     }
 
-    Ok(Some(Counted {
+    let counted = Counted {
         min: *samples.iter().min().expect("COUNTER_RUNS > 0"),
         max: *samples.iter().max().expect("COUNTER_RUNS > 0"),
         runs: COUNTER_RUNS,
-    }))
+    };
+    // The first run at the minimum. A hermetic subject's runs are identical,
+    // and for one that is not, the minimum is the quiet path the recorded
+    // count describes.
+    let best = samples
+        .iter()
+        .position(|n| *n == counted.min)
+        .expect("the minimum is one of the samples");
+    let kept = scratch
+        .map(|d| {
+            let path = d.path().join(format!("run-{best}"));
+            std::fs::read(&path)
+                .with_context(|| format!("cachegrind wrote no profile to {}", path.display()))
+        })
+        .transpose()?;
+    Ok(Some((counted, kept)))
 }
 
 /// Extract the `I refs:` count from cachegrind's stderr summary.

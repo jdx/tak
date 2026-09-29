@@ -240,7 +240,7 @@ pub fn sparkline(values: &[f64]) -> String {
 }
 
 /// `12345678` -> `12,345,678`
-fn thousands(v: f64) -> String {
+pub fn thousands(v: f64) -> String {
     let n = format!("{:.0}", v.abs());
     let mut out = String::new();
     for (i, c) in n.chars().enumerate() {

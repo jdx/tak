@@ -72,5 +72,8 @@ tak compare origin/main
 An instruction-count increase beyond the configured gate fails the command. Wall-clock
 changes are displayed but never gate the result.
 
+To see which functions a change came from, keep cachegrind's profiles on both sides; see
+[Explain an instruction-count change](./attribution).
+
 Always keep measurements partitioned by runner class. Comparing numbers across runner classes
 turns an infrastructure change into an apparent code regression.

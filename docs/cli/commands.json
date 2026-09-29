@@ -265,6 +265,25 @@
             }
           },
           {
+            "name": "profile-dir",
+            "usage": "--profile-dir <DIR>",
+            "help": "Keep the cachegrind profile behind each instruction count, as `DIR/<bench>/<subject>.cachegrind.out`, for `tak explain`.",
+            "help_first_line": "Keep the cachegrind profile behind each instruction count, as `DIR/<bench>/<subject>.cachegrind.out`, for `tak explain`.",
+            "short": [],
+            "long": [
+              "profile-dir"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "DIR",
+              "usage": "<DIR>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
             "name": "help",
             "usage": "-h --help",
             "help": "Print help",
@@ -950,6 +969,84 @@
         "help": "Compare this commit's measurements against another's.",
         "help_long": "Compare this commit's measurements against another's.\n\nFails when an instruction count has risen by more than `gate_pct`. Wall clock is reported and never gated.",
         "name": "compare",
+        "aliases": [],
+        "hidden_aliases": [],
+        "examples": [],
+        "headings": []
+      },
+      "explain": {
+        "full_cmd": [
+          "explain"
+        ],
+        "usage": "explain [--top <N>] <BASE> <HEAD>",
+        "subcommands": {},
+        "args": [
+          {
+            "name": "BASE",
+            "usage": "<BASE>",
+            "help": "Base profiles: a directory written by `tak run --profile-dir`, or one profile file.",
+            "help_first_line": "Base profiles: a directory written by `tak run --profile-dir`, or one profile file.",
+            "required": true,
+            "double_dash": "Optional",
+            "hide": false
+          },
+          {
+            "name": "HEAD",
+            "usage": "<HEAD>",
+            "help": "Head profiles, in the same form as the base.",
+            "help_first_line": "Head profiles, in the same form as the base.",
+            "required": true,
+            "double_dash": "Optional",
+            "hide": false
+          }
+        ],
+        "flags": [
+          {
+            "name": "top",
+            "usage": "--top <N>",
+            "help": "Functions to list for each benchmark.",
+            "help_first_line": "Functions to list for each benchmark.",
+            "short": [],
+            "long": [
+              "top"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "N",
+              "usage": "<N>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            },
+            "default": [
+              "10"
+            ]
+          },
+          {
+            "name": "help",
+            "usage": "-h --help",
+            "help": "Print help",
+            "help_first_line": "Print help",
+            "short": [
+              "h"
+            ],
+            "long": [
+              "help"
+            ],
+            "hide": false,
+            "global": false,
+            "action": "help",
+            "builtin": true
+          }
+        ],
+        "mounts": [],
+        "unknown_flags": null,
+        "hide": false,
+        "args_override_self": true,
+        "help": "Show which functions an instruction-count change came from.",
+        "help_long": "Show which functions an instruction-count change came from.\n\nReads two sets of profiles written by `tak run --profile-dir`, pairs them by benchmark and subject, and prints the functions whose counts changed most as markdown. Reports only; it never fails on the numbers.",
+        "name": "explain",
         "aliases": [],
         "hidden_aliases": [],
         "examples": [],
