@@ -7,6 +7,7 @@
 - **`--env-deny <VAR>`** — Remove a variable from the environment of measured commands. Repeatable. Replaces the default list rather than adding to it.
 - **`--env-allow <VAR>`** — Keep a variable that --env-deny would remove. Repeatable.
 - **`--gate-pct <PCT>`** — Percentage an instruction count may rise before `compare` fails.
+- **`--gate-min-delta <N>`** — Instructions a count may rise by before `compare` fails, whatever the percentage.
 - **`--no-credit`** — Leave the line naming tak off the end of generated reports.
 
   **Default:** `true`

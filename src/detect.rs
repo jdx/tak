@@ -20,8 +20,8 @@ use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::compare::{
-    CREDIT, Change, GATED_METRIC, Key, Trend, WALL_METRIC, describe, signed_pct, sparkline,
-    thousands,
+    CREDIT, Change, GATED_METRIC, Gate, Gates, Key, Trend, WALL_METRIC, describe, signed_pct,
+    sparkline, thousands,
 };
 use crate::notes;
 use crate::record::Record;
@@ -93,13 +93,28 @@ pub struct Step {
     /// say so, because naming `to` would blame a commit that may be innocent.
     pub commits: usize,
     pub instructions: Change,
-    /// For context only. [`Change::regressed`] refuses to gate on it.
+    /// For context only. [`Change::exceeds`] refuses to gate on it.
     pub wall: Option<Change>,
 }
 
 impl Step {
-    pub fn regressed(&self, gate_pct: f64) -> bool {
-        self.instructions.regressed(gate_pct)
+    /// The gate this step's series is held to — the same lookup `tak compare`
+    /// uses, so a benchmark's `tak.toml` gate means the same thing before a
+    /// merge and after it.
+    pub fn gate(&self, gates: &Gates) -> Gate {
+        gates.get(&self.key.0, &self.key.1)
+    }
+
+    /// Beyond its series' threshold and floor, whether or not that gate is
+    /// enabled. A report-only series still crosses its threshold, and the
+    /// report says so.
+    pub fn exceeds(&self, gates: &Gates) -> bool {
+        self.instructions.exceeds(&self.gate(gates))
+    }
+
+    /// Beyond an enabled gate: a step that is allowed to fail the command.
+    pub fn fails(&self, gates: &Gates) -> bool {
+        self.gate(gates).enabled && self.exceeds(gates)
     }
 }
 
@@ -114,10 +129,12 @@ pub struct Drift {
     pub change: Change,
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct Detection {
     pub head: String,
-    pub gate_pct: f64,
+    /// Every series' gate, from `tak.toml` and `[gate]`. Policy of whoever runs
+    /// the check, as for `tak compare`: never read from the notes.
+    pub gates: Gates,
     /// First-parent commits in the walk, recorded or not.
     pub walked: usize,
     /// How many of them carry any measurement.
@@ -147,7 +164,26 @@ pub struct Detection {
 }
 
 impl Detection {
-    /// Steps onto the head above the gate: what makes the command fail.
+    /// A walk that found nothing, held to `gates`.
+    pub fn new(head: String, gates: Gates) -> Self {
+        Self {
+            head,
+            gates,
+            walked: 0,
+            recorded: 0,
+            latest: vec![],
+            earlier: vec![],
+            drift: vec![],
+            new_at_head: vec![],
+            missing_at_head: vec![],
+            trend: Trend::new(),
+            cutoff: None,
+            allow_empty: false,
+            no_gate: false,
+        }
+    }
+
+    /// Steps onto the head beyond an enabled gate: what makes the command fail.
     ///
     /// Only the head's. A main-branch workflow runs this once per push, so
     /// failing on an older step would fail every run after the one that caused
@@ -155,8 +191,33 @@ impl Detection {
     pub fn failures(&self) -> Vec<&Step> {
         self.latest
             .iter()
-            .filter(|s| s.regressed(self.gate_pct))
+            .filter(|s| s.fails(&self.gates))
             .collect()
+    }
+
+    /// Steps onto the head beyond a report-only gate: flagged, never failed on.
+    pub fn reported(&self) -> Vec<&Step> {
+        self.latest
+            .iter()
+            .filter(|s| !s.gate(&self.gates).enabled && s.exceeds(&self.gates))
+            .collect()
+    }
+
+    /// Whether every series in the report is held to the global gate.
+    ///
+    /// When it is, the report reads exactly as it did before per-benchmark
+    /// gates existed — one `N%` in the prose, no gate column — for the same
+    /// reason `tak compare` keeps its wording: a project that never wrote a
+    /// per-benchmark gate should not have its output change under it.
+    pub fn uniform(&self) -> bool {
+        let keys = self
+            .latest
+            .iter()
+            .chain(&self.earlier)
+            .map(|s| &s.key)
+            .chain(self.drift.iter().map(|d| &d.key));
+        keys.into_iter()
+            .all(|k| self.gates.get(&k.0, &k.1) == self.gates.global)
     }
 
     /// No series at the head had anything to be compared against.
@@ -299,12 +360,13 @@ fn step(key: &Key, walked: &[(String, Vec<Record>)], a: Point, b: Point) -> Step
 /// itself. Runner is in the key because it has to be: absolute counts shift
 /// between machine classes by more than a real regression does, so a runner
 /// change must start a new series rather than read as a step.
-pub fn analyze(walked: &[(String, Vec<Record>)], gate_pct: f64) -> Detection {
+///
+/// Every threshold is the series' own gate: a report-only benchmark is examined
+/// like any other and can never fail, and a floor (`min_delta`) applies to
+/// steps and drift alike.
+pub fn analyze(walked: &[(String, Vec<Record>)], gates: &Gates) -> Detection {
     let Some((head, _)) = walked.last() else {
-        return Detection {
-            gate_pct,
-            ..Detection::default()
-        };
+        return Detection::new(String::new(), gates.clone());
     };
     let head_at = walked.len() - 1;
 
@@ -320,11 +382,9 @@ pub fn analyze(walked: &[(String, Vec<Record>)], gate_pct: f64) -> Detection {
     }
 
     let mut d = Detection {
-        head: head.clone(),
-        gate_pct,
         walked: walked.len(),
         recorded: walked.iter().filter(|(_, r)| !r.is_empty()).count(),
-        ..Detection::default()
+        ..Detection::new(head.clone(), gates.clone())
     };
 
     for (key, points) in &series {
@@ -341,17 +401,18 @@ pub fn analyze(walked: &[(String, Vec<Record>)], gate_pct: f64) -> Detection {
             (true, Some((last, rest))) => {
                 d.latest.push(last.clone());
                 d.earlier
-                    .extend(rest.iter().filter(|s| s.regressed(gate_pct)).cloned());
+                    .extend(rest.iter().filter(|s| s.exceeds(gates)).cloned());
             }
             (true, None) => d.new_at_head.push(key.clone()),
             (false, _) => {
                 d.missing_at_head.push(key.clone());
                 d.earlier
-                    .extend(steps.iter().filter(|s| s.regressed(gate_pct)).cloned());
+                    .extend(steps.iter().filter(|s| s.exceeds(gates)).cloned());
             }
         }
 
-        if at_head && let Some(drift) = drift(key, walked, points, &steps, gate_pct) {
+        let gate = gates.get(&key.0, &key.1);
+        if at_head && let Some(drift) = drift(key, walked, points, &steps, &gate) {
             d.drift.push(drift);
         }
     }
@@ -363,7 +424,11 @@ pub fn analyze(walked: &[(String, Vec<Record>)], gate_pct: f64) -> Detection {
     d
 }
 
-/// A cumulative rise above the gate made only of steps below it.
+/// A cumulative rise beyond the series' gate made only of steps within it.
+///
+/// The same gate as the steps, floor included: drift is the rise the gate was
+/// meant to catch arriving in pieces, so it is held to what one piece would
+/// have been.
 ///
 /// Measured from the last above-gate step, or the start of the window when
 /// there was none. Starting after the step matters: a series that jumped 10%
@@ -379,12 +444,12 @@ fn drift(
     walked: &[(String, Vec<Record>)],
     points: &[Point],
     steps: &[Step],
-    gate_pct: f64,
+    gate: &Gate,
 ) -> Option<Drift> {
     // steps[i] runs from points[i] to points[i + 1].
     let start = steps
         .iter()
-        .rposition(|s| s.regressed(gate_pct))
+        .rposition(|s| s.instructions.exceeds(gate))
         .map_or(0, |i| i + 1);
     let run = &points[start..];
     // Two points are one step, and that step is below the gate by construction.
@@ -392,7 +457,7 @@ fn drift(
         return None;
     }
     let total = step(key, walked, run[0], run[run.len() - 1]);
-    if !total.regressed(gate_pct) {
+    if !total.instructions.exceeds(gate) {
         return None;
     }
     Some(Drift {
@@ -424,9 +489,15 @@ fn span(s: &Step) -> String {
     }
 }
 
-fn instructions_cells(s: &Step, gate_pct: f64) -> (String, String) {
+fn instructions_cells(s: &Step, gates: &Gates) -> (String, String) {
     let ch = &s.instructions;
-    let flag = if s.regressed(gate_pct) { " ⚠️" } else { "" };
+    // As in `compare`: the warning sign means "this fails", and a report-only
+    // row that crossed its threshold says so in words instead.
+    let flag = match (s.exceeds(gates), s.gate(gates).enabled) {
+        (true, true) => " ⚠️",
+        (true, false) => " (not gated)",
+        (false, _) => "",
+    };
     (
         format!("{} → {}", thousands(ch.base), thousands(ch.head)),
         format!("**{}**{flag}", signed_pct(ch.pct())),
@@ -436,7 +507,37 @@ fn instructions_cells(s: &Step, gate_pct: f64) -> (String, String) {
 /// Render a detection as markdown, in the same shape as `compare`'s report so
 /// the two read alike in a job summary.
 pub fn markdown(d: &Detection, credit: bool) -> String {
-    let gate = d.gate_pct;
+    let gates = &d.gates;
+    let global = gates.global;
+    let uniform = d.uniform();
+    // With every series at the global gate the prose names it once, as it did
+    // before per-benchmark gates; otherwise each row carries its own.
+    let the_gate = if uniform {
+        format!("the {}% gate", global.pct)
+    } else {
+        "their gate".to_string()
+    };
+    let floor = if uniform && global.min_delta > 0 {
+        format!(
+            " (rises of {} instructions or fewer are not counted)",
+            thousands(global.min_delta as f64)
+        )
+    } else {
+        String::new()
+    };
+    let listed = |steps: &[&Step]| {
+        steps
+            .iter()
+            .map(|s| {
+                let mut out = format!("{} {}", describe(&s.key), signed_pct(s.instructions.pct()));
+                if !uniform {
+                    out.push_str(&format!(" (gate {})", s.gate(gates).threshold()));
+                }
+                out
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let head = short(&d.head);
     let mut out = format!(
         "Walked {} first-parent commit(s) ending at `{head}`, {} with measurements recorded.\n\n",
@@ -472,10 +573,17 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
             ));
         }
     } else {
-        out.push_str(
-            "| benchmark | trend | step | instructions | Δ | wall (min) | Δ |\n\
-             |---|---|---|---:|---:|---:|---:|\n",
-        );
+        if uniform {
+            out.push_str(
+                "| benchmark | trend | step | instructions | Δ | wall (min) | Δ |\n\
+                 |---|---|---|---:|---:|---:|---:|\n",
+            );
+        } else {
+            out.push_str(
+                "| benchmark | trend | step | instructions | Δ | gate | wall (min) | Δ |\n\
+                 |---|---|---|---:|---:|---|---:|---:|\n",
+            );
+        }
         for s in &d.latest {
             let spark = d
                 .trend
@@ -484,7 +592,12 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
                 .filter(|v| !v.is_empty())
                 .map(|v| format!("`{v}`"))
                 .unwrap_or_else(|| "—".into());
-            let (ins, ins_delta) = instructions_cells(s, gate);
+            let (ins, ins_delta) = instructions_cells(s, gates);
+            let gate_cell = if uniform {
+                String::new()
+            } else {
+                format!(" {} |", s.gate(gates).describe())
+            };
             let (wall, wall_delta) = match &s.wall {
                 Some(w) => (
                     format!("{:.2} → {:.2}ms", w.base, w.head),
@@ -493,27 +606,35 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
                 None => ("—".into(), "—".into()),
             };
             out.push_str(&format!(
-                "| {} | {spark} | {} | {ins} | {ins_delta} | {wall} | {wall_delta} |\n",
+                "| {} | {spark} | {} | {ins} | {ins_delta} |{gate_cell} {wall} | {wall_delta} |\n",
                 describe(&s.key),
                 span(s),
             ));
         }
 
         let failures = d.failures();
+        let any_gated = d.latest.iter().any(|s| s.gate(gates).enabled);
         out.push('\n');
-        if failures.is_empty() {
-            out.push_str(&format!(
-                "No instruction-count step above {gate}% at `{head}`.\n"
-            ));
+        if !any_gated {
+            // "No step above the gate" is true of a report with nothing that
+            // could fail, and reads as a pass. Say there was nothing to fail.
+            out.push_str("Every benchmark here is report-only, so none can fail the gate.\n");
+        } else if failures.is_empty() {
+            if uniform {
+                out.push_str(&format!(
+                    "No instruction-count step above {}% at `{head}`{floor}.\n",
+                    global.pct
+                ));
+            } else {
+                out.push_str(&format!(
+                    "No gated benchmark stepped beyond its gate at `{head}`.\n"
+                ));
+            }
         } else {
             out.push_str(&format!(
-                "**{} benchmark(s) stepped above the {gate}% gate at `{head}`:** {}\n",
+                "**{} benchmark(s) stepped above {the_gate} at `{head}`{floor}:** {}\n",
                 failures.len(),
-                failures
-                    .iter()
-                    .map(|s| format!("{} {}", describe(&s.key), signed_pct(s.instructions.pct())))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                listed(&failures)
             ));
             if failures.iter().any(|s| s.commits > 1) {
                 out.push_str(
@@ -523,18 +644,38 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
                 );
             }
         }
+        let reported = d.reported();
+        if !reported.is_empty() {
+            out.push_str(&format!(
+                "\n**{} report-only benchmark(s) stepped above their gate at `{head}`, \
+                 not failing:** {}\n",
+                reported.len(),
+                listed(&reported)
+            ));
+        }
     }
 
     if !d.earlier.is_empty() {
         out.push_str(&format!(
-            "\n**Earlier steps above the {gate}% gate**, reported and not gated — \
-             a step fails only the run for the commit that introduced it:\n\n\
-             | benchmark | step | instructions | Δ |\n|---|---|---:|---:|\n"
+            "\n**Earlier steps above {the_gate}**, reported and not gated — \
+             a step fails only the run for the commit that introduced it:\n\n"
         ));
+        if uniform {
+            out.push_str("| benchmark | step | instructions | Δ |\n|---|---|---:|---:|\n");
+        } else {
+            out.push_str(
+                "| benchmark | step | instructions | Δ | gate |\n|---|---|---:|---:|---|\n",
+            );
+        }
         for s in &d.earlier {
-            let (ins, delta) = instructions_cells(s, gate);
+            let (ins, delta) = instructions_cells(s, gates);
+            let gate_cell = if uniform {
+                String::new()
+            } else {
+                format!(" {} |", s.gate(gates).describe())
+            };
             out.push_str(&format!(
-                "| {} | {} | {ins} | {delta} |\n",
+                "| {} | {} | {ins} | {delta} |{gate_cell}\n",
                 describe(&s.key),
                 span(s)
             ));
@@ -543,12 +684,17 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
 
     if !d.drift.is_empty() {
         out.push_str(&format!(
-            "\n**Sustained drift**, reported and not gated — every step stayed under \
-             the {gate}% gate and the total did not:\n\n"
+            "\n**Sustained drift**, reported and not gated — every step stayed within \
+             {the_gate} and the total did not:\n\n"
         ));
         for dr in &d.drift {
+            let gate = if uniform {
+                String::new()
+            } else {
+                format!(" (gate {})", gates.get(&dr.key.0, &dr.key.1).describe())
+            };
             out.push_str(&format!(
-                "- {}: {} ({} → {}) over {} recorded commits since `{}`\n",
+                "- {}: {} ({} → {}) over {} recorded commits since `{}`{gate}\n",
                 describe(&dr.key),
                 signed_pct(dr.change.pct()),
                 thousands(dr.change.base),
@@ -604,6 +750,11 @@ fn list(keys: &[Key]) -> String {
 mod tests {
     use super::*;
 
+    /// The global gate alone, as with no `tak.toml`.
+    fn pct(p: f64) -> Gates {
+        Gates::uniform(Gate::new(p, 0).unwrap())
+    }
+
     fn rec(bench: &str, runner: &str, ins: f64) -> Record {
         Record {
             v: 1,
@@ -640,7 +791,10 @@ mod tests {
 
     #[test]
     fn a_step_onto_the_head_fails() {
-        let d = analyze(&walk(&[Some(1000.0), Some(1000.0), Some(1100.0)]), 1.0);
+        let d = analyze(
+            &walk(&[Some(1000.0), Some(1000.0), Some(1100.0)]),
+            &pct(1.0),
+        );
         let f = d.failures();
         assert_eq!(f.len(), 1);
         assert_eq!((f[0].from.as_str(), f[0].to.as_str()), ("c1", "c2"));
@@ -650,14 +804,14 @@ mod tests {
 
     #[test]
     fn a_step_below_the_gate_passes() {
-        let d = analyze(&walk(&[Some(1000.0), Some(1005.0)]), 1.0);
+        let d = analyze(&walk(&[Some(1000.0), Some(1005.0)]), &pct(1.0));
         assert!(d.failures().is_empty());
         assert_eq!(d.latest.len(), 1, "it is still reported");
     }
 
     #[test]
     fn an_improvement_never_fails() {
-        let d = analyze(&walk(&[Some(1000.0), Some(500.0)]), 1.0);
+        let d = analyze(&walk(&[Some(1000.0), Some(500.0)]), &pct(1.0));
         assert!(d.failures().is_empty());
     }
 
@@ -665,7 +819,10 @@ mod tests {
     /// pass, or a main workflow stays red until someone reverts the step.
     #[test]
     fn an_older_step_is_reported_not_failed() {
-        let d = analyze(&walk(&[Some(1000.0), Some(1100.0), Some(1100.0)]), 1.0);
+        let d = analyze(
+            &walk(&[Some(1000.0), Some(1100.0), Some(1100.0)]),
+            &pct(1.0),
+        );
         assert!(d.failures().is_empty());
         assert_eq!(d.earlier.len(), 1);
         assert_eq!(d.earlier[0].to, "c1");
@@ -677,7 +834,7 @@ mod tests {
     /// be innocent.
     #[test]
     fn a_step_across_unrecorded_commits_is_a_range() {
-        let d = analyze(&walk(&[Some(1000.0), None, None, Some(1100.0)]), 1.0);
+        let d = analyze(&walk(&[Some(1000.0), None, None, Some(1100.0)]), &pct(1.0));
         let f = d.failures();
         assert_eq!(f.len(), 1, "a range onto the head still fails");
         assert_eq!((f[0].from.as_str(), f[0].to.as_str()), ("c0", "c3"));
@@ -694,7 +851,7 @@ mod tests {
         let mut w = walk(&[Some(1000.0), Some(1000.0), Some(1000.0)]);
         w[0].1.push(rec("b", "gha", 50.0));
         w[2].1.push(rec("b", "gha", 60.0));
-        let d = analyze(&w, 1.0);
+        let d = analyze(&w, &pct(1.0));
         let b = d.latest.iter().find(|s| s.key.0 == "b").unwrap();
         assert_eq!(b.commits, 2);
         let a = d.latest.iter().find(|s| s.key.0 == "a").unwrap();
@@ -709,7 +866,7 @@ mod tests {
             ("c0".to_string(), vec![rec("a", "gha-linux", 1000.0)]),
             ("c1".to_string(), vec![rec("a", "gha-macos", 9000.0)]),
         ];
-        let d = analyze(&w, 1.0);
+        let d = analyze(&w, &pct(1.0));
         assert!(d.failures().is_empty());
         assert!(d.nothing_compared());
         assert_eq!(d.new_at_head.len(), 1);
@@ -733,7 +890,7 @@ mod tests {
                 vec![rec("a", "fast", 1000.0), rec("a", "slow", 5200.0)],
             ),
         ];
-        let d = analyze(&w, 1.0);
+        let d = analyze(&w, &pct(1.0));
         let f = d.failures();
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].key.2, "slow");
@@ -744,7 +901,7 @@ mod tests {
     fn creeping_sub_threshold_steps_are_drift() {
         let d = analyze(
             &walk(&[Some(1000.0), Some(1004.0), Some(1008.0), Some(1012.0)]),
-            1.0,
+            &pct(1.0),
         );
         assert!(d.failures().is_empty(), "drift never fails");
         assert!(d.earlier.is_empty());
@@ -758,7 +915,7 @@ mod tests {
 
     #[test]
     fn a_flat_series_is_not_drift() {
-        let d = analyze(&walk(&[Some(1000.0), Some(1003.0), Some(999.0)]), 1.0);
+        let d = analyze(&walk(&[Some(1000.0), Some(1003.0), Some(999.0)]), &pct(1.0));
         assert!(d.drift.is_empty());
     }
 
@@ -774,7 +931,7 @@ mod tests {
                 Some(1110.0),
                 Some(1115.0),
             ]),
-            1.0,
+            &pct(1.0),
         );
         assert_eq!(d.earlier.len(), 1);
         assert_eq!(d.drift.len(), 1);
@@ -782,7 +939,10 @@ mod tests {
         assert_eq!(d.drift[0].change.base, 1100.0);
 
         // Without the creep, the step alone is not drift.
-        let d = analyze(&walk(&[Some(1000.0), Some(1100.0), Some(1100.0)]), 1.0);
+        let d = analyze(
+            &walk(&[Some(1000.0), Some(1100.0), Some(1100.0)]),
+            &pct(1.0),
+        );
         assert!(d.drift.is_empty());
     }
 
@@ -790,7 +950,7 @@ mod tests {
     /// than read like a clean pass.
     #[test]
     fn an_unrecorded_head_says_so() {
-        let d = analyze(&walk(&[Some(1000.0), Some(1000.0), None]), 1.0);
+        let d = analyze(&walk(&[Some(1000.0), Some(1000.0), None]), &pct(1.0));
         assert!(d.nothing_compared());
         assert!(d.failures().is_empty());
         let md = markdown(&d, false);
@@ -828,7 +988,7 @@ mod tests {
 
     #[test]
     fn each_cutoff_is_named_in_the_report() {
-        let mut d = analyze(&walk(&[Some(1000.0), Some(1000.0)]), 1.0);
+        let mut d = analyze(&walk(&[Some(1000.0), Some(1000.0)]), &pct(1.0));
         d.cutoff = Some(Cutoff::ScanLimit);
         let md = markdown(&d, false);
         assert!(md.contains("limit of 10,000 first-parent commits"), "{md}");
@@ -843,7 +1003,7 @@ mod tests {
     /// report says which of the two happened and what to do about it.
     #[test]
     fn nothing_compared_fails_unless_allowed() {
-        let mut d = analyze(&walk(&[Some(1000.0)]), 1.0);
+        let mut d = analyze(&walk(&[Some(1000.0)]), &pct(1.0));
         assert!(d.nothing_compared());
         assert!(d.empty_fails(), "empty is a failure by default");
         let md = markdown(&d, false);
@@ -862,7 +1022,7 @@ mod tests {
     /// the report names it rather than `--allow-empty`.
     #[test]
     fn no_gate_waives_an_empty_comparison() {
-        let mut d = analyze(&walk(&[Some(1000.0)]), 1.0);
+        let mut d = analyze(&walk(&[Some(1000.0)]), &pct(1.0));
         d.no_gate = true;
         assert!(!d.empty_fails());
         let md = markdown(&d, false);
@@ -873,7 +1033,7 @@ mod tests {
     /// A comparison that happened is never an empty one, whatever the flag.
     #[test]
     fn a_real_comparison_is_not_empty() {
-        let d = analyze(&walk(&[Some(1000.0), Some(1000.0)]), 1.0);
+        let d = analyze(&walk(&[Some(1000.0), Some(1000.0)]), &pct(1.0));
         assert!(!d.empty_fails());
     }
 
@@ -888,7 +1048,7 @@ mod tests {
             r.metrics = BTreeMap::from([(WALL_METRIC.to_string(), wall)]);
             w[at].1.push(r);
         }
-        let d = analyze(&w, 0.001);
+        let d = analyze(&w, &pct(0.001));
         assert!(d.failures().is_empty());
         assert!(d.latest.iter().all(|s| s.key.0 == "a"));
     }
@@ -898,18 +1058,18 @@ mod tests {
     fn duplicates_reduce_to_the_minimum() {
         let mut w = walk(&[Some(1000.0), Some(1000.0)]);
         w[1].1.push(rec("a", "gha", 3000.0));
-        assert!(analyze(&w, 1.0).failures().is_empty());
+        assert!(analyze(&w, &pct(1.0)).failures().is_empty());
     }
 
     #[test]
     fn a_rise_from_zero_fails() {
-        let d = analyze(&walk(&[Some(0.0), Some(5.0)]), 1.0);
+        let d = analyze(&walk(&[Some(0.0), Some(5.0)]), &pct(1.0));
         assert_eq!(d.failures().len(), 1);
     }
 
     #[test]
     fn an_empty_walk_is_nothing_compared() {
-        let d = analyze(&[], 1.0);
+        let d = analyze(&[], &pct(1.0));
         assert!(d.nothing_compared());
         assert!(markdown(&d, false).contains("Only instruction counts gate"));
     }
@@ -940,8 +1100,130 @@ mod tests {
 
     #[test]
     fn the_trend_covers_the_window() {
-        let d = analyze(&walk(&[Some(1.0), None, Some(2.0), Some(3.0)]), 1.0);
+        let d = analyze(&walk(&[Some(1.0), None, Some(2.0), Some(3.0)]), &pct(1.0));
         let key = ("a".to_string(), "self".to_string(), "gha".to_string());
         assert_eq!(d.trend[&key], vec![1.0, 2.0, 3.0]);
+    }
+
+    /// A 1% global gate, with benchmark `a` given its own.
+    fn gates_with_a(a_pct: f64, min_delta: u64, enabled: bool) -> Gates {
+        let mut g = pct(1.0);
+        g.set_bench(
+            "a",
+            Gate {
+                pct: a_pct,
+                min_delta,
+                enabled,
+            },
+        );
+        g
+    }
+
+    /// `a` and `b` both step +10% onto the head.
+    fn two_series_step() -> Vec<(String, Vec<Record>)> {
+        vec![
+            (
+                "c0".to_string(),
+                vec![rec("a", "gha", 1000.0), rec("b", "gha", 1000.0)],
+            ),
+            (
+                "c1".to_string(),
+                vec![rec("a", "gha", 1100.0), rec("b", "gha", 1100.0)],
+            ),
+        ]
+    }
+
+    /// Each series is held to its own gate: `a`'s 20% lets its 10% step
+    /// through while `b`, at the global 1%, fails on the same step.
+    #[test]
+    fn a_step_is_held_to_its_own_series_gate() {
+        let d = analyze(&two_series_step(), &gates_with_a(20.0, 0, true));
+        let f = d.failures();
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].key.0, "b");
+        assert!(!d.uniform());
+        let md = markdown(&d, false);
+        assert!(md.contains("| gate |"), "{md}");
+        assert!(md.contains("stepped above their gate"), "{md}");
+        assert!(md.contains("(gate 1%)"), "{md}");
+    }
+
+    /// The floor applies as well: a 100-instruction step is 10% of `a`, far
+    /// past its percentage, and still within a 500-instruction floor.
+    #[test]
+    fn a_step_within_its_floor_passes() {
+        let d = analyze(&two_series_step(), &gates_with_a(1.0, 500, true));
+        let f = d.failures();
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].key.0, "b");
+        assert!(markdown(&d, false).contains("floor 500"));
+    }
+
+    /// A report-only benchmark is examined like any other and flagged when it
+    /// crosses its threshold, but it can never fail the command.
+    #[test]
+    fn a_report_only_step_is_reported_and_never_fails() {
+        let d = analyze(&two_series_step(), &gates_with_a(1.0, 0, false));
+        let f = d.failures();
+        assert_eq!(f.len(), 1, "only the gated one fails");
+        assert_eq!(f[0].key.0, "b");
+        assert_eq!(d.reported().len(), 1);
+        assert_eq!(d.reported()[0].key.0, "a");
+        let md = markdown(&d, false);
+        assert!(md.contains("**+10.00%** (not gated)"), "{md}");
+        assert!(md.contains("report only (1%)"), "{md}");
+        assert!(
+            md.contains("1 report-only benchmark(s) stepped above their gate"),
+            "{md}"
+        );
+
+        // With nothing gated at all, the verdict says so rather than passing.
+        let mut all = gates_with_a(1.0, 0, false);
+        all.set_bench(
+            "b",
+            Gate {
+                pct: 1.0,
+                min_delta: 0,
+                enabled: false,
+            },
+        );
+        let d = analyze(&two_series_step(), &all);
+        assert!(d.failures().is_empty());
+        assert!(!d.empty_fails());
+        assert!(markdown(&d, false).contains("Every benchmark here is report-only"));
+    }
+
+    /// An earlier step on a report-only benchmark is listed like any other.
+    #[test]
+    fn earlier_steps_use_the_series_gate() {
+        let w = walk(&[Some(1000.0), Some(1100.0), Some(1100.0)]);
+        assert_eq!(analyze(&w, &gates_with_a(20.0, 0, true)).earlier.len(), 0);
+        assert_eq!(analyze(&w, &gates_with_a(1.0, 0, false)).earlier.len(), 1);
+    }
+
+    /// Drift is held to the series' gate too: a 1.2% creep is drift at the
+    /// global 1%, not under `a`'s own 5%, and not within a floor of 50.
+    #[test]
+    fn drift_uses_the_series_gate() {
+        let w = walk(&[Some(1000.0), Some(1004.0), Some(1008.0), Some(1012.0)]);
+        assert_eq!(analyze(&w, &pct(1.0)).drift.len(), 1);
+        assert!(analyze(&w, &gates_with_a(5.0, 0, true)).drift.is_empty());
+        assert!(analyze(&w, &gates_with_a(1.0, 50, true)).drift.is_empty());
+
+        // Report-only drift is still reported: reporting is all drift does.
+        let d = analyze(&w, &gates_with_a(1.0, 0, false));
+        assert_eq!(d.drift.len(), 1);
+        assert!(markdown(&d, false).contains("(gate report only (1%))"));
+    }
+
+    /// With every series at the global gate, the report reads as it did
+    /// before per-benchmark gates: no gate column, one `N%` in the prose.
+    #[test]
+    fn a_uniform_report_keeps_its_wording() {
+        let d = analyze(&two_series_step(), &pct(1.0));
+        assert!(d.uniform());
+        let md = markdown(&d, false);
+        assert!(!md.contains("| gate |"), "{md}");
+        assert!(md.contains("stepped above the 1% gate"), "{md}");
     }
 }

@@ -120,6 +120,49 @@ fn a_step_onto_the_head_fails_and_names_its_range() {
     assert!(out.status.success(), "--no-gate reports without failing");
 }
 
+/// The gate comes from the working tree's `tak.toml`, per benchmark, exactly
+/// as for `tak compare`: a report-only benchmark's 10% step is reported and
+/// does not fail, and a loosened gate lets it through as a pass.
+#[test]
+fn a_benchmark_gate_in_tak_toml_applies() {
+    let (dir, c) = repo();
+    let toml = dir.path().join("tak.toml");
+
+    std::fs::write(
+        &toml,
+        "[bench.startup]\ncmd = [\"true\"]\ngate = { enabled = false }\n",
+    )
+    .unwrap();
+    let out = tak(dir.path(), &["detect", &c[3]]);
+    let md = stdout(&out);
+    assert!(out.status.success(), "report-only never fails: {md}");
+    assert!(md.contains("**+10.00%** (not gated)"), "{md}");
+    assert!(md.contains("Every benchmark here is report-only"), "{md}");
+
+    std::fs::write(
+        &toml,
+        "[bench.startup]\ncmd = [\"true\"]\ngate = { pct = 20.0 }\n",
+    )
+    .unwrap();
+    let out = tak(dir.path(), &["detect", &c[3]]);
+    let md = stdout(&out);
+    assert!(out.status.success(), "10% is within a 20% gate: {md}");
+    assert!(md.contains("| 20% |"), "{md}");
+
+    std::fs::write(
+        &toml,
+        "[bench.startup]\ncmd = [\"true\"]\ngate = { pct = 5.0 }\n",
+    )
+    .unwrap();
+    let out = tak(dir.path(), &["detect", &c[3]]);
+    assert!(!out.status.success(), "10% is past a 5% gate");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("stepped beyond their gate"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// The next commit passes: a main workflow fails once, on the commit that
 /// caused the step, not on every push after it.
 #[test]

@@ -72,6 +72,20 @@ tak compare origin/main
 An instruction-count increase beyond the configured gate fails the command. Wall-clock
 changes are displayed but never gate the result.
 
+Each benchmark can have its own gate in `tak.toml`: a different percentage, an absolute
+`min_delta` floor, or `enabled = false` to report a benchmark without failing on it. See
+[per-benchmark gates](/guide/configuration#per-benchmark-gates). `tak compare` reads these from
+the `tak.toml` in the working tree, not from the notes or from the base revision. In a
+pull-request job that checks out the head, the pull request's own `tak.toml` decides, so a
+change to a gate is part of the diff under review.
+
+When some benchmark's gate differs from `[gate]`, the verdict says
+`N benchmark(s) above their gate` instead of `N benchmark(s) above the 1% gate`, and a
+report-only benchmark that rose is listed as `N report-only benchmark(s) above their gate`.
+A script that greps the report for a regression should match both forms. The exit status is
+simpler to rely on: `tak compare` exits non-zero only for a regression in a gated benchmark, or
+for an error.
+
 Always keep measurements partitioned by runner class. Comparing numbers across runner classes
 turns an infrastructure change into an apparent code regression.
 
@@ -104,7 +118,12 @@ are never compared.
   window, counted from its last above-gate step, while every individual step stayed under it.
 
 Only instruction counts are examined. Wall-clock time is shown beside each step and never
-gates. The gate is the same `gate_pct` setting that `tak compare` uses.
+gates. Each series is held to the same gate `tak compare` would use:
+[per-benchmark gates](/guide/configuration#per-benchmark-gates) from the working tree's
+`tak.toml`, otherwise `[gate]`. That applies to steps and drift alike, `min_delta` floor
+included. A report-only benchmark (`enabled = false`) is still examined, and a step past its
+threshold is marked `(not gated)`, but it never fails the command. When every benchmark is
+report-only, `tak detect` can fail only when nothing could be compared.
 
 When the newest commit has no instruction counts, or no series on it has an earlier point in
 the window, the report says **Nothing was compared** and the command fails, because a check

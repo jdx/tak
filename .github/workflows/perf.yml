@@ -208,6 +208,13 @@ jobs:
     name: Detect regressions that landed
     # After publish, so the measurement is in refs/notes/tak whether or not this
     # fails, and so the walk sees this commit's point beside the earlier ones.
+    #
+    # Today this job cannot fail on a step. Both of tak's benchmarks are
+    # report-only in tak.toml (`gate = { enabled = false }`, reasons there), and
+    # tak detect uses the same per-benchmark gates as tak compare. What it does
+    # now is put steps, ranges and drift in the job summary, and fail if the
+    # published measurement cannot be read back. It starts failing on steps
+    # the day a benchmark in tak.toml is gated, with no change here.
     needs: publish
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -266,8 +273,9 @@ jobs:
       # everyone to ignore it. Every other way to compare nothing is ruled out
       # first: fetch-depth: 0 gives the walk its history, and the step above
       # proves this commit's instruction counts are here. What is left for the
-      # flag to waive is a new runner class. A step onto this commit still
-      # fails.
+      # flag to waive is a new runner class. A step onto this commit beyond
+      # an enabled gate still fails; see the note at the top of this job for
+      # why there are none today.
       - name: Detect
         run: |
           set -o pipefail
