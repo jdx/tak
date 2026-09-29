@@ -263,13 +263,26 @@ pub fn annotated() -> Result<std::collections::BTreeSet<String>> {
         .collect())
 }
 
-/// Whether this is a shallow clone, whose history stops short of the root.
+/// Whether `commit` is a shallow boundary: its parents exist but were not
+/// fetched, so a walk that ends there stopped short of the real root.
 ///
 /// `actions/checkout` fetches one commit by default, and a walk of that history
 /// finds nothing earlier to compare with — which reads exactly like a first
 /// recording. Callers that walk history ask so they can say which it was.
-pub fn is_shallow() -> Result<bool> {
-    Ok(git(&["rev-parse", "--is-shallow-repository"])? == "true")
+///
+/// Asked of one commit, not of the repository. `--is-shallow-repository` is
+/// true as soon as `.git/shallow` exists, and [`fetch`]'s own depth-1 fetch of
+/// the notes ref creates it in a full clone — the boundary it records is in the
+/// notes history, not the project's. Asking the repository blamed a shallow
+/// checkout for a walk that had in fact reached the root commit.
+pub fn is_shallow_boundary(commit: &str) -> Result<bool> {
+    let path = git(&["rev-parse", "--git-path", "shallow"])?;
+    match std::fs::read_to_string(&path) {
+        Ok(body) => Ok(body.lines().any(|l| l.trim() == commit)),
+        // No file is the ordinary state of a full clone.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("failed to read {path}")),
+    }
 }
 
 /// Teach plain `git fetch` about the notes ref, so the data is visible to users

@@ -228,13 +228,13 @@ pub fn gather(head: &str, window: usize) -> Result<(Walk, Option<Cutoff>)> {
         };
         walked.push((sha, records));
     }
-    let cut = cutoff(
-        recorded,
-        window,
-        commits.len(),
-        SCAN_LIMIT,
-        notes::is_shallow,
-    )?;
+    // The oldest commit rev-list reached, not the oldest one kept: the walk
+    // ended there, so that is where a shallow boundary would have stopped it.
+    let cut = cutoff(recorded, window, commits.len(), SCAN_LIMIT, || {
+        commits
+            .last()
+            .map_or(Ok(false), |oldest| notes::is_shallow_boundary(oldest))
+    })?;
     Ok((walked, cut))
 }
 

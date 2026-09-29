@@ -290,6 +290,52 @@ fn a_shallow_checkout_is_named_as_the_reason() {
     assert!(!md.contains("shallow"), "{md}");
 }
 
+/// tak refreshes notes with a depth-1 fetch, and git records that as a
+/// shallow boundary *in the notes history* — `.git/shallow` appears and
+/// `--is-shallow-repository` says true in what is a full clone of the project.
+/// A walk that reached the real root must not blame a shallow checkout.
+#[test]
+fn a_shallow_notes_fetch_is_not_a_shallow_checkout() {
+    let (dir, _) = repo();
+    let d = dir.path();
+    // A second notes commit, so the depth-1 fetch has a parent to cut off.
+    git(
+        d,
+        &[
+            "notes",
+            "--ref",
+            "refs/notes/tak",
+            "append",
+            "-m",
+            &line("other", "gha", 1),
+            "HEAD~1",
+        ],
+    );
+    let url = format!("file://{}", d.display());
+    git(d, &["clone", "--quiet", &url, "full"]);
+    let full = d.join("full");
+    git(
+        &full,
+        &[
+            "fetch",
+            "--quiet",
+            "--depth",
+            "1",
+            "origin",
+            "+refs/notes/tak:refs/notes/tak",
+        ],
+    );
+    assert_eq!(
+        git(&full, &["rev-parse", "--is-shallow-repository"]),
+        "true",
+        "the premise: git now calls this clone shallow"
+    );
+
+    let md = stdout(&tak(&full, &["detect"]));
+    assert!(md.contains("Sustained drift"), "the walk ran: {md}");
+    assert!(!md.contains("This checkout is shallow"), "{md}");
+}
+
 /// A previous recording further back than the scan limit is never reached.
 /// The walk must say it stopped at the limit rather than report the head's
 /// series as brand new, and the empty comparison must still fail.
