@@ -1052,11 +1052,23 @@
           {
             "name": "no-gate",
             "usage": "--no-gate",
-            "help": "Report without failing, whatever the numbers say.",
-            "help_first_line": "Report without failing, whatever the numbers say.",
+            "help": "Report without failing, whatever the numbers say. Takes precedence over `--allow-empty`: an empty comparison passes too.",
+            "help_first_line": "Report without failing, whatever the numbers say. Takes precedence over `--allow-empty`: an empty comparison passes too.",
             "short": [],
             "long": [
               "no-gate"
+            ],
+            "hide": false,
+            "global": false
+          },
+          {
+            "name": "allow-empty",
+            "usage": "--allow-empty",
+            "help": "Pass when no series was measured on both sides, instead of failing. For the first pull request after adopting tak, or a runner-class migration. A regression still fails.",
+            "help_first_line": "Pass when no series was measured on both sides, instead of failing. For the first pull request after adopting tak, or a runner-class migration. A regression still fails.",
+            "short": [],
+            "long": [
+              "allow-empty"
             ],
             "hide": false,
             "global": false
@@ -1083,7 +1095,7 @@
         "hide": false,
         "args_override_self": true,
         "help": "Compare this commit's measurements against another's.",
-        "help_long": "Compare this commit's measurements against another's.\n\nFails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate` in the working tree's tak.toml. Wall clock is reported and never gated.",
+        "help_long": "Compare this commit's measurements against another's.\n\nFails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate` in the working tree's tak.toml, or when no series was measured on both sides. Wall clock is reported and never gated.",
         "name": "compare",
         "aliases": [],
         "hidden_aliases": [],
