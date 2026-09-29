@@ -98,8 +98,11 @@ is never gated.
   Like `--record`, it saves nothing when a subject fails or a check fails. With both flags,
   the baseline is saved first; if recording then fails, the error says so, and re-running the
   same command finishes the job without duplicating anything in the baseline.
-- The report covers only the benchmarks this run measured. Runner class still partitions the
-  results: a baseline saved under another runner class is named in a warning and not compared.
+- The report covers only the benchmarks this run measured, on this run's runner class. One
+  baseline can hold several runner classes (for example, saved once with `--runner laptop` and
+  once in a container). Each run is compared only with its own class's measurements, and the
+  other classes are ignored. When a benchmark was saved only under other runner classes, a
+  warning names them and nothing is compared for it.
 - `--baseline` reports and exits 0 whatever the numbers say. If a check failed, the report
   says so under the table, because a subject that skips its work usually looks faster.
 - Add `--gate` to fail when an instruction count rose by more than `gate_pct`. `--gate` also

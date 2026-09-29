@@ -866,8 +866,8 @@ fn failing_checks(measured: &[Measured]) -> Vec<String> {
 /// What a baseline comparison found, kept for `--gate`.
 struct Against {
     comparison: compare::Comparison,
-    /// Series counted on one side only; see [`baseline::ungated`].
-    ungated: Vec<compare::Key>,
+    /// Series this run measured that cannot be gated; see [`baseline::gaps`].
+    gaps: Vec<(compare::Key, baseline::Gap)>,
 }
 
 /// Print how this run compares with a saved baseline, and return the
@@ -885,24 +885,38 @@ fn report_against(
     let current: Vec<Record> = measured.iter().map(|m| m.record.clone()).collect();
     let base = baseline::relevant(&against.records, &current);
     let comparison = compare::compare(&base, &current);
-    let ungated = baseline::ungated(&base, &current);
+    let gaps = baseline::gaps(&against.records, &current);
 
-    // The table already refuses to line up different runner classes; this
-    // says why in terms of the baseline, since a baseline saved with another
-    // `--runner`, or on the other side of a CI boundary, is the usual cause.
-    let here: BTreeSet<&str> = current.iter().map(|r| r.runner.as_str()).collect();
-    let there: BTreeSet<&str> = base
+    // Series the baseline holds only for other runner classes. The table
+    // leaves them out, as it should, so this says why they are absent: a
+    // baseline saved with another `--runner`, or on the other side of a CI
+    // boundary, is the usual cause. Nothing is said when this run's class is
+    // in the baseline too; the other classes are simply not this run's.
+    let mut stranded: BTreeMap<Vec<String>, Vec<String>> = BTreeMap::new();
+    let keys: BTreeSet<compare::Key> = current
         .iter()
-        .map(|r| r.runner.as_str())
-        .filter(|r| !here.contains(r))
+        .map(|r| (r.bench.clone(), r.tool.clone(), r.runner.clone()))
         .collect();
-    if !there.is_empty() {
+    for k in &keys {
+        if base.iter().any(|r| r.bench == k.0 && r.tool == k.1) {
+            continue;
+        }
+        let elsewhere = baseline::other_runners(&against.records, k);
+        if !elsewhere.is_empty() {
+            stranded
+                .entry(elsewhere)
+                .or_default()
+                .push(describe_series(k));
+        }
+    }
+    for (runners, series) in &stranded {
+        let runners: BTreeSet<&str> = runners.iter().map(String::as_str).collect();
         eprintln!(
-            "  warning: baseline `{}` holds measurements from runner class {}, and this run is \
-             on {}. Runner classes are never compared with each other.",
+            "  warning: baseline `{}` holds {} only for runner class {}. Runner classes are \
+             never compared with each other.",
             against.name,
-            quoted(&there),
-            quoted(&here)
+            series.join(", "),
+            quoted(&runners)
         );
     }
 
@@ -933,20 +947,17 @@ fn report_against(
             failing.join(", ")
         );
     }
-    if !ungated.is_empty() {
-        println!(
-            "\nCounted on one side only, so not gated: {}",
-            ungated
-                .iter()
-                .map(describe_series)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+    if !gaps.is_empty() {
+        println!("\nNot gated: {}", describe_gaps(&gaps));
     }
-    Against {
-        comparison,
-        ungated,
-    }
+    Against { comparison, gaps }
+}
+
+fn describe_gaps(gaps: &[(compare::Key, baseline::Gap)]) -> String {
+    gaps.iter()
+        .map(|(k, why)| format!("{} ({why})", describe_series(k)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn quoted(names: &BTreeSet<&str>) -> String {
@@ -992,18 +1003,14 @@ fn gate_against(
             failing.join(", ")
         );
     }
-    if !compared.ungated.is_empty() {
+    if !compared.gaps.is_empty() {
+        // Each series carries its own reason, because the remedy differs:
+        // install valgrind or turn counters back on for one, save the
+        // baseline on this runner class for another.
         bail!(
-            "cannot gate against baseline `{}`: an instruction count exists on one side only \
-             for {}. Save the baseline again on this runner class, with the same counters, \
-             to compare them",
+            "cannot gate against baseline `{}`: {}",
             against.name,
-            compared
-                .ungated
-                .iter()
-                .map(describe_series)
-                .collect::<Vec<_>>()
-                .join(", ")
+            describe_gaps(&compared.gaps)
         );
     }
     let comparison = &compared.comparison;

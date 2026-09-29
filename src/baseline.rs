@@ -250,45 +250,108 @@ impl Store {
     }
 }
 
-/// Series measured on only one side with an instruction count, among those
-/// this run and its relevant baseline hold.
-///
-/// These are what `--gate` cannot check. A benchmark whose count this run
-/// failed to take, one added since the baseline was saved, or one saved on
-/// another runner class would otherwise pass a gate that checked only its
-/// neighbours. A series with no count on either side is left out: a subject
-/// with `counters = false` is wall-clock only by design and never gates.
-pub fn ungated(base: &[Record], current: &[Record]) -> Vec<Key> {
-    let counted = |records: &[Record]| -> BTreeSet<Key> {
-        records
-            .iter()
-            .filter(|r| r.metrics.contains_key(crate::compare::GATED_METRIC))
-            .map(key)
-            .collect()
-    };
-    let (b, h) = (counted(base), counted(current));
-    b.symmetric_difference(&h).cloned().collect()
+/// Why a series this run measured cannot be gated against the baseline.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Gap {
+    /// The baseline counted it on this runner class and this run did not:
+    /// valgrind missing, counting failed, or counters turned off.
+    NotCountedHere,
+    /// This run counted it and the baseline holds it on this runner class
+    /// without a count.
+    SavedWithoutCount,
+    /// This run counted it and the baseline holds it only on these other
+    /// runner classes, which are never compared with this one.
+    OnlyOnOtherRunners(Vec<String>),
+    /// This run counted it and the baseline has never seen it: new since the
+    /// baseline was saved.
+    NotInBaseline,
 }
 
-/// The part of a baseline this run can be compared against: the records for
-/// benchmarks and tools the run measured, on any runner.
+impl std::fmt::Display for Gap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Gap::NotCountedHere => write!(f, "not counted in this run"),
+            Gap::SavedWithoutCount => write!(f, "saved without an instruction count"),
+            Gap::OnlyOnOtherRunners(runners) => write!(
+                f,
+                "saved only on runner class {}",
+                runners
+                    .iter()
+                    .map(|r| format!("`{r}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Gap::NotInBaseline => write!(f, "not in the baseline"),
+        }
+    }
+}
+
+/// The series this run measured that `--gate` cannot check, and why.
+///
+/// A benchmark whose count this run failed to take, one added since the
+/// baseline was saved, or one the baseline holds only for another runner
+/// class would otherwise pass a gate that checked only its neighbours.
+///
+/// Judged per series of *this run*, so on this run's runner class only. A
+/// baseline saved on two classes holds a series for each, and the one for the
+/// other class is not missing from this run — it was never going to be
+/// compared with it. Counting it as a gap failed every gate on both classes.
+///
+/// A series with no count on either side is left out: a subject with
+/// `counters = false` is wall-clock only by design and never gates.
+pub fn gaps(baseline: &[Record], current: &[Record]) -> Vec<(Key, Gap)> {
+    let counted = |r: &Record| r.metrics.contains_key(crate::compare::GATED_METRIC);
+    let mut out = Vec::new();
+    let keys: BTreeSet<Key> = current.iter().map(key).collect();
+    for k in keys {
+        let here = current.iter().filter(|r| key(r) == k).any(counted);
+        let same: Vec<&Record> = baseline.iter().filter(|r| key(r) == k).collect();
+        let saved = same.iter().any(|r| counted(r));
+        let gap = match (here, saved) {
+            (true, true) | (false, false) => continue,
+            (false, true) => Gap::NotCountedHere,
+            (true, false) if !same.is_empty() => Gap::SavedWithoutCount,
+            (true, false) => {
+                let elsewhere = other_runners(baseline, &k);
+                if elsewhere.is_empty() {
+                    Gap::NotInBaseline
+                } else {
+                    Gap::OnlyOnOtherRunners(elsewhere)
+                }
+            }
+        };
+        out.push((k, gap));
+    }
+    out
+}
+
+/// Runner classes other than `k`'s that the baseline holds `k`'s benchmark
+/// and tool on, sorted.
+pub fn other_runners(baseline: &[Record], k: &Key) -> Vec<String> {
+    let runners: BTreeSet<&str> = baseline
+        .iter()
+        .filter(|r| r.bench == k.0 && r.tool == k.1 && r.runner != k.2)
+        .map(|r| r.runner.as_str())
+        .collect();
+    runners.into_iter().map(str::to_string).collect()
+}
+
+/// The part of a baseline this run is compared against: the series this run
+/// measured, on this run's runner class.
 ///
 /// A baseline outlives the run that saved it, so `tak run --bench a` against
 /// one saved by a full run would otherwise list every other benchmark as
 /// "measured on the base but not here". That warning exists for a CI job that
-/// silently stopped running something; here it would only be noise.
-///
-/// The runner is deliberately not part of the filter. A baseline saved on
-/// another runner class has to stay visible, so the report names both classes
-/// and says nothing was compared, instead of showing an empty table.
+/// silently stopped running something; here it would only be noise. The same
+/// goes for the series a baseline holds for other runner classes: they are
+/// not comparable, and not missing either. When one of them is all the
+/// baseline has for a benchmark, [`other_runners`] names it in a warning and
+/// [`gaps`] keeps `--gate` from passing over it.
 pub fn relevant(baseline: &[Record], current: &[Record]) -> Vec<Record> {
-    let measured: BTreeSet<(&str, &str)> = current
-        .iter()
-        .map(|r| (r.bench.as_str(), r.tool.as_str()))
-        .collect();
+    let measured: BTreeSet<Key> = current.iter().map(key).collect();
     baseline
         .iter()
-        .filter(|r| measured.contains(&(r.bench.as_str(), r.tool.as_str())))
+        .filter(|r| measured.contains(&key(r)))
         .cloned()
         .collect()
 }
@@ -456,39 +519,75 @@ mod tests {
     }
 
     #[test]
-    fn a_series_counted_on_one_side_only_is_ungated() {
-        let base = [rec("a", "r", 1.0), rec("b", "r", 1.0), wall_only("w", "r")];
-        // `b` lost its count this run; `c` is new; `w` never had one.
+    fn a_series_this_run_cannot_gate_is_a_gap() {
+        let base = [
+            rec("a", "r", 1.0),
+            rec("b", "r", 1.0),
+            wall_only("s", "r"),
+            wall_only("w", "r"),
+        ];
+        // `b` lost its count this run; `c` is new; `s` was saved uncounted;
+        // `w` never had a count on either side and is wall-clock only.
         let head = [
             rec("a", "r", 1.0),
             wall_only("b", "r"),
             rec("c", "r", 1.0),
+            rec("s", "r", 1.0),
             wall_only("w", "r"),
         ];
-        let names: Vec<String> = ungated(&base, &head).into_iter().map(|k| k.0).collect();
-        assert_eq!(names, vec!["b", "c"]);
+        let got: Vec<(String, Gap)> = gaps(&base, &head)
+            .into_iter()
+            .map(|(k, g)| (k.0, g))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("b".into(), Gap::NotCountedHere),
+                ("c".into(), Gap::NotInBaseline),
+                ("s".into(), Gap::SavedWithoutCount),
+            ]
+        );
+    }
+
+    /// A baseline saved on two runner classes holds a series for each. The
+    /// other class's is not this run's, so it is not a gap: counting it as
+    /// one failed every gate on both classes.
+    #[test]
+    fn another_runner_is_ignored_when_this_runner_is_saved() {
+        let base = [rec("a", "r1", 1.0), rec("a", "r2", 1.0)];
+        assert_eq!(gaps(&base, &[rec("a", "r1", 1.0)]), vec![]);
+        assert_eq!(gaps(&base, &[rec("a", "r2", 1.0)]), vec![]);
+    }
+
+    /// When no saved class matches, the gap names the classes there are, so
+    /// the message cannot suggest saving on one that is already present.
+    #[test]
+    fn no_matching_runner_is_a_gap_naming_the_saved_ones() {
+        let base = [rec("a", "r1", 1.0), rec("a", "r2", 1.0)];
+        let got = gaps(&base, &[rec("a", "r3", 1.0)]);
+        assert_eq!(
+            got[0].1,
+            Gap::OnlyOnOtherRunners(vec!["r1".into(), "r2".into()])
+        );
+        assert_eq!(
+            got[0].1.to_string(),
+            "saved only on runner class `r1`, `r2`"
+        );
     }
 
     #[test]
-    fn a_count_on_another_runner_is_ungated_on_both() {
-        let got = ungated(&[rec("a", "r1", 1.0)], &[rec("a", "r2", 1.0)]);
-        assert_eq!(got.len(), 2, "{got:?}");
-    }
-
-    #[test]
-    fn only_the_benchmarks_this_run_measured_are_compared() {
+    fn only_this_runs_series_are_compared() {
         let baseline = [
             rec("a", "r1", 1.0),
             rec("a", "r2", 1.0),
             rec("b", "r1", 1.0),
         ];
         let kept = relevant(&baseline, &[rec("a", "r1", 2.0)]);
-        // `b` was not run; `a` on the other runner stays, so the report can
-        // say the runners differ.
+        // `b` was not run, and `a` on `r2` is another class's series.
         let runners: Vec<_> = kept
             .iter()
             .map(|r| (r.bench.as_str(), r.runner.as_str()))
             .collect();
-        assert_eq!(runners, vec![("a", "r1"), ("a", "r2")]);
+        assert_eq!(runners, vec![("a", "r1")]);
     }
 }

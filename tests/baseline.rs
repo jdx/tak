@@ -229,7 +229,7 @@ fn a_baseline_from_another_runner_is_named_and_not_compared() {
     let (report, warn) = (stdout(ok(&out)), stderr(&out));
     assert!(report.contains("Nothing was compared"), "{report}");
     assert!(
-        warn.contains("runner class `laptop`, and this run is on `ci`"),
+        warn.contains("holds `default` on `ci` only for runner class `laptop`"),
         "{warn}"
     );
     // Gated: comparing nothing is a failure, not a pass.
@@ -344,11 +344,11 @@ fn a_gate_fails_when_a_counted_benchmark_went_uncounted() {
     );
     let err = fail(&out);
     assert!(
-        err.contains("one side only for `a` on `test-runner`"),
+        err.contains("`a` on `test-runner` (not counted in this run)"),
         "{err}"
     );
     assert!(
-        stdout(&out).contains("Counted on one side only, so not gated: `a`"),
+        stdout(&out).contains("Not gated: `a` on `test-runner` (not counted in this run)"),
         "{}",
         stdout(&out)
     );
@@ -528,7 +528,94 @@ fn a_gate_that_could_check_only_some_benchmarks_fails() {
     std::fs::write(repo.dir.join("tak.toml"), toml(false)).unwrap();
     let err = fail(&tak_run(&repo.dir, &["--baseline", "x", "--gate"], &[]));
     assert!(
-        err.contains("one side only for `m` (b) on `test-runner`"),
+        err.contains("`m` (b) on `test-runner` (not counted in this run)"),
         "{err}"
+    );
+}
+
+/// A baseline saved on two runner classes gates on either one against its
+/// own series, and fails on a third with the classes it does hold named.
+#[test]
+fn a_baseline_saved_on_two_runners_gates_on_each() {
+    if !tak_cli::measure::valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let repo = Repo::new();
+    let cmd = ["sh", "-c", "exit 0"];
+    for runner in ["r1", "r2"] {
+        ok(&tak_run(
+            &repo.dir,
+            &["--runner", runner, "--bench", "s", "--save-baseline", "x"],
+            &cmd,
+        ));
+    }
+    for runner in ["r1", "r2"] {
+        let out = tak_run(
+            &repo.dir,
+            &[
+                "--runner",
+                runner,
+                "--bench",
+                "s",
+                "--baseline",
+                "x",
+                "--gate",
+            ],
+            &cmd,
+        );
+        let report = stdout(ok(&out));
+        assert!(
+            report.contains("No instruction-count regression"),
+            "{report}"
+        );
+        assert!(
+            !stderr(&out).contains("only for runner class"),
+            "{}",
+            stderr(&out)
+        );
+    }
+    let err = fail(&tak_run(
+        &repo.dir,
+        &[
+            "--runner",
+            "r3",
+            "--bench",
+            "s",
+            "--baseline",
+            "x",
+            "--gate",
+        ],
+        &cmd,
+    ));
+    assert!(
+        err.contains("`s` on `r3` (saved only on runner class `r1`, `r2`)"),
+        "{err}"
+    );
+}
+
+/// The same, without valgrind: a hand-written baseline on two classes, and a
+/// run on a third that counts nothing, is reported as another class's data
+/// and not compared.
+#[test]
+fn a_baseline_on_two_other_runners_is_named_and_not_compared() {
+    let repo = Repo::new();
+    let line = |runner: &str| counted_line("s").replace("test-runner", runner);
+    write_baseline(&repo, "x", &[&line("r1"), &line("r2")]);
+    let out = tak_run(
+        &repo.dir,
+        &[NC, "--runner", "r3", "--bench", "s", "--baseline", "x"],
+        &["true"],
+    );
+    ok(&out);
+    assert!(
+        stderr(&out).contains("holds `s` on `r3` only for runner class `r1`, `r2`"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        stdout(&out).contains("Nothing was compared"),
+        "{}",
+        stdout(&out)
     );
 }
