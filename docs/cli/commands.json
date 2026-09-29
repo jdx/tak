@@ -152,6 +152,18 @@
             "global": false
           },
           {
+            "name": "allocations",
+            "usage": "--allocations",
+            "help": "Also count heap allocations under valgrind's DHAT, for every subject measured. Recorded and reported, never gated.",
+            "help_first_line": "Also count heap allocations under valgrind's DHAT, for every subject measured. Recorded and reported, never gated.",
+            "short": [],
+            "long": [
+              "allocations"
+            ],
+            "hide": false,
+            "global": false
+          },
+          {
             "name": "record",
             "usage": "--record",
             "help": "Append the result to refs/notes/tak for the current commit.",

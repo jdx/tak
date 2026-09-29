@@ -263,6 +263,63 @@ run the concurrent fixers lost an edit every time, and were faster for it:
   non-zero, as it does when a subject is dropped. `--export-json` is still written, with the
   verdicts.
 
+## Counting heap allocations
+
+Instruction counts don't show a change that makes a command allocate more memory without
+doing much more work. `allocations = true` also runs the command under valgrind's DHAT and
+records three counts:
+
+| metric | what DHAT reports |
+|---|---|
+| `alloc_blocks` | heap blocks allocated over the whole run, freed or not |
+| `alloc_bytes` | bytes allocated over the whole run, freed or not |
+| `alloc_peak_bytes` | bytes live at the run's peak (DHAT's `t-gmax`) |
+
+```toml
+[bench.version]
+cmd = ["git", "--version"]
+runs = 5
+allocations = true
+```
+
+```text
+  version  git --version
+  alloc_blocks                 33
+  alloc_bytes                7649
+  alloc_peak_bytes           7336
+  instructions             288808
+  wall_max_ms                0.75
+  wall_mean_ms               0.63
+  wall_min_ms                0.52
+  wall_p50_ms                0.61
+  wall_stddev_ms             0.09
+```
+
+`tak run --allocations` turns it on for every subject in the run, including a command given
+after `--`.
+
+- **Allocations are recorded and reported, not gated.** `tak compare` shows them in a separate
+  table under the instruction counts, only for series that have them on both sides, and they
+  never fail the comparison. The totals repeated exactly in the measurements on the
+  [methodology](/guide/methodology#heap-allocations) page, but the peak moves with thread
+  scheduling.
+- `allocations` is a setting like `runs`: it can go in `[defaults]`, a benchmark, or a subject,
+  and a more specific layer's value replaces a less specific one. It's off unless set, because
+  each DHAT run costs about as much as a cachegrind run.
+- Like instruction counting, it takes 3 runs after the timed samples, each after the subject's
+  `prepare`, and records each metric's minimum. `check` doesn't run after them. `--no-counters`
+  doesn't turn it off.
+- It needs valgrind 3.15 or newer. Without valgrind, tak prints a note and records timing only.
+- DHAT counts only allocations it can intercept. A statically linked binary, or one with its
+  own allocator built in (jemalloc, mimalloc), reports zero. tak records the zero, and warns
+  that it's probably wrong.
+- tak warns when the totals vary across the 3 runs by more than 0.5%. That means the command's
+  work changed, such as a cache it fills on the first run. A peak that varies while the totals
+  don't gets a note instead: threads that allocate at the same time reach different peaks
+  depending on how valgrind interleaves them.
+- Valgrind measures the process it starts, not the programs that process runs. For
+  `["sh", "-c", "…"]`, it counts the shell's allocations.
+
 ## Comparing several programs
 
 To compare programs against each other, declare them as subjects of one benchmark instead of
@@ -289,9 +346,9 @@ tak interleaves the samples: every round takes one sample of each subject in a f
 order, rather than every sample of one subject and then the next. See
 [methodology](/guide/methodology#comparing-programs) for why.
 
-- Subjects inherit the benchmark's `runs`, `warmup`, `setup`, `prepare`, `check`, `dir`, `env`
-  and `ok_exit_codes`. A subject's own `setup`, `prepare` or `check` replaces the benchmark's,
-  and its `env` entries override matching keys.
+- Subjects inherit the benchmark's `runs`, `warmup`, `setup`, `prepare`, `check`, `dir`, `env`,
+  `ok_exit_codes` and `allocations`. A subject's own `setup`, `prepare` or `check` replaces the
+  benchmark's, and its `env` entries override matching keys.
 - A subject with fewer `runs` than the others is spread evenly across the run.
 - Each subject is recorded as its own series, with the subject name as the tool. Instruction
   counts are off for subjects unless they set `counters = true`, so another program's upgrade
@@ -413,12 +470,15 @@ JavaScript and jq, and `runner` is the class `--record` would store the run unde
 A value tak can't read is `null` rather than an error. None of this is stored by `--record`:
 series are partitioned by `runner`, and a kernel update shouldn't split one.
 
-Each result has `bench` and `subject`. Two more keys appear only when the subject asks for them:
+Each result has `bench` and `subject`. Three more keys appear only when the subject asks for them:
 
 - `version`, for a subject with a [`version_cmd`](#recording-each-program-s-version): the first
   line it printed, or `null` if it failed.
 - `checks`, for a subject with a [`check`](#checking-every-sample): how many samples passed,
   out of how many, and each sample's verdict in the same order as `times`.
+- `allocations`, for a subject with [`allocations = true`](#counting-heap-allocations) when
+  valgrind was there to count them: `{"blocks": 33, "bytes": 7649, "peak_bytes": 7336}`,
+  the same minimums `--record` stores.
 
 `user` and `system` are absent because tak doesn't measure CPU time.
 
@@ -457,7 +517,8 @@ Settings stack from least to most specific: `[defaults]`, then the benchmark, th
 shared `[subject.NAME]`, then the benchmark's own `[bench.B.subject.NAME]`. Each layer's
 setting replaces the one before, except `env` and `vars`, which merge key by key. `[defaults]`
 takes every benchmark setting (`runs`, `warmup`, `budget`, `min_runs`, `max_runs`,
-`ok_exit_codes`, `setup`, `prepare`, `check`, `version_cmd`, `dir`, `env`, `vars`). It is a
+`ok_exit_codes`, `setup`, `prepare`, `check`, `version_cmd`, `dir`, `env`, `vars`,
+`allocations`). It is a
 separate table because `[env]` already holds `env.deny` and `env.allow`.
 
 ## Templates

@@ -37,6 +37,7 @@ version_cmd = ["true", "--version"]
 dir = "."
 env = { A = "1" }
 vars = { v = "x" }
+allocations = false
 
 [subject.shared]
 cmd = ["true"]
@@ -56,6 +57,7 @@ version_cmd = "true --version"
 dir = "."
 env = { B = "2" }
 vars = { w = "y" }
+allocations = true
 
 [bench.single]
 cmd = "true"
@@ -74,6 +76,7 @@ version_cmd = ["true"]
 dir = "."
 env = { C = "3" }
 vars = { u = "z" }
+allocations = true
 
 [bench.multi]
 subjects = ["shared"]

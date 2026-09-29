@@ -195,6 +195,10 @@
         "additionalProperties": {
           "type": "string"
         }
+      },
+      "allocations": {
+        "description": "Count heap allocations under valgrind's DHAT: alloc_blocks, alloc_bytes and alloc_peak_bytes. Recorded and reported, never gated. Default false.",
+        "type": "boolean"
       }
     },
     "layer": {
@@ -239,6 +243,9 @@
         },
         "vars": {
           "$ref": "#/definitions/layerProperties/vars"
+        },
+        "allocations": {
+          "$ref": "#/definitions/layerProperties/allocations"
         }
       }
     },
@@ -291,6 +298,9 @@
         },
         "vars": {
           "$ref": "#/definitions/layerProperties/vars"
+        },
+        "allocations": {
+          "$ref": "#/definitions/layerProperties/allocations"
         },
         "when": {
           "description": "Measure only when this expr condition holds, e.g. '(env.VLT_BIN ?? \"\") != \"\"'. Sees env, os, arch, ci, bench and subject.",
@@ -362,6 +372,9 @@
         },
         "vars": {
           "$ref": "#/definitions/layerProperties/vars"
+        },
+        "allocations": {
+          "$ref": "#/definitions/layerProperties/allocations"
         },
         "when": {
           "description": "Run this benchmark only when this expr condition holds. Sees env, os, arch, ci and bench.",

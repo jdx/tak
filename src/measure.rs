@@ -12,6 +12,11 @@
 //! Syscall counts and peak RSS sit awkwardly between the two: better than wall
 //! clock (~1%) but not deterministic, because they move with thread scheduling.
 //! They are recorded, and may be flagged, but must not gate at a tight threshold.
+//!
+//! Heap allocations (`alloc_*`, from DHAT) are counted rather than timed. Their
+//! totals have repeated exactly for every hermetic subject measured so far, but
+//! that is five programs, not a demonstrated property, so they are recorded
+//! and reported and do not gate. Their peak moves with thread scheduling.
 
 use crate::config::{AutoRuns, DEFAULT_OK_EXIT_CODES, Runs, SELF_TOOL, Subject};
 use crate::settings::Settings;
@@ -696,6 +701,7 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
         },
         warmup: plan.warmup,
         counters: false,
+        allocations: false,
         ok_exit_codes: DEFAULT_OK_EXIT_CODES.to_vec(),
     };
     // One subject has one possible order, so the seed is irrelevant.
@@ -1328,9 +1334,327 @@ fn parse_irefs(stderr: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
+/// What DHAT reports about one run's heap use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Heap {
+    /// Blocks allocated over the whole run, freed or not.
+    pub blocks: u64,
+    /// Bytes allocated over the whole run, freed or not.
+    pub bytes: u64,
+    /// Bytes live at the global peak (DHAT's `t-gmax`).
+    pub peak_bytes: u64,
+}
+
+impl Heap {
+    /// As recorded metrics. The `alloc_` prefix keeps them together in the
+    /// sorted metrics map and apart from the gated `instructions`.
+    pub fn metrics(&self) -> [(&'static str, u64); 3] {
+        [
+            ("alloc_blocks", self.blocks),
+            ("alloc_bytes", self.bytes),
+            ("alloc_peak_bytes", self.peak_bytes),
+        ]
+    }
+}
+
+/// Heap allocations from repeated DHAT runs: each metric's floor and ceiling,
+/// taken independently, as [`Counted`] does for instructions.
+#[derive(Debug, Clone, Copy)]
+pub struct Allocated {
+    pub min: Heap,
+    pub max: Heap,
+    pub runs: u32,
+}
+
+/// Relative spread of one metric across runs, as a percentage of its
+/// minimum. A minimum of zero under a maximum that is not has no percentage,
+/// and counts as infinitely spread: something allocated on one run and not on
+/// another.
+fn spread(lo: u64, hi: u64) -> f64 {
+    match (lo, hi) {
+        (0, 0) => 0.0,
+        (0, _) => f64::INFINITY,
+        (lo, hi) => (hi - lo) as f64 / lo as f64 * 100.0,
+    }
+}
+
+impl Allocated {
+    /// The wider spread of the two totals, blocks and bytes.
+    pub fn totals_spread_pct(&self) -> f64 {
+        spread(self.min.blocks, self.max.blocks).max(spread(self.min.bytes, self.max.bytes))
+    }
+
+    /// The spread of the peak.
+    pub fn peak_spread_pct(&self) -> f64 {
+        spread(self.min.peak_bytes, self.max.peak_bytes)
+    }
+
+    /// Whether the totals moved between runs, which says the program's work
+    /// did. Same threshold as instructions. The totals of every hermetic
+    /// subject measured, threaded ones included, repeated exactly; the one
+    /// that moved was `git status` refreshing its index on the first run.
+    pub fn is_suspect(&self) -> bool {
+        self.totals_spread_pct() > SPREAD_WARN_PCT
+    }
+
+    /// Whether the peak moved while the totals did not. That is how a
+    /// threaded subject looks: every thread does the same work, but how much
+    /// of it is live at once depends on how valgrind interleaves them, which
+    /// moved an 8-thread subject's peak by up to 2.5%.
+    pub fn peak_is_unsteady(&self) -> bool {
+        self.peak_spread_pct() > SPREAD_WARN_PCT
+    }
+
+    /// Whether DHAT saw no heap allocation at all. Nearly always blindness
+    /// rather than a finding: DHAT counts only calls it can intercept, so a
+    /// statically linked binary, or one with its own allocator compiled in
+    /// (jemalloc, mimalloc), reports zero however much it allocates.
+    pub fn saw_nothing(&self) -> bool {
+        self.max.blocks == 0
+    }
+}
+
+/// Heap allocations via `valgrind --tool=dhat`, repeated [`COUNTER_RUNS`]
+/// times, with the subject's prepare step before each run as for
+/// [`subject_instructions`].
+///
+/// Reported, never gated — not yet. In the measurements on the methodology
+/// page the totals repeated exactly for every hermetic subject, threaded ones
+/// and a 32-way CPU contention run included. The peak did not: valgrind runs
+/// one thread at a time and switches by its own schedule, so how much a
+/// threaded program has live at once moves with it, in both directions. Its
+/// minimum drifted 0.7% under contention, so for the peak the floor is not
+/// the one-sided estimator it is for everything else.
+///
+/// `Ok(None)` when valgrind is unavailable, like [`instructions`].
+pub fn subject_allocations(s: &Subject, settings: &Settings) -> Result<Option<Allocated>> {
+    let site = Site {
+        dir: s.dir.as_deref(),
+        env: &s.env,
+        settings,
+    };
+    allocations(&s.cmd, s.prepare.as_deref(), &site, &s.ok_exit_codes)
+}
+
+/// `ok` applies to the subject under valgrind: DHAT, like cachegrind, exits
+/// with its client's code.
+fn allocations(
+    cmd: &[String],
+    prepare: Option<&[String]>,
+    site: &Site,
+    ok: &[i32],
+) -> Result<Option<Allocated>> {
+    if !valgrind_available() {
+        return Ok(None);
+    }
+    let bin = cmd.first().map(String::as_str).unwrap_or("(empty command)");
+    let mut runs: Vec<Heap> = Vec::with_capacity(COUNTER_RUNS as usize);
+    for _ in 0..COUNTER_RUNS {
+        if let Some(p) = prepare {
+            prepare_once(p, site)?;
+        }
+        // The profile DHAT would write is for its viewer, and tak reads only
+        // the summary; without this every run leaves a `dhat.out.PID` in the
+        // subject's directory.
+        let mut argv: Vec<String> = ["valgrind", "--tool=dhat", "--dhat-out-file=/dev/null"]
+            .map(String::from)
+            .to_vec();
+        argv.extend_from_slice(cmd);
+        let mut c = command(&argv, site)?;
+        let child = c
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("failed to run valgrind")?;
+        // Valgrind replaces itself with the tool rather than forking, so its
+        // `==PID==` prefix is the pid spawned here.
+        let pid = child.id();
+        let out = child.wait_with_output().context("failed to run valgrind")?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        accepted(bin, out.status, ok, " under valgrind")?;
+        match parse_dhat(&stderr, pid) {
+            Some(h) => runs.push(h),
+            None => bail!(
+                "valgrind ran but emitted no DHAT summary: {}",
+                stderr.lines().last().unwrap_or("(no output)").trim()
+            ),
+        }
+    }
+    let fold = |f: fn(u64, u64) -> u64| {
+        runs.iter()
+            .copied()
+            .reduce(|a, b| Heap {
+                blocks: f(a.blocks, b.blocks),
+                bytes: f(a.bytes, b.bytes),
+                peak_bytes: f(a.peak_bytes, b.peak_bytes),
+            })
+            .expect("COUNTER_RUNS > 0")
+    };
+    Ok(Some(Allocated {
+        min: fold(u64::min),
+        max: fold(u64::max),
+        runs: COUNTER_RUNS,
+    }))
+}
+
+/// Extract DHAT's summary from its stderr, e.g.
+///
+/// ```text
+/// ==8== Total:     4,140 bytes in 3 blocks
+/// ==8== At t-gmax: 4,140 bytes in 3 blocks
+/// ```
+///
+/// Only lines carrying valgrind's own `==PID==` prefix count. The subject's
+/// stderr arrives on the same stream, and a subject printing "Total: 5 bytes
+/// in 1 blocks" — a download progress line, a test summary — must not be
+/// read as the measurement. The format is the one valgrind 3.15 introduced
+/// with `--tool=dhat`; before that it was `exp-dhat`, which no longer exists.
+fn parse_dhat(stderr: &str, pid: u32) -> Option<Heap> {
+    let prefix = format!("=={pid}==");
+    let field = |name: &str| {
+        let rest = stderr
+            .lines()
+            .filter_map(|l| l.strip_prefix(prefix.as_str()))
+            .find_map(|l| l.trim_start().strip_prefix(name))?;
+        let (bytes, rest) = rest.trim().split_once(" bytes in ")?;
+        let blocks = rest.split_whitespace().next()?;
+        Some((dhat_number(bytes)?, dhat_number(blocks)?))
+    };
+    let (bytes, blocks) = field("Total:")?;
+    let (peak_bytes, _) = field("At t-gmax:")?;
+    Some(Heap {
+        blocks,
+        bytes,
+        peak_bytes,
+    })
+}
+
+/// A count as valgrind prints it, with commas every three digits.
+fn dhat_number(s: &str) -> Option<u64> {
+    let digits: String = s.trim().chars().filter(|&c| c != ',').collect();
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Captured from valgrind 3.22.0 (Ubuntu 24.04) running `git --version`.
+    /// 3.24.0 (Debian trixie) prints the same summary lines.
+    const DHAT_3_22: &str = "\
+==9== DHAT, a dynamic heap analysis tool
+==9== Copyright (C) 2010-2018, and GNU GPL'd, by Mozilla Foundation
+==9== Using Valgrind-3.22.0 and LibVEX; rerun with -h for copyright info
+==9== Command: git --version
+==9==
+git version 2.43.0
+==9==
+==9== Total:     7,119 bytes in 31 blocks
+==9== At t-gmax: 6,847 bytes in 25 blocks
+==9== At t-end:  2,379 bytes in 15 blocks
+==9== Reads:     1,067 bytes
+==9== Writes:    1,546 bytes
+==9==
+==9== To view the resulting profile, open
+==9==   file:///usr/libexec/valgrind/dh_view.html
+==9== in a web browser, click on \"Load...\", and then select the file
+==9==   /dev/null
+==9== The text at the bottom explains the abbreviations used in the output.
+";
+
+    #[test]
+    fn parses_a_dhat_summary() {
+        assert_eq!(
+            parse_dhat(DHAT_3_22, 9),
+            Some(Heap {
+                blocks: 31,
+                bytes: 7_119,
+                peak_bytes: 6_847,
+            })
+        );
+    }
+
+    /// Captured from valgrind 3.24.0 running a threaded Python script: the
+    /// separators matter once counts pass a million.
+    #[test]
+    fn parses_counts_past_a_million() {
+        let s = "==21== Total:     2,626,313 bytes in 2,833 blocks\n\
+                 ==21== At t-gmax: 1,185,686 bytes in 1,661 blocks\n";
+        assert_eq!(
+            parse_dhat(s, 21),
+            Some(Heap {
+                blocks: 2_833,
+                bytes: 2_626_313,
+                peak_bytes: 1_185_686,
+            })
+        );
+    }
+
+    /// A subject's own stderr shares the stream. Its lines carry no
+    /// `==PID==` prefix, or not valgrind's, and are never the measurement.
+    #[test]
+    fn a_subject_printing_a_lookalike_summary_is_ignored() {
+        let s = "Total: 5 bytes in 1 blocks\n\
+                 ==99== Total:     6 bytes in 2 blocks\n\
+                 ==99== At t-gmax: 6 bytes in 2 blocks\n\
+                 ==12== \n\
+                 ==12== Total:     8,748 bytes in 17 blocks\n\
+                 ==12== At t-gmax: 8,748 bytes in 17 blocks\n";
+        assert_eq!(parse_dhat(s, 12).unwrap().blocks, 17);
+        assert_eq!(parse_dhat("Total: 5 bytes in 1 blocks\n", 12), None);
+    }
+
+    #[test]
+    fn a_missing_or_truncated_dhat_summary_is_none() {
+        assert_eq!(
+            parse_dhat("valgrind: /nonexistent: No such file or directory", 1),
+            None
+        );
+        // A run that died before the summary's second line.
+        assert_eq!(
+            parse_dhat("==3== Total:     1 bytes in 1 blocks\n", 3),
+            None
+        );
+        assert_eq!(
+            parse_dhat(
+                "==3== Total:     lots bytes in 1 blocks\n==3== At t-gmax: 1 bytes in 1 blocks\n",
+                3
+            ),
+            None
+        );
+    }
+
+    /// Totals and peak are judged apart: moving totals mean the work
+    /// changed, a moving peak alone means threads interleaved differently.
+    #[test]
+    fn totals_and_peak_spread_are_judged_apart() {
+        let h = |blocks, bytes, peak_bytes| Heap {
+            blocks,
+            bytes,
+            peak_bytes,
+        };
+        let a = |min, max| Allocated { min, max, runs: 3 };
+        let steady = a(h(10, 1000, 500), h(10, 1000, 500));
+        assert_eq!(steady.totals_spread_pct(), 0.0);
+        assert!(!steady.is_suspect() && !steady.peak_is_unsteady());
+
+        let threaded = a(h(10, 1000, 500), h(10, 1000, 510));
+        assert!((threaded.peak_spread_pct() - 2.0).abs() < 1e-9);
+        assert!(threaded.peak_is_unsteady() && !threaded.is_suspect());
+
+        // The first run refreshed a cache: 1140 blocks, then 496.
+        let first_run = a(h(496, 2_077_237, 1_790_738), h(1140, 2_227_102, 1_888_914));
+        assert!(first_run.is_suspect());
+        assert!((first_run.totals_spread_pct() - 129.84).abs() < 0.01);
+
+        // Nothing on one run and something on another has no percentage.
+        assert!(a(h(0, 0, 0), h(1, 8, 8)).totals_spread_pct().is_infinite());
+        assert!(a(h(0, 0, 0), h(0, 0, 0)).saw_nothing());
+        assert!(!steady.saw_nothing());
+    }
 
     #[test]
     fn parses_cachegrind_summary() {
@@ -1539,6 +1863,7 @@ mod tests {
             },
             warmup: 1,
             counters: false,
+            allocations: false,
             ok_exit_codes: vec![0],
         };
         let res = interleaved(
@@ -1743,6 +2068,7 @@ mod tests {
                 },
                 warmup: 0,
                 counters: false,
+                allocations: false,
                 ok_exit_codes: vec![0],
             }],
             0,
@@ -1786,6 +2112,7 @@ mod tests {
             },
             warmup,
             counters: false,
+            allocations: false,
             ok_exit_codes: vec![0],
         }
     }
@@ -1943,6 +2270,7 @@ mod tests {
             },
             warmup: 1,
             counters: false,
+            allocations: false,
             ok_exit_codes: vec![0],
         };
         let mut log = Log::default();
@@ -1993,6 +2321,7 @@ mod tests {
             },
             warmup,
             counters: false,
+            allocations: false,
             ok_exit_codes: vec![0],
         };
         let mut log = Log::default();

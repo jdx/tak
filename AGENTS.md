@@ -6,11 +6,13 @@ measured numbers behind it, and the pre-v1 compatibility warning are all there.
 
 ## The invariant everything else serves
 
-Metrics come in two tiers, and conflating them defeats the entire point of the project:
+Metrics come in two tiers, and conflating them defeats the entire point of the project. Heap
+allocation counts sit outside both until measurements show which one they belong in:
 
 | tier | metrics | may gate CI? |
 |---|---|---|
 | **deterministic** | `instructions` | **yes** — ~0.02% run-to-run, ~0.035% across wildly different machine load |
+| **undecided** | `alloc_blocks`, `alloc_bytes`, `alloc_peak_bytes` (DHAT, opt-in) | **not yet** — totals repeated exactly across five programs, peak moves ~1% with thread scheduling; see methodology.md |
 | **timing** | `wall_min_ms`, `wall_p50_ms`, `wall_mean_ms`, `wall_max_ms` | **never** — 4–20% CV on a quiet host, medians move ~150% under contention |
 
 Syscall counts and peak RSS sit between the two (~1%) and are *not* deterministic — they move

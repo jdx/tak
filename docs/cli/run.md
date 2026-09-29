@@ -13,6 +13,7 @@ Benchmark a command, or everything declared in tak.toml.
 - **`--runs <N|auto>`** — Timed runs, or `auto` to size each subject from how long its samples take. Overrides tak.toml when both are given.
 - **`--warmup <WARMUP>`** — Untimed warmup runs. Overrides tak.toml when both are given.
 - **`--no-counters`** — Skip instruction counting even where valgrind is available.
+- **`--allocations`** — Also count heap allocations under valgrind's DHAT, for every subject measured. Recorded and reported, never gated.
 - **`--record`** — Append the result to refs/notes/tak for the current commit.
 - **`--no-progress`** — Do not report progress on stderr.
 - **`--subject <NAME>`** — Measure only this subject of each multi-subject benchmark. Repeatable. Benchmarks with none of the named subjects are skipped.

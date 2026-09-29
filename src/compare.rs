@@ -19,6 +19,15 @@ pub const GATED_METRIC: &str = "instructions";
 /// The timing metric shown alongside it, for context only.
 const WALL_METRIC: &str = "wall_min_ms";
 
+/// Heap-allocation metrics, in the order their columns appear. Recorded only
+/// by subjects that opt in, so they get a table of their own rather than
+/// columns every report would carry empty.
+const ALLOC_METRICS: [(&str, &str); 3] = [
+    ("alloc_blocks", "allocations"),
+    ("alloc_bytes", "bytes allocated"),
+    ("alloc_peak_bytes", "peak heap"),
+];
+
 /// What identifies a comparable series.
 ///
 /// Runner is part of the key because it has to be: absolute counts shift
@@ -451,6 +460,7 @@ pub fn markdown(c: &Comparison, trend: &Trend, gates: &Gates, credit: bool) -> S
         );
     } else {
         out.push_str(&table(c, trend, gates));
+        out.push_str(&allocations(c));
     }
 
     out.push_str(&outliers(c));
@@ -649,6 +659,56 @@ fn verdict(c: &Comparison, gates: &Gates, uniform: bool) -> String {
             reported.len(),
             listed(&reported, true)
         ));
+    }
+    out
+}
+
+/// The heap-allocation table, or nothing when no series has allocation
+/// metrics on both sides — so a project that never opted in sees the report
+/// it always did.
+///
+/// Never flagged, whatever the change: allocations are reported beside the
+/// gate, not part of it, until they have been shown to be as reproducible as
+/// instruction counts across the programs people measure.
+fn allocations(c: &Comparison) -> String {
+    let mut series: BTreeMap<Key, BTreeMap<&str, &Change>> = BTreeMap::new();
+    for change in &c.changes {
+        if ALLOC_METRICS.iter().any(|(m, _)| *m == change.metric) {
+            series
+                .entry((
+                    change.bench.clone(),
+                    change.tool.clone(),
+                    change.runner.clone(),
+                ))
+                .or_default()
+                .insert(change.metric.as_str(), change);
+        }
+    }
+    if series.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nHeap allocations, counted by DHAT; reported, not gated:\n\n");
+    out.push_str("| benchmark |");
+    for (_, title) in ALLOC_METRICS {
+        out.push_str(&format!(" {title} | Δ |"));
+    }
+    out.push_str("\n|---|");
+    out.push_str(&"---:|---:|".repeat(ALLOC_METRICS.len()));
+    out.push('\n');
+    for ((bench, tool, _runner), metrics) in &series {
+        out.push_str(&format!("| {} |", name(bench, tool)));
+        for (metric, _) in ALLOC_METRICS {
+            match metrics.get(metric) {
+                Some(ch) => out.push_str(&format!(
+                    " {} → {} | {} |",
+                    thousands(ch.base),
+                    thousands(ch.head),
+                    signed_pct(ch.pct())
+                )),
+                None => out.push_str(" — | — |"),
+            }
+        }
+        out.push('\n');
     }
     out
 }
@@ -1279,6 +1339,68 @@ mod tests {
         let md = markdown(&c, &trend, &g(1.0), false);
         assert!(md.contains("| trend |"), "{md}");
         assert!(md.contains('█'), "{md}");
+    }
+
+    fn with_allocs(mut r: Record, blocks: f64, bytes: f64, peak: f64) -> Record {
+        r.metrics.insert("alloc_blocks".into(), blocks);
+        r.metrics.insert("alloc_bytes".into(), bytes);
+        r.metrics.insert("alloc_peak_bytes".into(), peak);
+        r
+    }
+
+    /// A project that never opted in gets the report it always did: no
+    /// allocation table, no empty columns.
+    #[test]
+    fn the_allocation_table_appears_only_when_both_sides_have_allocations() {
+        let plain = compare(
+            &[rec("a", "gha", 1_000_000.0, 10.0)],
+            &[rec("a", "gha", 1_000_000.0, 10.0)],
+        );
+        let md = markdown(&plain, &Trend::new(), &g(1.0), false);
+        assert!(!md.contains("Heap allocations"), "{md}");
+        assert!(md.contains("| benchmark | instructions | Δ | wall (min) | Δ |"));
+
+        // The first run after opting in has nothing to compare against.
+        let first = compare(
+            &[rec("a", "gha", 1_000_000.0, 10.0)],
+            &[with_allocs(
+                rec("a", "gha", 1_000_000.0, 10.0),
+                3.0,
+                4140.0,
+                4140.0,
+            )],
+        );
+        assert!(!markdown(&first, &Trend::new(), &g(1.0), false).contains("Heap allocations"));
+    }
+
+    /// Allocations are reported beside the gate, never part of it, however
+    /// far they move.
+    #[test]
+    fn allocations_are_reported_and_never_gate() {
+        let c = compare(
+            &[with_allocs(
+                rec("a", "gha", 1_000_000.0, 10.0),
+                31.0,
+                7_119.0,
+                6_847.0,
+            )],
+            &[with_allocs(
+                rec("a", "gha", 1_000_000.0, 10.0),
+                62.0,
+                14_238.0,
+                6_847.0,
+            )],
+        );
+        assert!(c.regressions(&g(0.001)).is_empty());
+        let md = markdown(&c, &Trend::new(), &g(1.0), false);
+        assert!(md.contains("reported, not gated"), "{md}");
+        assert!(
+            md.contains(
+                "| a | 31 → 62 | +100.00% | 7,119 → 14,238 | +100.00% | 6,847 → 6,847 | +0.00% |"
+            ),
+            "{md}"
+        );
+        assert!(md.contains("No instruction-count regression"), "{md}");
     }
 
     #[test]

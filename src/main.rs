@@ -89,6 +89,10 @@ enum Cmd {
         /// Skip instruction counting even where valgrind is available.
         #[usage(long)]
         no_counters: bool,
+        /// Also count heap allocations under valgrind's DHAT, for every
+        /// subject measured. Recorded and reported, never gated.
+        #[usage(long)]
+        allocations: bool,
         /// Append the result to refs/notes/tak for the current commit.
         #[usage(long)]
         record: bool,
@@ -285,6 +289,7 @@ struct RunOpts {
     runs: Option<Runs>,
     warmup: Option<u32>,
     no_counters: bool,
+    allocations: bool,
     record: bool,
     no_progress: bool,
     subjects: Vec<String>,
@@ -338,6 +343,7 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         },
         warmup: opts.warmup.unwrap_or(DEFAULT_WARMUP),
         counters: true,
+        allocations: opts.allocations,
         ok_exit_codes: config::DEFAULT_OK_EXIT_CODES.to_vec(),
     };
     let seed = opts.seed.unwrap_or_else(random_seed);
@@ -499,6 +505,10 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
             // An explicit flag beats the file; the file beats the default.
             s.runs = opts.runs.unwrap_or(s.runs);
             s.warmup = opts.warmup.unwrap_or(s.warmup);
+            // Adds to the file rather than overriding it: there is no
+            // `--no-allocations`, since leaving the flag off already means
+            // whatever tak.toml says.
+            s.allocations |= opts.allocations;
         }
         plans.push((name, b.is_multi(), subjects));
     }
@@ -630,6 +640,9 @@ fn print_plan(bench: &str, multi: bool, subjects: &[Subject], no_counters: bool)
         if s.counters && !no_counters {
             println!("{pad}counters on");
         }
+        if s.allocations {
+            println!("{pad}allocations on");
+        }
     }
 }
 
@@ -674,6 +687,7 @@ fn finish(
                 let mut r = ExportResult::new(&m.bench, &m.subject.name, command, &m.samples.times)
                     .with_exit_codes(&m.samples.exit_codes);
                 r.version = m.version.clone();
+                r.allocations = export::Allocations::from_metrics(&m.record.metrics);
                 if m.subject.check.is_some() {
                     r.with_checks(&m.samples.checks)
                 } else {
@@ -871,15 +885,26 @@ fn measure_bench(
         if s.counters && !opts.no_counters {
             count_into(&mut metrics, s, settings);
         }
+        // Independent of --no-counters, which is about instruction counting.
+        // A subject that asked for allocations gets them, or a note saying
+        // why not.
+        if s.allocations {
+            allocations_into(&mut metrics, &label, s, settings);
+        }
 
         if multi {
             // One line per subject, in the order of a quick read: the floor
             // first, since that is the robust estimator, then the spread.
             // The command is in tak.toml; repeating it here buried the numbers.
             // Instruction counts, when a subject opted in, stay on its line.
-            let count = metrics
+            let mut count = metrics
                 .get("instructions")
                 .map_or(String::new(), |i| format!("  instructions {i:.0}"));
+            if let (Some(blocks), Some(bytes)) =
+                (metrics.get("alloc_blocks"), metrics.get("alloc_bytes"))
+            {
+                count.push_str(&format!("  allocs {blocks:.0} ({bytes:.0} bytes)"));
+            }
             let checked = checks.map_or(String::new(), |(p, t)| format!("  checks {p}/{t}"));
             println!(
                 "    {:<width$}  min {:>9.2}  p50 {:>9.2}  mean {:>9.2} ± {:<8.2} max {:>9.2} ms  n={}{checked}{count}",
@@ -899,7 +924,8 @@ fn measure_bench(
             if k == "wall_n" {
                 continue;
             }
-            if k == "instructions" {
+            // Counts, not measurements: a fraction would be noise.
+            if k == "instructions" || k.starts_with("alloc_") {
                 println!("  {k:<16} {v:>14.0}");
             } else {
                 println!("  {k:<16} {v:>14.2}");
@@ -964,6 +990,54 @@ fn count_into(metrics: &mut BTreeMap<String, f64>, s: &Subject, settings: &Setti
         // Valgrind exists but the measurement failed. Say so rather than
         // blaming a missing install, and keep the timing we did collect.
         Err(e) => eprintln!("warning: instruction counting failed: {e}"),
+    }
+}
+
+/// Add a subject's heap allocations to its metrics, warning rather than
+/// failing when they cannot be had, as [`count_into`] does.
+fn allocations_into(
+    metrics: &mut BTreeMap<String, f64>,
+    label: &str,
+    s: &Subject,
+    settings: &Settings,
+) {
+    match measure::subject_allocations(s, settings) {
+        Ok(Some(a)) => {
+            for (k, v) in a.min.metrics() {
+                metrics.insert(k.into(), v as f64);
+            }
+            // Recorded anyway: it is what DHAT reported, and nothing gates
+            // on it. The warning is what keeps a zero from being believed.
+            if a.saw_nothing() {
+                eprintln!(
+                    "  warning: {label}: DHAT saw no heap allocations. It counts only \
+                     calls it can intercept, so a statically linked binary or one with \
+                     its own allocator (jemalloc, mimalloc) reports zero however much \
+                     it allocates."
+                );
+            } else if a.is_suspect() {
+                eprintln!(
+                    "  warning: {label}: heap allocation totals varied {:.2}% across {} runs. \
+                     A hermetic command repeats them exactly, so this one does \
+                     environment-dependent work (a cache it fills on first run, an \
+                     update check, DNS).",
+                    a.totals_spread_pct(),
+                    a.runs
+                );
+            } else if a.peak_is_unsteady() {
+                eprintln!(
+                    "  note: {label}: peak heap varied {:.2}% across {} runs while the \
+                     totals did not. Threads that allocate at once reach a different peak \
+                     depending on how valgrind interleaves them; the minimum is recorded.",
+                    a.peak_spread_pct(),
+                    a.runs
+                );
+            }
+        }
+        Ok(None) => {
+            eprintln!("  note: {label}: valgrind not found, so heap allocations were not measured.")
+        }
+        Err(e) => eprintln!("  warning: {label}: allocation counting failed: {e:#}"),
     }
 }
 
@@ -1432,6 +1506,7 @@ fn main() -> Result<()> {
             runs,
             warmup,
             no_counters,
+            allocations,
             record,
             no_progress,
             subject,
@@ -1448,6 +1523,7 @@ fn main() -> Result<()> {
                     runs: runs.as_deref().map(str::parse).transpose()?,
                     warmup,
                     no_counters,
+                    allocations,
                     record,
                     no_progress,
                     subjects: subject,
