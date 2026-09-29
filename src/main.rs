@@ -1033,7 +1033,12 @@ fn cmd_log(opts: LogOpts, settings: &Settings) -> Result<()> {
     // yet, falls back to the local ref.
     let _ = notes::fetch(&opts.remote);
     let walked = notes::log(&opts.rev)?;
-    let history = tak_cli::report::build(walked, opts.limit, &opts.bench, notes::is_shallow())?;
+    // Whether the walk stopped at a graft, not whether anything in the clone
+    // is shallow: the notes fetch above is shallow by design.
+    let shallow = walked
+        .last()
+        .is_some_and(|oldest| notes::is_shallow_boundary(&oldest.sha));
+    let history = tak_cli::report::build(walked, opts.limit, &opts.bench, shallow)?;
 
     let Some(path) = opts.html else {
         print!(
@@ -1360,6 +1365,20 @@ fn cmd_backfill(
 /// it may carry `[env]` settings that change what gets scrubbed from a
 /// subject's environment, and silently applying a weaker filter than the
 /// project asked for is not a good failure.
+/// Settings for a command that must still run when tak.toml cannot be read,
+/// with a warning naming what it is doing without it.
+///
+/// Only the file is dropped. Falling all the way back to the defaults threw
+/// away the flags and the environment too, so doctor once reported a derived
+/// runner class while a recording would have used the one the user asked for.
+fn tolerant_settings(cli: &CliLayer, doing: &str) -> Settings {
+    resolve_settings(cli).unwrap_or_else(|_| {
+        eprintln!("warning: could not read tak.toml; {doing} without it");
+        Settings::resolve(cli, &EnvLayer::from_process(), &TakConfigLayer::empty())
+            .unwrap_or_default()
+    })
+}
+
 fn resolve_settings(cli: &CliLayer) -> Result<Settings> {
     Settings::from_process(cli)
 }
@@ -1497,7 +1516,10 @@ fn main() -> Result<()> {
                 html,
                 remote,
             },
-            &resolve_settings(&overrides)?,
+            // Tolerant, like doctor: reading what was recorded needs nothing
+            // from tak.toml but the credit line, and a config broken on this
+            // commit must not hide the history of every commit before it.
+            &tolerant_settings(&overrides, "reading history"),
         ),
         Cmd::Push(RemoteArgs { remote }) => {
             notes::push(&remote)?;
@@ -1561,22 +1583,8 @@ fn main() -> Result<()> {
             no_gate,
         } => cmd_compare(base, rev, remote, no_gate, &resolve_settings(&overrides)?),
         // Tolerant on purpose: doctor diagnoses a broken setup, so a tak.toml
-        // it cannot read must not stop it from running. Falling all the way
-        // back to the defaults threw away the flag and the environment too, so
-        // doctor reported a derived runner class while a recording would have
-        // used the one the user asked for.
-        Cmd::Doctor => {
-            let resolved = resolve_settings(&overrides).unwrap_or_else(|_| {
-                eprintln!("warning: could not read tak.toml; showing settings without it");
-                Settings::resolve(
-                    &overrides,
-                    &EnvLayer::from_process(),
-                    &TakConfigLayer::empty(),
-                )
-                .unwrap_or_default()
-            });
-            cmd_doctor(&resolved)
-        }
+        // it cannot read must not stop it from running.
+        Cmd::Doctor => cmd_doctor(&tolerant_settings(&overrides, "showing settings")),
         Cmd::Settings { docs } => cmd_settings(&resolve_settings(&overrides)?, docs),
         Cmd::Usage => {
             // The command tree, then the config block: the settings are part

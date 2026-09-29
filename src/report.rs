@@ -73,7 +73,7 @@ fn pct(base: f64, head: f64) -> Option<f64> {
 /// What a walk found, reduced to series.
 #[derive(Debug, Clone)]
 pub struct History {
-    /// Recorded commits in the window, oldest first. Commits with nothing
+    /// Recorded commits in the window, oldest first. Commits with nothing drawable
     /// recorded are not here: most commits on a trunk that records push tips
     /// have no measurement, and a row each would bury the ones that do.
     pub commits: Vec<Logged>,
@@ -136,9 +136,14 @@ pub fn build(
     let mut recorded: Vec<Logged> = walked
         .into_iter()
         .filter_map(|mut c| {
-            if !benches.is_empty() {
-                c.records.retain(|r| benches.contains(&r.bench));
-            }
+            // A record with neither metric drawn here — only custom ones, say
+            // — is dropped before counting. Left in, it made its commit use
+            // up one of the `-n` slots while contributing no point, so enough
+            // of them could push every drawable measurement out of the window.
+            c.records.retain(|r| {
+                (benches.is_empty() || benches.contains(&r.bench))
+                    && (r.metrics.contains_key(GATED_METRIC) || r.metrics.contains_key(WALL_METRIC))
+            });
             (!c.records.is_empty()).then_some(c)
         })
         .collect();
@@ -153,15 +158,13 @@ pub fn build(
         let keys: BTreeSet<&Key> = values.keys().map(|(k, _)| k).collect();
         for key in keys {
             let get = |metric: &str| values.get(&(key.clone(), metric.to_string())).copied();
-            let point = Point {
+            // Every record left carries one of the two, so every key has a
+            // value to draw.
+            series.entry(key.clone()).or_default().push(Point {
                 commit: i,
                 instructions: get(GATED_METRIC),
                 wall_min_ms: get(WALL_METRIC),
-            };
-            // A record carrying only other metrics has nothing to draw here.
-            if point.instructions.is_some() || point.wall_min_ms.is_some() {
-                series.entry(key.clone()).or_default().push(point);
-            }
+            });
         }
     }
 
@@ -341,12 +344,15 @@ pub fn markdown(h: &History, rev: &str, credit: bool) -> String {
     for s in &h.series {
         let _ = write!(out, "\n### {}\n\n", compare::describe(&s.key));
         // A subject is free text; an unescaped pipe in one splits its row.
+        // Backslashes first: a subject's own `\|` would otherwise become
+        // `\\|`, an escaped backslash followed by a bare pipe that ends the
+        // cell.
         let body: Vec<Vec<String>> = rows(h, s)
             .into_iter()
             .map(|(_, mut r)| {
                 r[0] = format!("`{}`", r[0]);
                 let last = r.len() - 1;
-                r[last] = r[last].replace('|', "\\|");
+                r[last] = r[last].replace('\\', "\\\\").replace('|', "\\|");
                 r
             })
             .collect();
@@ -1113,6 +1119,50 @@ mod tests {
             })
             .collect();
         assert_eq!(starts.len(), 1, "{starts:?}\n{md}");
+    }
+
+    /// A subject that escapes its own pipe must not end up with the escape
+    /// escaped and the pipe bare.
+    #[test]
+    fn backslashes_in_subjects_are_escaped_first() {
+        let mut w = walk(vec![vec![rec("a", "r", 1.0, 1.0)]]);
+        w[0].subject = r"fix(a\|b)".into();
+        let h = build(w, 10, &[], false).unwrap();
+        let md = markdown(&h, "HEAD", false);
+        assert!(md.contains(r"fix(a\\\|b)"), "{md}");
+        // Every pipe not preceded by an odd run of backslashes is a cell
+        // boundary, and six cells have seven.
+        let row = md.lines().find(|l| l.contains("fix(")).unwrap();
+        let bare = row
+            .char_indices()
+            .filter(|&(i, c)| {
+                c == '|' && row[..i].chars().rev().take_while(|&b| b == '\\').count() % 2 == 0
+            })
+            .count();
+        assert_eq!(bare, 7, "{row}");
+    }
+
+    /// Records carrying only metrics this report does not draw must not use up
+    /// `-n` slots that drawable measurements then lose.
+    #[test]
+    fn undrawable_records_do_not_count_toward_the_limit() {
+        let mut custom = rec("a", "r", 0.0, 0.0);
+        custom.metrics = BTreeMap::from([("binary_bytes".to_string(), 9.0)]);
+        let h = build(
+            walk(vec![
+                vec![rec("a", "r", 1.0, 1.0)],
+                vec![rec("a", "r", 2.0, 1.0)],
+                vec![custom.clone()],
+                vec![custom],
+            ]),
+            2,
+            &[],
+            false,
+        )
+        .unwrap();
+        assert_eq!(h.commits.len(), 2);
+        assert_eq!(ins(&h.series[0]), vec![Some(1.0), Some(2.0)]);
+        assert_eq!(h.older, 0);
     }
 
     /// A pipe in a commit subject would otherwise end its table row early.

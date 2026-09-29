@@ -258,11 +258,8 @@ pub struct Logged {
     pub records: Vec<Record>,
 }
 
-/// Field and record separators for [`log`]'s output. Neither can occur in a
-/// SHA, a date, or a subject line, and JSON escapes every control character,
-/// so neither can occur inside a well-formed record either.
-const FIELD_SEP: char = '\u{0}';
-const RECORD_SEP: char = '\u{1e}';
+/// Fields per commit in [`log`]'s output: SHA, date, subject, note.
+const LOG_FIELDS: usize = 4;
 
 /// Every commit on `rev`'s first-parent history, newest first, with its records.
 ///
@@ -270,6 +267,12 @@ const RECORD_SEP: char = '\u{1e}';
 /// `notes show` per commit: a series view wants hundreds of commits, and a
 /// subprocess each put a noticeable pause in front of what should be an
 /// instant read of local objects.
+///
+/// Every field ends in NUL (`%x00` between fields, `-z` after the last), the
+/// one byte none of them can hold: git will not store it in a commit message,
+/// and JSON escapes it. A printable-looking separator such as `\x1e` was
+/// tried first and can appear in a subject, which cut that commit in two and
+/// dropped its measurements.
 ///
 /// First-parent for the same reason as [`rev_list`]. `--no-notes` first clears
 /// whatever refs `core.notesRef` and `notes.displayRef` configure, so only this
@@ -279,11 +282,12 @@ pub fn log(rev: &str) -> Result<Vec<Logged>> {
     let notes = format!("--notes={NOTES_REF}");
     let out = git(&[
         "log",
+        "-z",
         "--first-parent",
         "--no-show-signature",
         "--no-notes",
         &notes,
-        "--format=%x1e%H%x00%cI%x00%s%x00%N",
+        "--format=%H%x00%cI%x00%s%x00%N",
         "--end-of-options",
         rev,
         "--",
@@ -292,33 +296,48 @@ pub fn log(rev: &str) -> Result<Vec<Logged>> {
 }
 
 fn parse_log(out: &str) -> Vec<Logged> {
-    out.split(RECORD_SEP)
-        .filter_map(|chunk| {
-            let mut fields = chunk.splitn(4, FIELD_SEP);
-            let sha = fields.next()?.trim();
-            // A subject can in principle carry a stray separator byte. What
-            // follows it is then not a commit, and parsing it as one would put
-            // a phantom row in the history.
+    let fields: Vec<&str> = out.split('\0').collect();
+    fields
+        .chunks(LOG_FIELDS)
+        .filter_map(|f| {
+            let [sha, date, subject, note] = f else {
+                // The empty piece after the final terminator.
+                return None;
+            };
+            // Nothing else here can come out of git misaligned, but a note is
+            // arbitrary bytes a person could have written by hand; refusing a
+            // group that does not start with a SHA stops one such note from
+            // inventing a commit.
             if sha.is_empty() || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return None;
             }
             Some(Logged {
                 sha: sha.to_string(),
-                date: fields.next().unwrap_or_default().to_string(),
-                subject: fields.next().unwrap_or_default().to_string(),
-                records: parse_note(fields.next().unwrap_or_default()),
+                date: date.to_string(),
+                subject: subject.to_string(),
+                records: parse_note(note),
             })
         })
         .collect()
 }
 
-/// Whether this clone's history is cut off, so a walk that ran out of commits
-/// may have run out of *clone* rather than out of project.
+/// Whether `sha` is where this clone's history was cut off, so a walk that
+/// ended there ran out of *clone* rather than out of project.
 ///
-/// `actions/checkout` defaults to a depth of one, so this is the normal state
-/// of a CI checkout rather than an edge case.
-pub fn is_shallow() -> bool {
-    git(&["rev-parse", "--is-shallow-repository"]).is_ok_and(|s| s.trim() == "true")
+/// Asked of the commit the walk ended on rather than of the repository as a
+/// whole. `rev-parse --is-shallow-repository` answers for every ref, and the
+/// notes refresh is itself a `--depth 1` fetch: after the first one, a full
+/// clone reports itself shallow because the *notes* history is, and a report
+/// built in it warned that older measurements might be missing when none were.
+///
+/// `actions/checkout` defaults to a depth of one, so a genuinely cut-off walk
+/// is the normal state of a CI checkout rather than an edge case.
+pub fn is_shallow_boundary(sha: &str) -> bool {
+    let Ok(path) = git(&["rev-parse", "--git-path", "shallow"]) else {
+        return false;
+    };
+    // No file is the common case: nothing in this clone is shallow.
+    std::fs::read_to_string(path).is_ok_and(|grafts| grafts.lines().any(|l| l.trim() == sha))
 }
 
 /// Teach plain `git fetch` about the notes ref, so the data is visible to users
@@ -345,9 +364,11 @@ mod tests {
     /// have to come out as a commit, the second with no records.
     #[test]
     fn a_log_parses_noted_and_unnoted_commits() {
+        // As `git log -z` writes it: NUL after every field, including the
+        // last, and a newline ending a note that exists.
         let out = format!(
-            "\u{1e}aaa\u{0}2026-01-02T00:00:00+00:00\u{0}second\u{0}{LINE}\n\n\
-             \u{1e}bbb\u{0}2026-01-01T00:00:00+00:00\u{0}first\u{0}\n"
+            "aaa\u{0}2026-01-02T00:00:00+00:00\u{0}second\u{0}{LINE}\n\u{0}\
+             bbb\u{0}2026-01-01T00:00:00+00:00\u{0}first\u{0}\u{0}"
         );
         let log = parse_log(&out);
         assert_eq!(log.len(), 2);
@@ -356,5 +377,15 @@ mod tests {
         assert_eq!(log[0].records.len(), 1);
         assert_eq!(log[1].sha, "bbb");
         assert!(log[1].records.is_empty());
+    }
+
+    /// The byte the first version of this format used as its separator.
+    #[test]
+    fn a_control_character_in_a_subject_stays_in_the_subject() {
+        let out = format!("aaa\u{0}2026-01-02T00:00:00+00:00\u{0}odd \u{1e} one\u{0}{LINE}\n\u{0}");
+        let log = parse_log(&out);
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].subject, "odd \u{1e} one");
+        assert_eq!(log[0].records.len(), 1);
     }
 }

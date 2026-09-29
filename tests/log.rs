@@ -214,6 +214,55 @@ fn a_shallow_clone_says_so() {
     assert!(out.contains("1,010,000"), "{out}");
 }
 
+/// The notes refresh is itself a `--depth 1` fetch, which marks the notes
+/// ref's history shallow in a full clone. That is not the project's history
+/// being cut off, and the report must not say it is — least of all in the
+/// Pages workflow, which checks out with `fetch-depth: 0` precisely so it
+/// would not.
+#[test]
+fn a_full_clone_is_not_called_shallow_after_the_notes_fetch() {
+    let dir = trunk("full");
+    let scratch = tempfile::tempdir().unwrap();
+    let url = format!("file://{}", dir.path().display());
+    git(scratch.path(), &["clone", "--quiet", &url, "full"]);
+    let clone = scratch.path().join("full");
+
+    // Twice: the first run's fetch is what would leave `.git/shallow` behind
+    // for the second to find.
+    for _ in 0..2 {
+        let out = stdout(&tak(&clone, &["log"]));
+        assert!(out.contains("3 recorded commit(s)"), "{out}");
+        assert!(!out.contains("shallow"), "{out}");
+    }
+}
+
+/// A subject is free text, and a separator byte inside one must not split
+/// its commit in two and drop the measurements recorded on it.
+#[test]
+fn a_separator_byte_in_a_subject_keeps_its_measurements() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    git(d, &["init", "--quiet", "-b", "main"]);
+    let c = commit(d, "odd \u{1e} subject");
+    note(d, &c, &[line("startup", "gha", 4_242_424)]);
+    let out = stdout(&tak(d, &["log"]));
+    assert!(out.contains("1 recorded commit(s)"), "{out}");
+    assert!(out.contains("4,242,424"), "{out}");
+}
+
+/// A broken tak.toml must not stop a read-only look at what was recorded —
+/// the same tolerance `doctor` has, and for the same reason.
+#[test]
+fn a_malformed_config_does_not_block_the_log() {
+    let dir = trunk("bad-config");
+    std::fs::write(dir.path().join("tak.toml"), "[bench.x\nnot toml").unwrap();
+    let out = tak(dir.path(), &["log"]);
+    let text = stdout(&out);
+    assert!(text.contains("3 recorded commit(s)"), "{text}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("could not read tak.toml"), "{err}");
+}
+
 #[test]
 fn a_history_with_nothing_recorded_says_so() {
     let dir = tempfile::tempdir().unwrap();

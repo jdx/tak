@@ -142,7 +142,7 @@ and set the repository's Pages source to GitHub Actions:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
 
       - name: Render the report
         run: |
