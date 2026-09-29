@@ -151,7 +151,7 @@ cmd compare help="Compare this commit's measurements against another's." {
     long_help #"""
 Compare this commit's measurements against another's.
 
-Fails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate` in the working tree's tak.toml. Wall clock is reported and never gated.
+Fails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate` in the working tree's tak.toml, or when no series was measured on both sides. Wall clock is reported and never gated.
 """#
     flag --rev help="Revision to compare. Defaults to HEAD." default=HEAD {
         arg <REV>
@@ -159,7 +159,8 @@ Fails when an instruction count has risen by more than `gate_pct` and `gate_min_
     flag --remote help="Remote to refresh notes from." default=origin {
         arg <REMOTE>
     }
-    flag --no-gate help="Report without failing, whatever the numbers say."
+    flag --no-gate help="Report without failing, whatever the numbers say. Takes precedence over `--allow-empty`: an empty comparison passes too."
+    flag --allow-empty help="Pass when no series was measured on both sides, instead of failing. For the first pull request after adopting tak, or a runner-class migration. A regression still fails."
     flag "-h --help" help="Print help" action=help builtin=#true
     arg "[BASE]" help="Revision to compare against." default="origin/main"
 }
