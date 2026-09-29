@@ -357,7 +357,37 @@ struct Local {
     gates: Option<compare::Gates>,
 }
 
-fn open_local(opts: &RunOpts, settings: &Settings) -> Result<Local> {
+/// The gates a `--baseline` report and `--gate` use.
+///
+/// A declared run loads and validates `tak.toml` to run at all, so reading
+/// its per-benchmark gates adds no way to fail. An ad-hoc `tak run -- CMD`
+/// has never depended on the declared benchmarks — settings read only the
+/// `[gate]` and other registry keys — and a broken `[bench.x]` must not stop
+/// it here either. So an ad-hoc run holds everything to `[gate]` unless
+/// `--gate` asks for a verdict, when a benchmark of the same name may have a
+/// gate of its own; and if the file will not load then, it warns and falls
+/// back to `[gate]` rather than refusing to measure.
+fn baseline_gates(opts: &RunOpts, settings: &Settings, adhoc: bool) -> Result<compare::Gates> {
+    if !adhoc {
+        return compare_gates(settings, opts.config.as_deref());
+    }
+    let global = global_gate(settings)?;
+    if !opts.gate {
+        return Ok(compare::Gates::uniform(global));
+    }
+    match compare_gates(settings, opts.config.as_deref()) {
+        Ok(gates) => Ok(gates),
+        Err(e) => {
+            eprintln!(
+                "  warning: could not read per-benchmark gates, so every benchmark is held to \
+                 [gate]: {e:#}"
+            );
+            Ok(compare::Gates::uniform(global))
+        }
+    }
+}
+
+fn open_local(opts: &RunOpts, settings: &Settings, adhoc: bool) -> Result<Local> {
     if opts.gate && opts.baseline.is_none() {
         bail!(
             "--gate applies to --baseline; to gate against another commit's recorded \
@@ -381,7 +411,7 @@ fn open_local(opts: &RunOpts, settings: &Settings) -> Result<Local> {
     // benchmarks this run measures.
     let gates = against
         .is_some()
-        .then(|| compare_gates(settings, opts.config.as_deref()))
+        .then(|| baseline_gates(opts, settings, adhoc))
         .transpose()?;
     Ok(Local {
         store: Some(store),
@@ -403,7 +433,7 @@ struct Measured {
 
 fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
     global_gate(settings)?;
-    let local = open_local(&opts, settings)?;
+    let local = open_local(&opts, settings, !cmd.is_empty())?;
     // An explicit command always wins; tak.toml is only consulted when none is
     // given, so ad-hoc measurement never depends on repository state.
     if cmd.is_empty() {

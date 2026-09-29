@@ -620,6 +620,53 @@ fn a_baseline_on_two_other_runners_is_named_and_not_compared() {
     );
 }
 
+/// An ad-hoc `tak run -- CMD` never depended on the declared benchmarks, and
+/// `--baseline` must not make it: a broken, unrelated `[bench.x]` neither
+/// stops the report nor, with `--gate`, turns into a config error instead of
+/// the gate's own verdict.
+#[test]
+fn an_invalid_unrelated_benchmark_does_not_block_an_ad_hoc_baseline_run() {
+    let repo = Repo::new();
+    std::fs::write(
+        repo.dir.join("tak.toml"),
+        "[bench.broken]\nruns = \"lots\"\n",
+    )
+    .unwrap();
+    // The premise: a plain ad-hoc run ignores the broken benchmark.
+    ok(&tak_run(&repo.dir, &[NC, "--bench", "s"], &["true"]));
+
+    ok(&tak_run(
+        &repo.dir,
+        &[NC, "--bench", "s", "--save-baseline", "x"],
+        &["true"],
+    ));
+    let out = tak_run(
+        &repo.dir,
+        &[NC, "--bench", "s", "--baseline", "x"],
+        &["true"],
+    );
+    assert!(stdout(ok(&out)).contains("compared against baseline `x`"));
+    assert!(
+        !stderr(&out).contains("per-benchmark gates"),
+        "{}",
+        stderr(&out)
+    );
+
+    // Gated: warned about, held to [gate], and failed by the gate itself —
+    // there is no instruction count without valgrind — not by the file.
+    let out = tak_run(
+        &repo.dir,
+        &[NC, "--bench", "s", "--baseline", "x", "--gate"],
+        &["true"],
+    );
+    let err = fail(&out);
+    assert!(
+        err.contains("could not read per-benchmark gates, so every benchmark is held to [gate]"),
+        "{err}"
+    );
+    assert!(err.contains("nothing to gate"), "{err}");
+}
+
 /// A shell loop of `n` iterations: about 11,500 instructions each, so 2000
 /// against 2500 is a rise of roughly 25% and 5.8M instructions.
 fn shell_loop(n: u32) -> String {
