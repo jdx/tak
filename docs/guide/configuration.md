@@ -496,7 +496,7 @@ JavaScript and jq, and `runner` is the class `--record` would store the run unde
 A value tak can't read is `null` rather than an error. None of this is stored by `--record`:
 series are partitioned by `runner`, and a kernel update shouldn't split one.
 
-Each result has `bench` and `subject`. Two more keys appear only when the subject asks for them:
+Each result has `bench` and `subject`. These keys appear only when the subject asks for them:
 
 - `version`, for a subject with a [`version_cmd`](#recording-each-program-s-version): the first
   line it printed, or `null` if it failed.
@@ -543,8 +543,7 @@ shared `[subject.NAME]`, then the benchmark's own `[bench.B.subject.NAME]`. Each
 setting replaces the one before, except `env`, `vars` and `metric`, which merge key by key.
 `[defaults]` takes every benchmark setting (`runs`, `warmup`, `budget`, `min_runs`,
 `max_runs`, `ok_exit_codes`, `setup`, `prepare`, `check`, `version_cmd`, `dir`, `env`, `vars`,
-`metric`). It is a
-separate table because `[env]` already holds `env.deny` and `env.allow`.
+`metric`). It is a separate table because `[env]` already holds `env.deny` and `env.allow`.
 
 ## Templates
 
