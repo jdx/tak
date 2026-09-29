@@ -51,6 +51,8 @@ and reasoning.
 - `tak compare` reports changes and gates only on instruction counts
 - `tak run --profile-dir` and `tak explain` show which functions an instruction-count change
   came from
+- `tak log` shows each benchmark's measurements over first-parent history, as Markdown or as
+  a self-contained HTML report
 - `tak backfill` measures published release binaries to bootstrap history
 
 PR reporting and change-point detection do not exist.
