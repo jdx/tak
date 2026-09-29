@@ -10,10 +10,14 @@
 //!
 //! Two sources, deliberately no more:
 //!
-//! - a `Tak-Accept:` trailer on a commit in the compared range, which is how a
-//!   change carries its own justification into history; and
 //! - `tak compare --accept`, for a CI integration that maps something outside
-//!   the commits — a pull-request label, say — onto the same thing.
+//!   the commits — a pull-request label only maintainers can apply, say — onto
+//!   an acceptance. This is the one honoured by default, because whoever
+//!   decides it is not necessarily whoever wrote the change; and
+//! - a `Tak-Accept:` trailer on a commit in the compared range, which is how a
+//!   change carries its own justification into history. Opt-in through the
+//!   `accept_trailers` setting: those commits are the change being gated, and
+//!   by default a change must not be able to waive its own gate.
 //!
 //! Names only, no bound such as `startup<=5%`. A bound invites arguing about
 //! the number in the trailer rather than looking at the change, and a second

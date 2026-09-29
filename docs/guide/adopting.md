@@ -246,23 +246,24 @@ shows that separation.
 
 ### When a regression is intentional
 
-A change that makes a benchmark more expensive on purpose should say so rather than weaken
-the gate. Add a trailer to the final paragraph of the commit message:
+A change that makes a benchmark more expensive on purpose should be accepted for the affected
+benchmark. Do not weaken the gate for every benchmark. Pass the benchmark name to the compare
+step:
 
-```text
-Tak-Accept: startup
+```sh
+tak compare "$BASE_SHA" --accept startup
 ```
 
-The comparison above reads trailers from every commit between the merge base and the pull
-request's head. The `fetch-depth: 0` checkout provides those commits. The regression in
-`startup` is reported as accepted, with the commit that accepted it. Every other benchmark
-still gates. To map a pull-request label to the same result, pass `--accept startup` to
-`tak compare` instead.
+The regression in `startup` is reported as accepted, and every other benchmark still gates.
+In CI, drive `--accept` from a pull-request label that only maintainers can apply. Then the
+pull request's author cannot waive their own gate.
+[Accepting an intentional regression](/guide/ci#accept-from-a-pull-request-label) shows a
+workflow step that does this.
 
-If the repository squash-merges pull requests, keep the trailer in the final paragraph of the
-squashed commit message. Otherwise the acceptance is not recorded in main-branch history. See
-[accepting an intentional regression](/guide/ci#accept-an-intentional-regression) for the
-details and for who can add a trailer.
+A `Tak-Accept: startup` commit trailer can do the same, but only after the project opts in
+with `[gate] accept_trailers = true`. Trailers are written by the change being gated, so they
+are ignored by default. If the project opts in and squash-merges pull requests, keep the
+trailer in the final paragraph of the squashed commit message.
 
 ## Backfill published releases
 

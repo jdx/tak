@@ -79,8 +79,53 @@ turns an infrastructure change into an apparent code regression.
 ## Accept an intentional regression
 
 Some changes make a benchmark more expensive on purpose. Rather than raising the gate for
-every benchmark or reaching for `--no-gate`, name the benchmark the change is allowed to
-regress. Put a `Tak-Accept` trailer in the final paragraph of a commit message:
+every benchmark or reaching for `--no-gate`, name the benchmarks the change is allowed to
+regress:
+
+```sh
+tak compare "$BASE_SHA" --accept startup
+```
+
+`--accept` is repeatable and also takes a comma-separated list. It accepts only the benchmarks
+it names. Every other benchmark still gates. An acceptance names a benchmark and covers each of
+its tools and runner classes. It has no size limit.
+
+An accepted regression still appears in the report. Its row is marked `(accepted)`, and a
+separate line names where each acceptance came from. It does not fail the command. The report
+also lists acceptances that accepted nothing, either because the benchmark did not regress
+above the gate or because no benchmark by that name was compared. A misspelt name does not fail
+the command by itself, but the regression it was meant to cover still does.
+
+### Accept from a pull-request label
+
+The recommended CI path is a pull-request label that only maintainers can apply. The workflow
+maps the label onto `--accept`. The label names the benchmark, and a maintainer decides whether
+to accept the regression. For example, a GitHub Actions step can pass every
+`tak-accept:NAME` label on the pull request:
+
+```yaml
+      - name: Compare and gate
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+        run: |
+          accept=()
+          for label in $LABELS; do
+            case "$label" in
+              tak-accept:*) accept+=(--accept "${label#tak-accept:}") ;;
+            esac
+          done
+          tak compare "$BASE_SHA" "${accept[@]}"
+```
+
+To re-run the gate when a label changes, add `labeled` and `unlabeled` to the workflow's
+`pull_request` types. Only people with triage or write access to the repository can apply
+labels.
+
+### Accept from a commit trailer
+
+A change can also carry its acceptance in a commit message. Put a `Tak-Accept` trailer in the
+final paragraph:
 
 ```text
 feat: load plugins at startup
@@ -90,42 +135,41 @@ Plugins now load eagerly so the first command does not pay for discovery.
 Tak-Accept: startup
 ```
 
-`tak compare BASE --rev REV` reads the trailer from every commit in `BASE..REV`, including
-commits reached through a merge commit's second parent. The trailer accepts only the
-benchmarks it names. List several benchmarks with commas (`Tak-Accept: startup, resolve`) or
-repeat the trailer. Put the reason in the commit body; the trailer value contains only names.
+**Trailers are ignored unless the project opts in.** The commits that `tak compare` reads are
+the change being gated. On a pull request, they are the author's own commits. If tak honoured
+trailers by default, any change could waive its own gate by adding one line. Enable trailers
+only when every commit in the compared range is reviewed before the result matters, or when
+everyone who can push may waive the gate:
 
-A CI integration can pass the same acceptance from outside the commits, such as a
-pull-request label, with the repeatable `--accept` flag:
-
-```sh
-tak compare "$BASE_SHA" --accept startup
+```toml
+[gate]
+accept_trailers = true
 ```
 
-An accepted regression is still shown in the report. Its row is marked `(accepted)`, and a
-separate line names the source of each acceptance: `--accept`, or the commit carrying the
-trailer. It does not fail the command. Every other benchmark still gates. An acceptance names a
-benchmark and covers each of its tools and runner classes; it has no size limit. The report
-also lists acceptances that accepted nothing, either because the benchmark did not regress
-above the gate or because no benchmark by that name was compared. A misspelt name does not fail
-the command by itself, but the regression it was meant to cover still does.
+`TAK_ACCEPT_TRAILERS=1` enables trailers for one invocation. `tak.toml` is read from the
+checkout being measured, so a pull request can change `accept_trailers`, just as it can change
+`gate.pct`. Where the gate is enforced against changes you do not trust, set
+`TAK_ACCEPT_TRAILERS=0` in the workflow. The environment takes precedence over the file.
 
-Anyone who can write a commit message in the range can add the trailer, including the author
-of the pull request being gated. tak does not restrict who may accept a regression, and it has
-no option to ignore trailers. The acceptance is visible in the report and in history, so it is
-reviewed only when the commit that carries it is reviewed.
+With trailers off, the report still says when the compared range contains `Tak-Accept`
+trailers. That line names them and states that they were not honoured, so an author knows why
+their trailer had no effect.
 
-The comparison needs the commits in `BASE..REV`. A shallow checkout that omits some of them
-also omits their trailers, and the regression fails the gate.
+With trailers on, `tak compare BASE --rev REV` reads trailers from every commit in `BASE..REV`,
+including commits reached through a merge commit's second parent. List several benchmarks with
+commas (`Tak-Accept: startup, resolve`) or repeat the trailer. Put the reason in the commit
+body; the trailer value contains only names. The comparison needs every commit in
+`BASE..REV`. A shallow checkout that omits some commits also omits their trailers, and the
+regression then fails the gate.
 
-### Squash merges
+#### Squash merges
 
 A pull request gate reads the branch's own commits. After a squash merge, the only commit left
-in history is the squashed one. Keep the trailer in the final paragraph of that commit's message
-if later comparisons along the main branch should see the acceptance. git reads trailers only
-from the last paragraph. A squash message that concatenates each commit's message can leave
-`Tak-Accept:` in the middle of the body, where it is ordinary text. Check the merged commit
-with:
+in history is the squashed one. Keep the trailer in the final paragraph of that commit's
+message if later comparisons along the main branch should see the acceptance. git reads
+trailers only from the last paragraph. A squash message that concatenates each commit's
+message can leave `Tak-Accept:` in the middle of the body, where it is ordinary text. Check the
+merged commit with:
 
 ```sh
 git log -1 --format='%(trailers:key=Tak-Accept)'

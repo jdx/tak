@@ -68,17 +68,30 @@ fn note(dir: &Path, sha: &str, benches: &[(&str, f64)]) {
     );
 }
 
+/// `tak compare` with trailers at their default: not honoured.
 fn compare(dir: &Path, args: &[&str]) -> (bool, String, String) {
-    let out: Output = Command::new(env!("CARGO_BIN_EXE_tak"))
-        .arg("compare")
+    run_compare(dir, args, None)
+}
+
+/// `tak compare` with `TAK_ACCEPT_TRAILERS=1`.
+fn compare_trusting(dir: &Path, args: &[&str]) -> (bool, String, String) {
+    run_compare(dir, args, Some("1"))
+}
+
+fn run_compare(dir: &Path, args: &[&str], trailers: Option<&str>) -> (bool, String, String) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tak"));
+    cmd.arg("compare")
         .args(args)
         // No such remote: the refresh fails fast and the local notes are read.
         .args(["--remote", "no-such-remote"])
         .env_remove("TAK_GATE_PCT")
         .env_remove("TAK_CREDIT")
-        .current_dir(dir)
-        .output()
-        .expect("failed to run tak");
+        .env_remove("TAK_ACCEPT_TRAILERS")
+        .current_dir(dir);
+    if let Some(value) = trailers {
+        cmd.env("TAK_ACCEPT_TRAILERS", value);
+    }
+    let out: Output = cmd.output().expect("failed to run tak");
     (
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -111,7 +124,7 @@ fn an_unaccepted_regression_fails() {
 #[test]
 fn a_trailer_accepts_only_the_benchmark_it_names() {
     let (dir, base, head) = regressed("slower startup\n\nTak-Accept: startup");
-    let (ok, stdout, stderr) = compare(dir.path(), &[&base]);
+    let (ok, stdout, stderr) = compare_trusting(dir.path(), &[&base]);
     assert!(
         !ok,
         "`resolve` was not accepted and must still fail: {stdout}"
@@ -131,7 +144,7 @@ fn a_trailer_accepts_only_the_benchmark_it_names() {
 #[test]
 fn trailers_may_be_repeated_or_listed() {
     let (dir, base, _) = regressed("slower\n\nTak-Accept: startup\ntak-accept: resolve, other");
-    let (ok, stdout, _) = compare(dir.path(), &[&base]);
+    let (ok, stdout, _) = compare_trusting(dir.path(), &[&base]);
     assert!(ok, "{stdout}");
     assert!(stdout.contains("**2 accepted regression(s)"), "{stdout}");
     assert!(
@@ -140,6 +153,57 @@ fn trailers_may_be_repeated_or_listed() {
     );
 }
 
+/// The default. A pull request's own commits are the change being gated, so
+/// their trailers must not waive the gate unless the project opted in — and
+/// the report says the trailer was seen, so nobody wonders why it did nothing.
+#[test]
+fn trailers_are_ignored_by_default_and_the_report_says_so() {
+    let (dir, base, head) = regressed("slower startup\n\nTak-Accept: startup");
+    let (ok, stdout, stderr) = compare(dir.path(), &[&base]);
+    assert!(!ok, "{stdout}");
+    assert!(stderr.contains("2 benchmark(s) regressed"), "{stderr}");
+    assert!(!stdout.contains("(accepted)"), "{stdout}");
+    assert!(
+        stdout.contains(&format!(
+            "trailers were found but not honoured, because `gate.accept_trailers` is off: \
+             `startup` (`Tak-Accept` in `{}`)",
+            &head[..12]
+        )),
+        "{stdout}"
+    );
+}
+
+/// No trailers, no line: the note exists to explain a trailer, not to
+/// advertise the setting on every report.
+#[test]
+fn no_trailers_means_no_note() {
+    let (dir, base, _) = regressed("slower");
+    let (_, stdout, _) = compare(dir.path(), &[&base]);
+    assert!(!stdout.contains("not honoured"), "{stdout}");
+}
+
+/// Opting in from `tak.toml`, and opting back out from the environment. The
+/// file is read from the checkout under test, so a workflow that does not
+/// trust the change needs a way to override it.
+#[test]
+fn the_config_opts_in_and_the_environment_overrides_it() {
+    let (dir, base, _) = regressed("slower\n\nTak-Accept: startup, resolve");
+    std::fs::write(
+        dir.path().join("tak.toml"),
+        "[gate]\naccept_trailers = true\n",
+    )
+    .unwrap();
+    let (ok, stdout, _) = compare(dir.path(), &[&base]);
+    assert!(ok, "tak.toml opted in: {stdout}");
+    assert!(stdout.contains("**2 accepted regression(s)"), "{stdout}");
+
+    let (ok, stdout, _) = run_compare(dir.path(), &[&base], Some("0"));
+    assert!(!ok, "the environment opted out: {stdout}");
+    assert!(stdout.contains("not honoured"), "{stdout}");
+}
+
+/// `--accept` does not depend on the setting: it comes from whoever runs the
+/// comparison, not from the commits being compared.
 #[test]
 fn the_flag_accepts_without_a_trailer() {
     let (dir, base, _) = regressed("slower");
@@ -165,7 +229,7 @@ fn a_trailer_before_the_base_does_not_count() {
     note(dir.path(), &base, &[("startup", 1e6)]);
     let head = commit(dir.path(), "slower");
     note(dir.path(), &head, &[("startup", 1.1e6)]);
-    let (ok, stdout, _) = compare(dir.path(), &[&base]);
+    let (ok, stdout, _) = compare_trusting(dir.path(), &[&base]);
     assert!(!ok, "{stdout}");
     assert!(!stdout.contains("accepted"), "{stdout}");
 }
@@ -194,7 +258,7 @@ fn a_trailer_on_a_merged_branch_counts() {
     );
     let merge = git(dir.path(), &["rev-parse", "HEAD"]);
     note(dir.path(), &merge, &[("startup", 1.1e6)]);
-    let (ok, stdout, _) = compare(dir.path(), &[&base]);
+    let (ok, stdout, _) = compare_trusting(dir.path(), &[&base]);
     assert!(ok, "{stdout}");
     assert!(stdout.contains(&branch[..12]), "{stdout}");
 }
@@ -206,7 +270,7 @@ fn a_trailer_on_a_merged_branch_counts() {
 fn a_trailer_outside_the_final_paragraph_is_not_one() {
     let (dir, base, _) =
         regressed("squashed\n\n* slower startup\n\nTak-Accept: startup\n\n* another commit");
-    let (ok, stdout, _) = compare(dir.path(), &[&base]);
+    let (ok, stdout, _) = compare_trusting(dir.path(), &[&base]);
     assert!(!ok, "{stdout}");
     assert!(!stdout.contains("accepted"), "{stdout}");
 }

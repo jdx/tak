@@ -52,6 +52,10 @@
           "description": "Percentage an instruction count may rise before `tak compare` fails.",
           "type": "number",
           "minimum": 0
+        },
+        "accept_trailers": {
+          "description": "Honour `Tak-Accept:` commit trailers in `tak compare`. Off by default: the trailers are written by the change being gated.",
+          "type": "boolean"
         }
       }
     },

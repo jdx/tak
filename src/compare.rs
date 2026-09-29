@@ -88,6 +88,9 @@ pub struct Comparison {
     /// [`regressions`]: Comparison::regressions
     /// [`failures`]: Comparison::failures
     pub accepted: Acceptances,
+    /// `Tak-Accept` trailers found in the range and deliberately not honoured,
+    /// because `accept_trailers` is off. Kept only to say so in the report.
+    pub ignored_trailers: Acceptances,
 }
 
 impl Comparison {
@@ -112,6 +115,13 @@ impl Comparison {
     /// commit messages — and a comparison is meaningful without either.
     pub fn with_accepted(mut self, accepted: Acceptances) -> Self {
         self.accepted = accepted;
+        self
+    }
+
+    /// Record trailers that were present but not honoured. They never affect
+    /// the gate; they exist so the report can explain why a trailer did nothing.
+    pub fn with_ignored_trailers(mut self, ignored: Acceptances) -> Self {
+        self.ignored_trailers = ignored;
         self
     }
 
@@ -171,6 +181,7 @@ pub fn compare(base: &[Record], head: &[Record]) -> Comparison {
         added: head_keys.difference(&base_keys).cloned().collect(),
         removed: base_keys.difference(&head_keys).cloned().collect(),
         accepted: Acceptances::default(),
+        ignored_trailers: Acceptances::default(),
     }
 }
 
@@ -320,6 +331,7 @@ pub fn markdown(c: &Comparison, trend: &Trend, gate_pct: f64, credit: bool) -> S
     }
 
     out.push_str(&unused_acceptances(c, gate_pct));
+    out.push_str(&ignored_trailers(c));
     out.push_str(&outliers(c));
     out.push_str(
         "\n<sub>Only instruction counts gate. Wall clock is shown for context — \
@@ -463,6 +475,24 @@ fn series_name(bench: &str, tool: &str) -> String {
     } else {
         format!("{bench} ({tool})")
     }
+}
+
+/// One line naming trailers that were ignored, so an author whose trailer did
+/// nothing can see why rather than assume tak failed to read it.
+fn ignored_trailers(c: &Comparison) -> String {
+    if c.ignored_trailers.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n`{}` trailers were found but not honoured, because `gate.accept_trailers` is \
+         off: {}\n",
+        crate::accept::TRAILER,
+        c.ignored_trailers
+            .iter()
+            .map(|(bench, _)| format!("`{bench}` ({})", c.ignored_trailers.describe(bench)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 /// Acceptances that did not accept anything.
@@ -980,6 +1010,24 @@ mod tests {
         let md = markdown(&c, &Trend::new(), 1.0, false);
         assert!(
             md.contains("No instruction-count regression above 1%"),
+            "{md}"
+        );
+        assert!(!md.contains("(accepted)"), "{md}");
+    }
+
+    /// Ignored trailers are reported and change nothing else: the regression
+    /// still fails, and nothing is marked accepted.
+    #[test]
+    fn an_ignored_trailer_is_named_and_accepts_nothing() {
+        let c = compare(
+            &[rec("a", "gha", 1_000_000.0, 10.0)],
+            &[rec("a", "gha", 1_100_000.0, 10.0)],
+        )
+        .with_ignored_trailers(accepting("a", Source::Trailer(SHA.into())));
+        assert_eq!(c.failures(1.0).len(), 1);
+        let md = markdown(&c, &Trend::new(), 1.0, false);
+        assert!(
+            md.contains("trailers were found but not honoured, because `gate.accept_trailers` is off: `a` (`Tak-Accept` in `0123456789ab`)"),
             "{md}"
         );
         assert!(!md.contains("(accepted)"), "{md}");

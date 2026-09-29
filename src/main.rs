@@ -165,8 +165,9 @@ enum Cmd {
     ///
     /// Fails when an instruction count has risen by more than `gate_pct`. Wall
     /// clock is reported and never gated. A regression in a benchmark named by
-    /// `--accept`, or by a `Tak-Accept:` trailer on a commit in BASE..REV, is
-    /// reported as accepted and does not fail.
+    /// `--accept` is reported as accepted and does not fail. So is one named by a
+    /// `Tak-Accept:` trailer on a commit in BASE..REV, but only when the
+    /// `accept_trailers` setting is on.
     Compare {
         /// Revision to compare against.
         #[usage(arg, default = "origin/main")]
@@ -181,7 +182,8 @@ enum Cmd {
         #[usage(long)]
         no_gate: bool,
         /// Accept a regression in this benchmark: report it, but do not fail
-        /// on it. Repeatable, or comma-separated.
+        /// on it. Repeatable, or comma-separated. Honoured whatever
+        /// `accept_trailers` says.
         #[usage(long, value_name = "BENCH")]
         accept: Vec<String>,
     },
@@ -1036,23 +1038,36 @@ fn cmd_compare(
     for list in &accept_flags {
         accepted.add(list, accept::Source::Flag);
     }
-    // Fatal, unlike the trend below. Carrying on without the trailers would
-    // still fail closed, but on a regression the author already accepted, with
-    // a report that says nothing about why the acceptance was not seen.
-    let log = notes::trailers(&base_sha, &head_sha, accept::TRAILER).with_context(|| {
-        format!(
-            "cannot read {} trailers from {base}..{rev}",
-            accept::TRAILER
-        )
-    })?;
-    accepted.add_trailer_log(&log);
+    // Read either way; only honoured when the setting says so. The commits
+    // under comparison are the change being gated, so by default their own
+    // trailers must not be able to waive the gate — but an author whose
+    // trailer was ignored should be told, not left guessing.
+    let log = notes::trailers(&base_sha, &head_sha, accept::TRAILER);
+    let mut ignored = Acceptances::default();
+    if settings.accept_trailers {
+        // Fatal when honoured, unlike the trend below. Carrying on would still
+        // fail closed, but on a regression the author accepted, with a report
+        // that says nothing about why the acceptance was not seen.
+        let log = log.with_context(|| {
+            format!(
+                "cannot read {} trailers from {base}..{rev}",
+                accept::TRAILER
+            )
+        })?;
+        accepted.add_trailer_log(&log);
+    } else if let Ok(log) = log {
+        // Not fatal: nothing the gate decides depends on it.
+        ignored.add_trailer_log(&log);
+    }
 
     // One fetch, not two: `read` refreshes from the remote, and doing it twice
     // doubles the round trip for the same ref.
     let base_records = notes::read(Some(&remote), &base_sha)?;
     let head_records = notes::read(None, &head_sha)?;
 
-    let comparison = compare::compare(&base_records, &head_records).with_accepted(accepted);
+    let comparison = compare::compare(&base_records, &head_records)
+        .with_accepted(accepted)
+        .with_ignored_trailers(ignored);
     // Never fatal: a shallow checkout has no history to walk, and a missing
     // sparkline is a smaller loss than a failed gate.
     let trend = gather_trend(&base_sha, &head_sha, &head_records).unwrap_or_default();

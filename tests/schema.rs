@@ -15,6 +15,7 @@ allow = []
 
 [gate]
 pct = 1.5
+accept_trailers = true
 
 [report]
 credit = false
