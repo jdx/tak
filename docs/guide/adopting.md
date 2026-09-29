@@ -395,9 +395,8 @@ For each first-parent commit in the range, newest first, tak:
 2. runs `[build]` there;
 3. runs the benchmarks declared in the **current** `tak.toml`, anchored at the same place in
    that checkout, so `./target/release/mycli` is the binary built from that commit; and
-4. appends the results to that commit's note, with the commit's date as `ts`. For a commit
-   git cannot report a date for, such as one dated before 1970, tak warns and uses the time
-   of measurement instead.
+4. appends the results to that commit's note, with the committer date from the commit
+   object as `ts`, including dates before 1970.
 
 The range is whatever `git rev-list` accepts as one argument. `A..B` includes `B` and excludes
 `A`, so `main~20..main` is the last twenty commits. Merged branches are not walked, because

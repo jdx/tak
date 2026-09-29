@@ -600,8 +600,8 @@ fn a_program_symlinked_out_of_the_checkout_is_not_measured() {
     assert!(repo.notes(&linked).is_empty());
 }
 
-/// A commit dated before 1970 is still recorded, and does not stop the rest
-/// of the range.
+/// A commit dated before 1970 is recorded with its own date, and does not
+/// stop the rest of the range.
 #[test]
 fn a_commit_dated_before_1970_is_recorded() {
     let repo = Repo::new();
@@ -634,21 +634,13 @@ fn a_commit_dated_before_1970_is_recorded() {
     let run = repo.tak(&["--commits", &format!("{base}..main")]);
     assert!(run.status.success(), "{}", both(&run));
     assert_eq!(versions(&repo, &after), ["v3"], "the range carried on");
-    // Git prints no `%ct` for such a commit, so there is no date to use:
-    // the point is kept, stamped with when it was measured, and says so.
+    // `%ct` prints nothing for this commit; the raw object still has its
+    // date, and the record carries it.
     let recs = repo.notes(&old);
     let rec = recs.first().unwrap_or_else(|| panic!("{}", both(&run)));
     assert_eq!(rec.version.as_deref(), Some("v2"));
-    assert!(
-        rec.ts.starts_with("20") && rec.ts.ends_with('Z'),
-        "{}",
-        rec.ts
-    );
-    assert!(
-        both(&run).contains("recording the measurement time instead"),
-        "{}",
-        both(&run)
-    );
+    assert_eq!(rec.ts, "1969-07-20T20:17:40Z");
+    assert!(!both(&run).contains("warning: no readable committer date"));
 }
 
 /// Start a backfill whose build records its pid and then sleeps, and wait

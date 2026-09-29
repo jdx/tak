@@ -1840,10 +1840,13 @@ fn backfill_commit(
     };
     let root = wt.path().join(rel);
     // The commit's own date, as release backfill uses the release's: this is
-    // when the code existed, which is what a series is plotted against. Git
-    // prints no `%ct` at all for a commit dated before 1970, which only an
-    // import or a hand-written object can produce; that commit still gets
-    // its measurement, stamped with when it was taken, rather than failing.
+    // when the code existed, which is what a series is plotted against. It
+    // is also the same every time the commit is measured, so its points keep
+    // one place on the timeline, and nothing in a record depends on when the
+    // backfill ran except the metrics themselves: a record written twice
+    // stays byte-identical, which is all cat_sort_uniq dedupes on. A commit
+    // object with no readable committer date would be malformed; it still
+    // costs only its own date, with a warning, rather than failing.
     let ts = match tak_cli::worktree::commit_time(&p.sha) {
         Ok(t) => rfc3339(t),
         Err(e) => {

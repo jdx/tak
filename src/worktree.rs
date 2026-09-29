@@ -44,33 +44,32 @@ fn git_str(args: &[&str]) -> Result<String> {
     git(&args)
 }
 
-/// When `sha` was committed, as seconds since the epoch.
+/// When `sha` was committed, as seconds since the epoch, read from the raw
+/// commit object.
 ///
-/// `log.showSignature` is switched off because with it set, `git show` writes
-/// a signature's verification text onto stdout ahead of the format, and the
-/// timestamp would no longer be the first thing printed. The value is marked
-/// with a prefix no verification line starts with, and the last such line is
-/// read, so text that still gets through cannot be mistaken for the date.
+/// Not `git show --format=%ct`, for two reasons. With `log.showSignature`
+/// set, `show` writes a signature's verification text onto stdout ahead of
+/// the format. And a commit dated before 1970, which only an import or a
+/// hand-written object can produce, has a negative timestamp that `%ct`
+/// prints as nothing at all. `cat-file` prints the object as stored, so the
+/// committer line says exactly what the commit says.
 pub fn commit_time(sha: &str) -> Result<i64> {
-    let out = git_str(&[
-        "-c",
-        "log.showSignature=false",
-        "show",
-        "-s",
-        "--no-show-signature",
-        "--format=tak-ct:%ct",
-        sha,
-    ])?;
-    parse_commit_time(&out).with_context(|| format!("unexpected commit time for {sha}: {out:?}"))
+    let out = git_str(&["cat-file", "commit", sha])?;
+    parse_commit_time(&out).with_context(|| format!("no readable committer date in {sha}"))
 }
 
-fn parse_commit_time(out: &str) -> Option<i64> {
-    out.lines()
-        .rev()
-        .find_map(|l| l.strip_prefix("tak-ct:"))?
-        .trim()
-        .parse()
-        .ok()
+/// The timestamp on the `committer` header: `committer NAME <EMAIL> TS TZ`.
+/// Only headers are searched, which end at the first blank line, so a
+/// message line starting with `committer` cannot be taken for it. Taken from
+/// the right, since the name and email may hold spaces.
+fn parse_commit_time(object: &str) -> Option<i64> {
+    let line = object
+        .lines()
+        .take_while(|l| !l.is_empty())
+        .find_map(|l| l.strip_prefix("committer "))?;
+    let mut fields = line.rsplit(' ');
+    let _tz = fields.next()?;
+    fields.next()?.parse().ok()
 }
 
 /// The root of the work tree containing `dir`.
@@ -214,19 +213,31 @@ impl FailedBuilds {
         self.rewrite(|lines| lines.retain(|l| *l != line))
     }
 
+    /// Re-read, change and replace the file.
+    ///
+    /// Re-read rather than written from this process's own view, so entries
+    /// another backfill added since this one loaded are kept. Replaced by
+    /// renaming a complete temporary file over it, so a concurrent reader,
+    /// or a run killed mid-write, never sees half a file. Two backfills
+    /// writing at the same instant can still lose one's entry. There is no
+    /// lock, because the cost of that is small: a commit that failed to build
+    /// gets built once more.
     fn rewrite(&self, change: impl FnOnce(&mut Vec<String>)) -> Result<()> {
         let text = std::fs::read_to_string(&self.path).unwrap_or_default();
         let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
         change(&mut lines);
         lines.sort();
         lines.dedup();
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
+        let dir = self.path.parent().context("no directory for build state")?;
+        std::fs::create_dir_all(dir)?;
         let mut body = lines.join("\n");
         body.push('\n');
-        std::fs::write(&self.path, body)
-            .with_context(|| format!("could not write {}", self.path.display()))
+        let mut tmp = tempfile::NamedTempFile::new_in(dir)
+            .with_context(|| format!("could not write in {}", dir.display()))?;
+        std::io::Write::write_all(&mut tmp, body.as_bytes())?;
+        tmp.persist(&self.path)
+            .with_context(|| format!("could not write {}", self.path.display()))?;
+        Ok(())
     }
 }
 
@@ -410,23 +421,27 @@ mod tests {
     use super::parse_commit_time;
 
     #[test]
-    fn a_commit_time_is_read_from_its_marked_line() {
-        assert_eq!(parse_commit_time("tak-ct:1700000000"), Some(1_700_000_000));
-        assert_eq!(parse_commit_time("tak-ct:soon"), None);
-        assert_eq!(
-            parse_commit_time("tak-ct:-86400"),
-            Some(-86_400),
-            "before 1970"
-        );
+    fn a_commit_time_is_the_committer_header_timestamp() {
+        let object = "tree abc\nparent def\n\
+                      author A Person <a@x> 1600000000 +0200\n\
+                      committer The Committer <c@x> 1700000000 -0700\n\n\
+                      subject\n";
+        assert_eq!(parse_commit_time(object), Some(1_700_000_000));
+        let before_1970 = "tree abc\ncommitter T <t@x> -14182940 +0000\n\nv2\n";
+        assert_eq!(parse_commit_time(before_1970), Some(-14_182_940));
     }
 
-    /// With `log.showSignature` set somewhere tak's override does not reach,
-    /// git prints the verification ahead of the format. That text must not
-    /// be read as the date, even when it starts with digits.
+    /// A signed commit carries a multi-line `gpgsig` header, and a message
+    /// can say anything; neither may be read as the committer line.
     #[test]
-    fn signature_text_before_the_format_is_ignored() {
-        let out = "1234 Good \"git\" signature for t@x with ED25519 key\ntak-ct:1700000000";
-        assert_eq!(parse_commit_time(out), Some(1_700_000_000));
-        assert_eq!(parse_commit_time("gpg: no signature"), None);
+    fn signatures_and_messages_are_not_the_committer_line() {
+        let object = "tree abc\n\
+                      committer T <t@x> 1700000000 +0000\n\
+                      gpgsig -----BEGIN SSH SIGNATURE-----\n \
+                      U1NIU0lH 1234 +0000\n -----END SSH SIGNATURE-----\n\n\
+                      committer X <x@x> 1 +0000\n";
+        assert_eq!(parse_commit_time(object), Some(1_700_000_000));
+        let no_header = "tree abc\n\ncommitter X <x@x> 1 +0000\n";
+        assert_eq!(parse_commit_time(no_header), None);
     }
 }
