@@ -15,6 +15,7 @@ allow = []
 
 [gate]
 pct = 1.5
+min_delta = 20000
 
 [report]
 credit = false
@@ -42,6 +43,7 @@ metric.binary_bytes.file = "target/release/x"
 cmd = ["true"]
 when = "true"
 counters = false
+gate = { enabled = false }
 runs = 3
 warmup = 0
 budget = "1s"
@@ -60,6 +62,7 @@ metric.bundle_kb.cmd = ["true"]
 [bench.single]
 cmd = "true"
 when = 'os != ""'
+gate = { pct = 5.0, min_delta = 1000, enabled = true }
 runs = 2
 warmup = 0
 budget = "5s"
@@ -147,4 +150,9 @@ fn the_schema_and_the_parser_agree_on_every_key() {
     let mut metric = keys(&table(&t["defaults"]["metric"]["binary_bytes"]));
     metric.extend(keys(&table(&t["subject"]["shared"]["metric"]["bundle_kb"])));
     assert_eq!(metric, props(&s, "/definitions/metric"), "[*.metric.NAME]");
+    assert_eq!(
+        keys(&table(&t["bench"]["single"]["gate"])),
+        props(&s, "/definitions/gate"),
+        "gate = {{ ... }}"
+    );
 }

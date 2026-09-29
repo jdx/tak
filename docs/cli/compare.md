@@ -5,7 +5,7 @@
 
 Compare this commit's measurements against another's.
 
-Fails when an instruction count has risen by more than `gate_pct`. Wall clock is reported and never gated.
+Fails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate` in the working tree's tak.toml. Wall clock is reported and never gated.
 
 ## Arguments
 - **`[BASE]`** — Revision to compare against.
