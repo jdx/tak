@@ -128,6 +128,29 @@ enum Cmd {
         #[usage(long, default = "origin")]
         remote: String,
     },
+    /// Show each benchmark's measurements over first-parent history.
+    ///
+    /// One table per benchmark and runner class, newest commit first, with the
+    /// change in instruction count from the previous measurement. Commits with
+    /// nothing recorded are skipped. `--html` writes the same history as a
+    /// self-contained page of charts instead.
+    Log {
+        /// Revision to walk back from. Defaults to HEAD.
+        #[usage(arg, default = "HEAD")]
+        rev: String,
+        /// Most recent recorded commits to show.
+        #[usage(short = 'n', long, default = "30")]
+        limit: usize,
+        /// Show only this benchmark. Repeatable.
+        #[usage(long, value_name = "NAME")]
+        bench: Vec<String>,
+        /// Write a self-contained HTML report to PATH instead of printing.
+        #[usage(long, value_name = "PATH")]
+        html: Option<std::path::PathBuf>,
+        /// Remote to refresh notes from.
+        #[usage(long, default = "origin")]
+        remote: String,
+    },
     /// Push recorded measurements to the remote.
     Push(RemoteArgs),
     /// Move measurements between a read-only job and a trusted publisher.
@@ -1025,6 +1048,57 @@ fn cmd_history(rev: String, remote: String) -> Result<()> {
     Ok(())
 }
 
+/// `tak log`'s options, gathered so they travel as one value.
+struct LogOpts {
+    rev: String,
+    limit: usize,
+    bench: Vec<String>,
+    html: Option<std::path::PathBuf>,
+    remote: String,
+}
+
+/// Print, or write as a page, the series along `rev`'s first-parent history.
+fn cmd_log(opts: LogOpts, settings: &Settings) -> Result<()> {
+    if opts.limit == 0 {
+        bail!("-n must be at least 1");
+    }
+    // Resolved first so a bad revision names itself, rather than surfacing as
+    // whatever `git log` makes of it after a network round trip.
+    notes::rev_parse(&opts.rev).with_context(|| format!("cannot resolve {}", opts.rev))?;
+    // Never fatal, as in `notes::read`: offline, or a remote with no notes
+    // yet, falls back to the local ref.
+    let _ = notes::fetch(&opts.remote);
+    let walked = notes::log(&opts.rev)?;
+    // Whether the walk stopped at a graft, not whether anything in the clone
+    // is shallow: the notes fetch above is shallow by design.
+    let shallow = walked
+        .last()
+        .is_some_and(|oldest| notes::is_shallow_boundary(&oldest.sha));
+    let history = tak_cli::report::build(walked, opts.limit, &opts.bench, shallow)?;
+
+    let Some(path) = opts.html else {
+        print!(
+            "{}",
+            tak_cli::report::markdown(&history, &opts.rev, settings.credit)
+        );
+        return Ok(());
+    };
+    let page = tak_cli::report::html(
+        &history,
+        &opts.rev,
+        repo_from_origin().as_deref(),
+        settings.credit,
+    );
+    std::fs::write(&path, page).with_context(|| format!("could not write {}", path.display()))?;
+    println!(
+        "wrote {}: {} series over {} recorded commit(s)",
+        path.display(),
+        history.series.len(),
+        history.commits.len()
+    );
+    Ok(())
+}
+
 /// How many commits of trunk history the sparkline covers.
 ///
 /// A constant rather than a setting: it changes how a picture looks, not what
@@ -1432,6 +1506,20 @@ fn cmd_backfill(
 /// it may carry `[env]` settings that change what gets scrubbed from a
 /// subject's environment, and silently applying a weaker filter than the
 /// project asked for is not a good failure.
+/// Settings for a command that must still run when tak.toml cannot be read,
+/// with a warning naming what it is doing without it.
+///
+/// Only the file is dropped. Falling all the way back to the defaults threw
+/// away the flags and the environment too, so doctor once reported a derived
+/// runner class while a recording would have used the one the user asked for.
+fn tolerant_settings(cli: &CliLayer, doing: &str) -> Settings {
+    resolve_settings(cli).unwrap_or_else(|_| {
+        eprintln!("warning: could not read tak.toml; {doing} without it");
+        Settings::resolve(cli, &EnvLayer::from_process(), &TakConfigLayer::empty())
+            .unwrap_or_default()
+    })
+}
+
 fn resolve_settings(cli: &CliLayer) -> Result<Settings> {
     Settings::from_process(cli)
 }
@@ -1555,6 +1643,25 @@ fn main() -> Result<()> {
             )
         }
         Cmd::History { rev, remote } => cmd_history(rev, remote),
+        Cmd::Log {
+            rev,
+            limit,
+            bench,
+            html,
+            remote,
+        } => cmd_log(
+            LogOpts {
+                rev,
+                limit,
+                bench,
+                html,
+                remote,
+            },
+            // Tolerant, like doctor: reading what was recorded needs nothing
+            // from tak.toml but the credit line, and a config broken on this
+            // commit must not hide the history of every commit before it.
+            &tolerant_settings(&overrides, "reading history"),
+        ),
         Cmd::Push(RemoteArgs { remote }) => {
             notes::push(&remote)?;
             println!("pushed {} to {}", notes::NOTES_REF, remote);
@@ -1631,22 +1738,8 @@ fn main() -> Result<()> {
             &resolve_settings(&overrides)?,
         ),
         // Tolerant on purpose: doctor diagnoses a broken setup, so a tak.toml
-        // it cannot read must not stop it from running. Falling all the way
-        // back to the defaults threw away the flag and the environment too, so
-        // doctor reported a derived runner class while a recording would have
-        // used the one the user asked for.
-        Cmd::Doctor => {
-            let resolved = resolve_settings(&overrides).unwrap_or_else(|_| {
-                eprintln!("warning: could not read tak.toml; showing settings without it");
-                Settings::resolve(
-                    &overrides,
-                    &EnvLayer::from_process(),
-                    &TakConfigLayer::empty(),
-                )
-                .unwrap_or_default()
-            });
-            cmd_doctor(&resolved)
-        }
+        // it cannot read must not stop it from running.
+        Cmd::Doctor => cmd_doctor(&tolerant_settings(&overrides, "showing settings")),
         Cmd::Settings { docs } => cmd_settings(&resolve_settings(&overrides)?, docs),
         Cmd::Usage => {
             // The command tree, then the config block: the settings are part

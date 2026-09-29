@@ -51,6 +51,8 @@ and reasoning.
 - `tak compare` reports changes and gates only on instruction counts
 - `tak detect` reports instruction-count steps that already landed on a branch, and fails
   when the newest recorded commit introduced one or when nothing could be compared
+- `tak log` shows each benchmark's measurements over first-parent history, as Markdown or as
+  a self-contained HTML report
 - `tak backfill` measures published release binaries to bootstrap history
 
 PR reporting does not exist. `tak detect` compares consecutive recorded points against the

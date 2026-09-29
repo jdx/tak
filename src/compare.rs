@@ -263,7 +263,7 @@ impl Comparison {
 /// reason tak reports the minimum within a run — the extra work a machine
 /// sometimes does is one-sided. Averaging would let one noisy sample move a
 /// number that is supposed to be deterministic.
-fn index(records: &[Record]) -> BTreeMap<(Key, String), f64> {
+pub(crate) fn index(records: &[Record]) -> BTreeMap<(Key, String), f64> {
     let mut out: BTreeMap<(Key, String), f64> = BTreeMap::new();
     for r in records {
         let key: Key = (r.bench.clone(), r.tool.clone(), r.runner.clone());
