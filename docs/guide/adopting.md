@@ -328,9 +328,11 @@ benchmark, and `--runs N` overrides the file's run count.
 
 Each commit is recorded whole or not at all. A commit whose build fails is reported and
 skipped, and the rest of the range continues; old commits that no longer build are normal.
-tak remembers that failure in git's directory (`.git/tak/backfill-build-failed`), together with the `[build]` it
-failed under, and later runs pass over that commit rather than retrying it before every other
-commit. Changing `[build]` or passing `--force` tries it again. The file is local to the clone
+tak remembers that failure in git's directory (`.git/tak/backfill-build-failed`), together
+with the `[build]` and runner class it failed under. Later runs pass over that commit rather
+than retrying it before every other commit. Changing `[build]` or the runner class, or passing
+`--force`, tries it again. A `[build].dir` missing from the tree, or leading out of it, counts
+as a failed build. The file is local to the clone
 and never pushed. A commit where any benchmark fails, a subject is dropped, or a check fails
 records nothing, not even the benchmarks that did measure. It is not remembered, because a
 measurement can fail for reasons that do not repeat. The command fails only when the range

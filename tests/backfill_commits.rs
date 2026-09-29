@@ -505,6 +505,18 @@ fn a_failed_build_is_passed_over_next_time() {
     assert!(stdout(&second).contains("1 commit(s) passed over"));
     assert_eq!(repo.builds(), 2);
 
+    // A different runner class has its own memory: a toolchain change is
+    // what a new class marks, and may be what makes the commit build.
+    let other = repo
+        .tak_cmd(&["--commits", &range, "--dry-run", "--runner", "other"])
+        .output()
+        .unwrap();
+    assert!(
+        stdout(&other).contains(&format!("{}  would build", &broken[..12])),
+        "{}",
+        stdout(&other)
+    );
+
     // --force retries it, and so does a different [build].
     repo.tak(&["--commits", &range, "--force", "--limit", "1"]);
     assert_eq!(repo.builds(), 3);
@@ -549,6 +561,15 @@ fn a_build_dir_symlinked_out_of_the_checkout_is_refused() {
     assert_eq!(repo.builds(), 0, "the build never ran");
     assert!(repo.notes(&linked).is_empty());
     assert_eq!(repo.worktrees(), 1);
+
+    // The tree will hold the same symlink next time, so it is remembered
+    // like a failed build rather than retried ahead of older commits.
+    let dry = repo.tak(&["--commits", &format!("{base}..main"), "--dry-run"]);
+    assert!(
+        stdout(&dry).contains(&format!("{}  build failed before", &linked[..12])),
+        "{}",
+        stdout(&dry)
+    );
 }
 
 /// Start a backfill whose build records its pid and then sleeps, and wait

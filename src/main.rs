@@ -1548,16 +1548,20 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
     // second point each. Offline or without a remote, the local ref decides.
     let _ = notes::fetch("origin");
 
-    // A stable one-line description of the build, so a remembered failure is
-    // forgotten as soon as `[build]` changes. JSON escapes tabs and newlines.
+    let runner = runner_class(settings);
+    // A stable one-line description of the build and where it ran, so a
+    // remembered failure is forgotten as soon as `[build]` changes, and does
+    // not follow the clone onto a new runner class: a toolchain upgrade is
+    // exactly what a new class marks, and may be what makes an old commit
+    // build again. JSON escapes tabs and newlines.
     let build_key = serde_json::to_string(&(
+        &runner,
         &build.cmd,
         build.dir.as_ref().map(|d| d.to_string_lossy()),
         &build.env,
     ))?;
     let mut failed_builds = tak_cli::worktree::FailedBuilds::load(build_key)?;
 
-    let runner = runner_class(settings);
     let mut pending = Vec::with_capacity(commits.len());
     for sha in commits {
         let have: std::collections::BTreeSet<(String, String)> = notes::read(None, &sha)?
@@ -1653,9 +1657,9 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
             }
             Outcome::NotRecorded => {
                 not_recorded.push(short);
-                // Only reached for a remembered failure under --force: it
-                // did not fail to build this time, so it is not passed over
-                // next time either.
+                // Matters only for a remembered failure retried under
+                // --force: it built this time, so it is not passed over next
+                // time either.
                 failed_builds.remove(&p.sha)?;
             }
         }
@@ -1726,10 +1730,13 @@ fn backfill_commit(
     build.anchor(&root);
     // The checked path has no `..`, but the old tree may put a symlink where
     // the current tak.toml expects a directory.
+    // Counted as a failed build: which paths a commit's tree holds never
+    // changes, so this would fail the same way next time, and retrying it
+    // first on every run would stop `--limit` from reaching older commits.
     for dir in [Some(&root), build.dir.as_ref()].into_iter().flatten() {
         if let Err(e) = wt.check_contains(dir) {
-            println!("  not recorded — {e:#}");
-            return Ok(Outcome::NotRecorded);
+            println!("  build failed — skipped: {e:#}");
+            return Ok(Outcome::BuildFailed);
         }
     }
     match backfill::run_build(&build, &scratch.join("build.log")) {
