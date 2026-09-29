@@ -72,6 +72,17 @@ tak compare origin/main
 An instruction-count increase beyond the configured gate fails the command. Wall-clock
 changes are displayed but never gate the result.
 
+So does finding nothing to compare: when no series was measured on both revisions, the report
+says `**Nothing was compared` and the command exits non-zero after printing it. That usually
+means the base was never recorded, its notes were not fetched, or the two were measured on
+different runner classes. Pass `--allow-empty` when that is expected: on the first pull request
+after adopting tak, or while a runner-class migration has left the base on the old class.
+`--no-gate` also passes an empty comparison, since it never fails.
+
+Older tak releases print the same report and exit 0. A workflow that may run one should also
+fail when the report contains `**Nothing was compared`, as the
+[pull-request example](/guide/adopting#gate-pull-requests) does.
+
 Each benchmark can have its own gate in `tak.toml`: a different percentage, an absolute
 `min_delta` floor, or `enabled = false` to report a benchmark without failing on it. See
 [per-benchmark gates](/guide/configuration#per-benchmark-gates). `tak compare` reads these from
@@ -83,8 +94,8 @@ When some benchmark's gate differs from `[gate]`, the verdict says
 `N benchmark(s) above their gate` instead of `N benchmark(s) above the 1% gate`, and a
 report-only benchmark that rose is listed as `N report-only benchmark(s) above their gate`.
 A script that greps the report for a regression should match both forms. The exit status is
-simpler to rely on: `tak compare` exits non-zero only for a regression in a gated benchmark, or
-for an error.
+simpler to rely on: `tak compare` exits non-zero only for a regression in a gated benchmark, for
+an empty comparison without `--allow-empty`, or for an error.
 
 To see which functions a change came from, keep cachegrind's profiles on both sides; see
 [Explain an instruction-count change](./attribution).

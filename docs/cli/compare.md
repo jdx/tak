@@ -5,7 +5,7 @@
 
 Compare this commit's measurements against another's.
 
-Fails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate` in the working tree's tak.toml. Wall clock is reported and never gated.
+Fails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate` in the working tree's tak.toml, or when no series was measured on both sides. Wall clock is reported and never gated.
 
 ## Arguments
 - **`[BASE]`** — Revision to compare against.
@@ -19,5 +19,6 @@ Fails when an instruction count has risen by more than `gate_pct` and `gate_min_
 - **`--remote <REMOTE>`** — Remote to refresh notes from.
 
   **Default:** `origin`
-- **`--no-gate`** — Report without failing, whatever the numbers say.
+- **`--no-gate`** — Report without failing, whatever the numbers say. Takes precedence over `--allow-empty`: an empty comparison passes too.
+- **`--allow-empty`** — Pass when no series was measured on both sides, instead of failing. For the first pull request after adopting tak, or a runner-class migration. A regression still fails.
 - **`-h --help`** — Print help
