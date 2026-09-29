@@ -203,3 +203,46 @@ jobs:
             git fetch --quiet "$remote" +refs/notes/tak:refs/notes/tak-remote
             git notes --ref=tak merge -s cat_sort_uniq refs/notes/tak-remote
           done
+
+  detect:
+    name: Detect regressions that landed
+    # After publish, so the measurement is in refs/notes/tak whether or not this
+    # fails, and so the walk sees this commit's point beside the earlier ones.
+    needs: publish
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Read-only: it fetches notes from this public repository and writes
+    # nothing back, so it gets no token beyond the default read scope.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # tak detect walks the first-parent commits between recorded points;
+          # the default one-commit checkout leaves it nothing to walk.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The binary this workflow built and measured from this commit, so the
+      # check is the same tak that produced the numbers.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tak-perf-binary
+          path: /tmp/tak-build
+
+      # --allow-empty, deliberately. TAK_RUNNER above embeds the GitHub image
+      # and Rust versions, so the runner class changes on routine image and
+      # toolchain updates, and the first run after each has no earlier point
+      # in its new series. Failing main for that would make a red perf check
+      # routine, which is the fastest way to teach everyone to ignore it. The
+      # misconfigurations the flag would otherwise hide are covered here:
+      # fetch-depth: 0 above, "Verify valgrind" in measure, and this job only
+      # runs after publish has written this commit's note. A step onto this
+      # commit still fails.
+      - name: Detect
+        run: |
+          set -o pipefail
+          # Artifacts drop the executable bit.
+          chmod +x /tmp/tak-build/tak
+          /tmp/tak-build/tak detect --allow-empty | tee -a "$GITHUB_STEP_SUMMARY"
