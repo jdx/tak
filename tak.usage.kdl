@@ -64,6 +64,27 @@ cmd history help="Show recorded history for a commit." {
     flag "-h --help" help="Print help" action=help builtin=#true
     arg "[REV]" help="Revision to read. Defaults to HEAD." default=HEAD
 }
+cmd log help="Show each benchmark's measurements over first-parent history." {
+    long_help #"""
+Show each benchmark's measurements over first-parent history.
+
+One table per benchmark and runner class, newest commit first, with the change in instruction count from the previous measurement. Commits with nothing recorded are skipped. `--html` writes the same history as a self-contained page of charts instead.
+"""#
+    flag "-n --limit" help="Most recent recorded commits to show." default="30" {
+        arg <LIMIT>
+    }
+    flag --bench help="Show only this benchmark. Repeatable." var=#true {
+        arg <NAME>
+    }
+    flag --html help="Write a self-contained HTML report to PATH instead of printing." {
+        arg <PATH>
+    }
+    flag --remote help="Remote to refresh notes from." default=origin {
+        arg <REMOTE>
+    }
+    flag "-h --help" help="Print help" action=help builtin=#true
+    arg "[REV]" help="Revision to walk back from. Defaults to HEAD." default=HEAD
+}
 cmd push help="Push recorded measurements to the remote." {
     flag --remote help="Remote to use for git-notes synchronization." default=origin {
         arg <REMOTE>
