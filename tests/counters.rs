@@ -387,6 +387,32 @@ fn allocation_runs_are_prepared_and_judged_like_counted_ones() {
     );
 }
 
+/// A subject that leaves a process running in the background, holding the
+/// stderr it inherited, must not hold up either valgrind path: the run is
+/// over when the subject exits. Reading stderr through a pipe waited for the
+/// background `sleep` to close it instead.
+#[cfg(unix)]
+#[test]
+fn a_background_process_holding_stderr_does_not_hang_valgrind_runs() {
+    if !valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let s = allocating(&["/bin/sh", "-c", "sleep 30 & exit 0"]);
+    let began = std::time::Instant::now();
+    measure::subject_allocations(&s, &Settings::default())
+        .expect("DHAT invocation failed")
+        .expect("no DHAT summary parsed");
+    measure::subject_instructions(&s, &Settings::default())
+        .expect("cachegrind invocation failed")
+        .expect("no I refs parsed");
+    let took = began.elapsed();
+    assert!(
+        took < std::time::Duration::from_secs(20),
+        "six valgrind runs took {took:?}; they waited for the background sleep"
+    );
+}
+
 /// End to end: `--allocations` on an ad-hoc command prints the counts and
 /// exports them. Without valgrind it says why they are missing, and the
 /// export carries no `allocations` key rather than zeros.

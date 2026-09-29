@@ -474,6 +474,27 @@ pub fn markdown(c: &Comparison, trend: &Trend, gates: &Gates, credit: bool) -> S
     out
 }
 
+/// A series' table cell: [`name`], plus the runner when `keys` holds the
+/// same bench and tool on another runner. Without it the two rows read
+/// identically, and nothing says which change was measured where.
+///
+/// Escaped for a table cell: bench, tool and runner names are free text —
+/// a runner class comes from the environment — and a bare `|` in any of
+/// them would split the row into extra columns, shifting every number after
+/// it under the wrong heading.
+fn row_name<'a>(key: &Key, keys: impl IntoIterator<Item = &'a Key>) -> String {
+    let (bench, tool, runner) = key;
+    let shared = keys
+        .into_iter()
+        .any(|(b, t, r)| b == bench && t == tool && r != runner);
+    let cell = if shared {
+        format!("{} on {runner}", name(bench, tool))
+    } else {
+        name(bench, tool)
+    };
+    cell.replace('|', "\\|")
+}
+
 /// How a series is named in a table row or a verdict: the bench, plus the tool
 /// when it is not the project itself.
 fn name(bench: &str, tool: &str) -> String {
@@ -534,7 +555,7 @@ fn table(c: &Comparison, trend: &Trend, gates: &Gates) -> String {
     for (key, (ins, wall)) in &series {
         let (bench, tool, _runner) = key;
         let gate = gates.get(bench, tool);
-        let mut cells = vec![name(bench, tool)];
+        let mut cells = vec![row_name(key, series.keys())];
         if any_trend {
             cells.push(
                 trend
@@ -695,8 +716,8 @@ fn allocations(c: &Comparison) -> String {
     out.push_str("\n|---|");
     out.push_str(&"---:|---:|".repeat(ALLOC_METRICS.len()));
     out.push('\n');
-    for ((bench, tool, _runner), metrics) in &series {
-        out.push_str(&format!("| {} |", name(bench, tool)));
+    for (key, metrics) in &series {
+        out.push_str(&format!("| {} |", row_name(key, series.keys())));
         for (metric, _) in ALLOC_METRICS {
             match metrics.get(metric) {
                 Some(ch) => out.push_str(&format!(
@@ -1401,6 +1422,44 @@ mod tests {
             "{md}"
         );
         assert!(md.contains("No instruction-count regression"), "{md}");
+    }
+
+    /// The same benchmark on two runner classes is two rows, and each has
+    /// to say which runner it is, in both tables. One runner needs no label.
+    #[test]
+    fn rows_name_their_runner_only_when_another_shares_the_series() {
+        let on = |runner| with_allocs(rec("a", runner, 1_000_000.0, 10.0), 3.0, 30.0, 20.0);
+        let both = [on("linux-x64"), on("linux-arm64")];
+        let md = markdown(&compare(&both, &both), &Trend::new(), &g(1.0), false);
+        for runner in ["linux-x64", "linux-arm64"] {
+            let rows = md
+                .lines()
+                .filter(|l| l.starts_with(&format!("| a on {runner} |")))
+                .count();
+            assert_eq!(
+                rows, 2,
+                "instructions and allocations rows for {runner}: {md}"
+            );
+        }
+
+        let one = [on("linux-x64")];
+        let md = markdown(&compare(&one, &one), &Trend::new(), &g(1.0), false);
+        assert!(
+            md.contains("| a |") && !md.contains(" on linux-x64 |"),
+            "{md}"
+        );
+    }
+
+    /// A `|` in a name is escaped, so it cannot add a column.
+    #[test]
+    fn a_pipe_in_a_row_name_is_escaped() {
+        let on = |runner| rec("a|b", runner, 1_000_000.0, 10.0);
+        let both = [on("ci|x64"), on("ci|arm64")];
+        let md = markdown(&compare(&both, &both), &Trend::new(), &g(1.0), false);
+        assert!(md.contains("| a\\|b on ci\\|x64 |"), "{md}");
+        let row = md.lines().find(|l| l.contains("ci\\|arm64")).unwrap();
+        let cells = row.replace("\\|", "").matches('|').count();
+        assert_eq!(cells, 6, "a benchmark cell and four numbers: {row}");
     }
 
     #[test]

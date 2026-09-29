@@ -220,7 +220,7 @@ fn untimed(step: &str, cmd: &[String], site: &Site) -> Result<Option<String>> {
     // A check like `git diff --quiet` says nothing on failure by design, so
     // silence is reported as the status alone. An unreadable file is treated
     // the same way: the status is the finding, the stderr only decoration.
-    let tail = stderr_tail(&reader).unwrap_or_default();
+    let tail = stderr_tail(&reader, UNTIMED_STDERR_TAIL).unwrap_or_default();
     let stderr = String::from_utf8_lossy(&tail);
     Ok(Some(match stderr.lines().rfind(|l| !l.trim().is_empty()) {
         Some(last) => format!("{step} `{bin}` exited with {status}: {}", last.trim()),
@@ -228,16 +228,16 @@ fn untimed(step: &str, cmd: &[String], site: &Site) -> Result<Option<String>> {
     }))
 }
 
-/// The last [`UNTIMED_STDERR_TAIL`] bytes of a step's stderr file.
+/// The last `cap` bytes of a step's stderr file.
 ///
 /// Read by position, not through the file cursor: the handle is a duplicate
 /// of the one a leftover process may still be writing through, and on Unix
 /// they share the cursor, so seeking would move where that process writes.
 /// Windows has no positional read that leaves the cursor alone; there a
 /// leftover writer may overwrite part of a file nobody reads again.
-fn stderr_tail(f: &std::fs::File) -> std::io::Result<Vec<u8>> {
+fn stderr_tail(f: &std::fs::File, cap: usize) -> std::io::Result<Vec<u8>> {
     let len = f.metadata()?.len();
-    let start = len.saturating_sub(UNTIMED_STDERR_TAIL as u64);
+    let start = len.saturating_sub(cap as u64);
     let mut buf = vec![0u8; (len - start) as usize];
     let mut filled = 0;
     while filled < buf.len() {
@@ -1268,6 +1268,42 @@ fn version_once(argv: &[String], site: &Site, timeout: Duration) -> Result<Strin
         .with_context(|| format!("`{bin}` printed nothing"))
 }
 
+/// How much of a valgrind run's stderr to keep. Its summary comes last, after
+/// whatever the subject wrote, so this is a tail; a megabyte holds any
+/// summary with room to spare, where keeping all of a chatty subject's
+/// stderr would not be bounded at all.
+const VALGRIND_STDERR_TAIL: usize = 1 << 20;
+
+/// Run a valgrind command to completion: its exit status, its pid, and the
+/// tail of its stderr, where the tool writes its summary.
+///
+/// stderr goes to an anonymous temporary file rather than a pipe, for the
+/// reason [`untimed`] gives: a subject that starts something in the
+/// background — `sleep 600 &`, a daemon, a build server — leaves it holding
+/// the write end, and reading a pipe to EOF then waits for that process
+/// rather than for the subject, hanging the run. The run is over when the
+/// process spawned here exits, and the summary is written by then.
+///
+/// The pid is the subject's: valgrind replaces itself with the tool rather
+/// than forking, so its `==PID==` prefix is the pid spawned here.
+fn under_valgrind(mut c: Command) -> Result<(std::process::ExitStatus, u32, String)> {
+    let err = tempfile::tempfile().context("failed to create a file for valgrind's stderr")?;
+    let reader = err
+        .try_clone()
+        .context("failed to create a file for valgrind's stderr")?;
+    let mut child = c
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(err))
+        .spawn()
+        .context("failed to run valgrind")?;
+    let pid = child.id();
+    let status = child.wait().context("failed to run valgrind")?;
+    let tail =
+        stderr_tail(&reader, VALGRIND_STDERR_TAIL).context("failed to read valgrind's stderr")?;
+    Ok((status, pid, String::from_utf8_lossy(&tail).into_owned()))
+}
+
 /// `ok` applies to the subject under valgrind: cachegrind exits with its
 /// client's code, and re-raises the signal a client died of.
 fn count(
@@ -1295,14 +1331,11 @@ fn count(
         .map(String::from)
         .to_vec();
         argv.extend_from_slice(cmd);
-        let mut c = command(&argv, site)?;
-        c.stdout(Stdio::null());
-        let out = c.output().context("failed to run valgrind")?;
+        let (status, _, stderr) = under_valgrind(command(&argv, site)?)?;
 
         // cachegrind writes its summary to stderr as e.g. "I refs:  48,349,132".
-        let stderr = String::from_utf8_lossy(&out.stderr);
         let bin = cmd.first().map(String::as_str).unwrap_or("(empty command)");
-        accepted(bin, out.status, ok, " under valgrind")?;
+        accepted(bin, status, ok, " under valgrind")?;
         match parse_irefs(&stderr) {
             Some(n) => samples.push(n),
             // Valgrind is installed but produced no summary — a real failure,
@@ -1460,18 +1493,8 @@ fn allocations(
             .map(String::from)
             .to_vec();
         argv.extend_from_slice(cmd);
-        let mut c = command(&argv, site)?;
-        let child = c
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("failed to run valgrind")?;
-        // Valgrind replaces itself with the tool rather than forking, so its
-        // `==PID==` prefix is the pid spawned here.
-        let pid = child.id();
-        let out = child.wait_with_output().context("failed to run valgrind")?;
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        accepted(bin, out.status, ok, " under valgrind")?;
+        let (status, pid, stderr) = under_valgrind(command(&argv, site)?)?;
+        accepted(bin, status, ok, " under valgrind")?;
         match parse_dhat(&stderr, pid) {
             Some(h) => runs.push(h),
             None => bail!(
