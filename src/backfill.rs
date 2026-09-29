@@ -529,6 +529,42 @@ pub fn version_of(tag: &str) -> &str {
     tag.strip_prefix('v').unwrap_or(tag)
 }
 
+/// Lines of a failed build's output to show. Enough for a compiler's error
+/// and the command that failed; the rest is progress noise.
+const BUILD_TAIL: usize = 20;
+
+/// Run `[build]`, anchored in a commit's checkout, and say how long it took.
+///
+/// Output is captured rather than streamed: twenty builds' worth of compiler
+/// progress buries the lines saying what was recorded, and when a build fails
+/// the error is at the end, which is what the failure shows.
+///
+/// The environment is tak's own plus `[build].env`, without `env_deny`
+/// applied. That setting keeps a token from changing what a *measured*
+/// command does; the build is not measured, and one fetching a private
+/// dependency may need exactly the variable it removes.
+pub fn run_build(build: &crate::config::Build) -> Result<std::time::Duration> {
+    let started = std::time::Instant::now();
+    let (program, args) = build.cmd.split_first().context("empty build command")?;
+    let mut cmd = Command::new(program);
+    cmd.args(args).envs(&build.env).stdin(Stdio::null());
+    if let Some(dir) = &build.dir {
+        cmd.current_dir(dir);
+    }
+    let out = cmd.output().with_context(|| match &build.dir {
+        Some(d) if !d.is_dir() => format!("{} does not exist at this commit", d.display()),
+        _ => format!("could not run {program}"),
+    })?;
+    if !out.status.success() {
+        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        let lines: Vec<&str> = text.lines().collect();
+        let tail = lines[lines.len().saturating_sub(BUILD_TAIL)..].join("\n");
+        bail!("build failed ({})\n{tail}", out.status);
+    }
+    Ok(started.elapsed())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

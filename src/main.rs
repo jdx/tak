@@ -133,11 +133,22 @@ enum Cmd {
     Artifact(Box<ArtifactArgs>),
     /// Teach plain `git fetch` about the notes ref.
     Init(RemoteArgs),
-    /// Benchmark published release binaries to bootstrap history.
+    /// Benchmark published release binaries, or build and benchmark past
+    /// commits, to bootstrap history.
     ///
-    /// A new adopter's first chart is empty. Rather than rebuilding a project at
-    /// a hundred historical commits, download what it already published.
+    /// By default, downloads the release binaries a project already published
+    /// and measures one command against each. With `--commits`, checks out
+    /// each first-parent commit in a range, runs tak.toml's `[build]` there,
+    /// and measures the benchmarks tak.toml declares.
     Backfill {
+        /// Build and measure the first-parent commits in RANGE, such as
+        /// `main~20..main`, instead of downloading releases.
+        #[usage(long, value_name = "RANGE")]
+        commits: Option<String>,
+        /// With --commits, measure commits that already have a record for
+        /// this runner class and benchmark.
+        #[usage(long)]
+        force: bool,
         /// Repository to pull releases from, as "owner/name". Defaults to the
         /// `origin` remote of the current repository.
         #[usage(long)]
@@ -150,16 +161,20 @@ enum Cmd {
         /// Defaults to `--version`, which every CLI answers cheaply.
         #[usage(arg, double_dash = "required")]
         args: Vec<String>,
-        /// Name to record measurements under.
-        #[usage(long, default = "release")]
-        bench: String,
-        /// Most recent releases to measure.
+        /// Name to record release measurements under; `release` if omitted.
+        /// With --commits, the one benchmark from tak.toml to measure.
+        #[usage(long)]
+        bench: Option<String>,
+        /// Most recent releases to measure. With --commits, most commits to
+        /// build, newest first, among those not already recorded.
         #[usage(long, default = "20")]
         limit: usize,
-        /// Timed runs per release.
-        #[usage(long, default = "10")]
-        runs: u32,
-        /// Measure but do not write to refs/notes/tak.
+        /// Timed runs per release; 10 if omitted. With --commits, overrides
+        /// tak.toml's `runs` for every benchmark.
+        #[usage(long)]
+        runs: Option<u32>,
+        /// Measure releases but do not write to refs/notes/tak. With
+        /// --commits, list what would be built, and build nothing.
         #[usage(long)]
         dry_run: bool,
     },
@@ -258,6 +273,11 @@ fn now_rfc3339() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    rfc3339(secs)
+}
+
+/// `secs` since the epoch as RFC 3339 in UTC, the one shape `ts` is written in.
+fn rfc3339(secs: u64) -> String {
     let days = secs / 86_400;
     let rem = secs % 86_400;
     // Civil-from-days (Howard Hinnant's algorithm), epoch shifted to 0000-03-01.
@@ -380,6 +400,71 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
         );
     };
 
+    let Planned { mut plans, skipped } = plan_declared(&cfg, &path, &opts)?;
+    print_skipped(&skipped);
+
+    // Commands are relative to tak.toml, not to wherever this was invoked.
+    let root = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    for (_, _, subjects) in &mut plans {
+        for s in subjects {
+            s.anchor(&root);
+        }
+    }
+
+    if plans.is_empty() {
+        if skipped.is_empty() {
+            println!("{} declares no benchmarks", path.display());
+            return Ok(());
+        }
+        // Asked to leave a result behind and producing none is a failure: a
+        // CI job recording or exporting must not look like it measured
+        // something when every benchmark was switched off.
+        // A dry run writes neither, so there is nothing for it to fail over.
+        if !opts.dry_run && (opts.record || opts.export_json.is_some()) {
+            bail!(
+                "nothing to {}: every selected benchmark or subject has a false `when`",
+                if opts.record { "record" } else { "export" }
+            );
+        }
+        println!("nothing to run: every selected benchmark or subject has a false `when`");
+        return Ok(());
+    }
+
+    if opts.dry_run {
+        println!("{}", path.display());
+        for (name, multi, subjects) in &plans {
+            print_plan(name, *multi, subjects, opts.no_counters);
+        }
+        return Ok(());
+    }
+
+    let seed = opts.seed.unwrap_or_else(random_seed);
+    let mut measured = Vec::new();
+    let mut failed = Vec::new();
+    for (name, multi, subjects) in &plans {
+        let (m, f) = measure_bench(name, subjects, *multi, seed, &opts, settings)?;
+        measured.extend(m);
+        failed.extend(f);
+    }
+    finish(measured, failed, &opts, seed, settings)
+}
+
+/// One benchmark ready to measure: its name, whether it compares several
+/// subjects, and those subjects.
+type BenchPlan = (String, bool, Vec<Subject>);
+
+/// What `tak.toml` asks to measure, with every layer applied and every
+/// template rendered, but not yet anchored to a directory: `tak run` anchors
+/// it at the directory holding `tak.toml`, `tak backfill --commits` at the
+/// same place in each commit's checkout.
+struct Planned {
+    plans: Vec<BenchPlan>,
+    /// Benchmarks, or subjects of one, that a false `when` switched off.
+    skipped: Vec<(String, Option<String>, String)>,
+}
+
+/// Resolve the benchmarks `opts` selects from `cfg`, found at `path`.
+fn plan_declared(cfg: &Config, path: &Path, opts: &RunOpts) -> Result<Planned> {
     let selected: Vec<_> = match &opts.bench {
         Some(name) => {
             let b = cfg.bench.get(name).with_context(|| {
@@ -397,9 +482,6 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
         }
         None => cfg.bench.iter().map(|(k, v)| (k.clone(), v)).collect(),
     };
-
-    // Commands are relative to tak.toml, not to wherever this was invoked.
-    let root = path.parent().map(Path::to_path_buf).unwrap_or_default();
 
     // Resolve and filter everything before measuring anything, so a mistyped
     // --subject fails now rather than after the benchmarks before it ran.
@@ -495,7 +577,6 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
                     range.end()
                 );
             }
-            s.anchor(&root);
             // An explicit flag beats the file; the file beats the default.
             s.runs = opts.runs.unwrap_or(s.runs);
             s.warmup = opts.warmup.unwrap_or(s.warmup);
@@ -524,49 +605,16 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
         );
     }
 
-    for (bench, subject, when) in &skipped {
+    Ok(Planned { plans, skipped })
+}
+
+fn print_skipped(skipped: &[(String, Option<String>, String)]) {
+    for (bench, subject, when) in skipped {
         let what = subject
             .as_ref()
             .map_or(bench.to_string(), |s| format!("{bench} ({s})"));
         eprintln!("  skipping {what}: `when` is false: {when}");
     }
-
-    if plans.is_empty() {
-        if skipped.is_empty() {
-            println!("{} declares no benchmarks", path.display());
-            return Ok(());
-        }
-        // Asked to leave a result behind and producing none is a failure: a
-        // CI job recording or exporting must not look like it measured
-        // something when every benchmark was switched off.
-        // A dry run writes neither, so there is nothing for it to fail over.
-        if !opts.dry_run && (opts.record || opts.export_json.is_some()) {
-            bail!(
-                "nothing to {}: every selected benchmark or subject has a false `when`",
-                if opts.record { "record" } else { "export" }
-            );
-        }
-        println!("nothing to run: every selected benchmark or subject has a false `when`");
-        return Ok(());
-    }
-
-    if opts.dry_run {
-        println!("{}", path.display());
-        for (name, multi, subjects) in &plans {
-            print_plan(name, *multi, subjects, opts.no_counters);
-        }
-        return Ok(());
-    }
-
-    let seed = opts.seed.unwrap_or_else(random_seed);
-    let mut measured = Vec::new();
-    let mut failed = Vec::new();
-    for (name, multi, subjects) in &plans {
-        let (m, f) = measure_bench(name, subjects, *multi, seed, &opts, settings)?;
-        measured.extend(m);
-        failed.extend(f);
-    }
-    finish(measured, failed, &opts, seed, settings)
 }
 
 /// A random seed below 2^53, so it survives any JSON reader — JavaScript and
@@ -715,22 +763,7 @@ fn finish(
         // verdicts can vouch for this run's timings, so there is no way to
         // clear it but a run whose checks all pass. The export above is still
         // written: it carries the verdicts.
-        let failing: Vec<String> = measured
-            .iter()
-            .filter(|m| m.samples.passed() < m.samples.checks.len())
-            .map(|m| {
-                let label = if m.subject.name == SELF_TOOL {
-                    m.bench.clone()
-                } else {
-                    format!("{} ({})", m.bench, m.subject.name)
-                };
-                format!(
-                    "{label} failed {} of {}",
-                    m.samples.checks.len() - m.samples.passed(),
-                    m.samples.checks.len()
-                )
-            })
-            .collect();
+        let failing = failed_checks(&measured);
         if !failing.is_empty() {
             eprintln!(
                 "
@@ -743,6 +776,26 @@ fn finish(
         record_all(&records)?;
     }
     Ok(())
+}
+
+/// Every measured subject with a failed check, labelled for a message.
+fn failed_checks(measured: &[Measured]) -> Vec<String> {
+    measured
+        .iter()
+        .filter(|m| m.samples.passed() < m.samples.checks.len())
+        .map(|m| {
+            let label = if m.subject.name == SELF_TOOL {
+                m.bench.clone()
+            } else {
+                format!("{} ({})", m.bench, m.subject.name)
+            };
+            format!(
+                "{label} failed {} of {}",
+                m.samples.checks.len() - m.samples.passed(),
+                m.samples.checks.len()
+            )
+        })
+        .collect()
 }
 
 /// Append every record in one write, so a run is stored whole or not at all.
@@ -1324,6 +1377,347 @@ fn cmd_backfill(
     Ok(())
 }
 
+/// `tak backfill --commits`'s options, gathered so they travel as one value.
+struct CommitBackfill {
+    range: String,
+    bench: Option<String>,
+    limit: usize,
+    runs: Option<u32>,
+    force: bool,
+    dry_run: bool,
+}
+
+/// A commit in the range, and the benchmarks it still needs.
+struct Pending {
+    sha: String,
+    subject: String,
+    /// Committed at, seconds since the epoch.
+    time: u64,
+    /// Benchmarks with no record for this runner class yet, or every
+    /// selected one under `--force`. Empty means nothing to do.
+    benches: Vec<String>,
+}
+
+/// How far one commit got.
+enum Outcome {
+    Recorded(usize),
+    BuildFailed,
+    NotRecorded,
+}
+
+/// Build and measure past commits, recording each to its own note.
+///
+/// The benchmarks are the *current* tak.toml's, run inside each old checkout.
+/// Using each commit's own tak.toml instead would change what a series
+/// measures whenever someone edited a benchmark, and the step that edit
+/// produced would read as a change in the code. The cost is that an old tree
+/// may lack a fixture or path the current file names; that commit is then
+/// reported and left unrecorded rather than measured against the wrong thing.
+fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let Some((path, cfg)) = Config::find(&cwd)? else {
+        bail!(
+            "no {} found in {} or any parent — --commits measures the benchmarks it declares",
+            config::FILE_NAME,
+            cwd.display()
+        );
+    };
+    let Some(build) = cfg.build()? else {
+        bail!(
+            "{} has no [build]. --commits checks each commit out fresh, so it has \
+             to be built before it can be measured:\n\n\
+             \x20   [build]\n\
+             \x20   cmd = [\"cargo\", \"build\", \"--release\"]\n\n\
+             A project with nothing to build can declare cmd = [\"true\"].",
+            path.display()
+        );
+    };
+    let opts = RunOpts {
+        bench: o.bench.clone(),
+        runs: o.runs.map(Runs::Fixed),
+        warmup: None,
+        no_counters: false,
+        record: true,
+        no_progress: false,
+        subjects: Vec::new(),
+        seed: None,
+        export_json: None,
+        config: None,
+        dry_run: o.dry_run,
+    };
+    // Everything resolved and rendered before the first checkout, so a
+    // mistake in tak.toml fails in a second rather than after a build.
+    let Planned { plans, skipped } = plan_declared(&cfg, &path, &opts)?;
+    print_skipped(&skipped);
+    if plans.is_empty() {
+        bail!(
+            "nothing to backfill: {}",
+            if skipped.is_empty() {
+                "tak.toml declares no benchmarks"
+            } else {
+                "every selected benchmark or subject has a false `when`"
+            }
+        );
+    }
+
+    // Where tak.toml sits within the repository, so the same place can be
+    // found in each checkout: relative programs, `dir` and the build are all
+    // anchored there, exactly as `tak run` anchors them in this one.
+    let config_dir = path.parent().context("tak.toml has no parent directory")?;
+    let top = tak_cli::worktree::toplevel(config_dir)?;
+    let rel = config_dir
+        .canonicalize()?
+        .strip_prefix(top.canonicalize()?)
+        .map(Path::to_path_buf)
+        .with_context(|| {
+            format!(
+                "{} is outside the repository at {}",
+                path.display(),
+                top.display()
+            )
+        })?;
+
+    let commits = tak_cli::worktree::first_parent_commits(&o.range)?;
+    if commits.is_empty() {
+        println!("no commits in {}", o.range);
+        return Ok(());
+    }
+    // So what CI already pushed counts as recorded. Without it a backfill
+    // re-measures the commits the main-branch workflow did, and those get a
+    // second point each. Offline or without a remote, the local ref decides.
+    let _ = notes::fetch("origin");
+
+    let runner = runner_class(settings);
+    let mut pending = Vec::with_capacity(commits.len());
+    for sha in commits {
+        let have: std::collections::BTreeSet<String> = notes::read(None, &sha)?
+            .into_iter()
+            .filter(|r| r.runner == runner)
+            .map(|r| r.bench)
+            .collect();
+        let benches = plans
+            .iter()
+            .map(|(name, _, _)| name.clone())
+            .filter(|name| o.force || !have.contains(name))
+            .collect();
+        let (time, subject) = tak_cli::worktree::describe(&sha)?;
+        pending.push(Pending {
+            sha,
+            subject,
+            time,
+            benches,
+        });
+    }
+    let recorded_before = pending.iter().filter(|p| p.benches.is_empty()).count();
+    // Newest first, and `--limit` counts builds rather than commits, so the
+    // same command run again carries on from where the last one stopped.
+    let (todo, beyond): (Vec<&Pending>, Vec<&Pending>) = {
+        let needed: Vec<&Pending> = pending.iter().filter(|p| !p.benches.is_empty()).collect();
+        let split = needed.len().min(o.limit);
+        (needed[..split].to_vec(), needed[split..].to_vec())
+    };
+
+    println!(
+        "{} commit(s) in {}, first parent only, runner {runner}",
+        pending.len(),
+        o.range
+    );
+    println!("build: {}", shell_words(&build.cmd));
+
+    if o.dry_run {
+        println!();
+        let all = plans.len();
+        for p in &pending {
+            let status = if p.benches.is_empty() {
+                "recorded".to_string()
+            } else if beyond.iter().any(|b| b.sha == p.sha) {
+                "beyond --limit".to_string()
+            } else if p.benches.len() == all {
+                "would build".to_string()
+            } else {
+                format!("would build ({})", p.benches.join(", "))
+            };
+            println!("  {}  {status:<16}  {}", &p.sha[..12], p.subject);
+        }
+        println!("\n  dry run — nothing built or written");
+        return Ok(());
+    }
+
+    // Owner-only for the reason release backfill's is: the build writes
+    // executables here that tak then runs. Every checkout lives inside it.
+    let scratch = backfill_workdir()?;
+    let hooks = scratch.path().join("hooks");
+    std::fs::create_dir(&hooks).context("could not create an empty hooks directory")?;
+    tak_cli::worktree::prune();
+    tak_cli::worktree::clean_up_on_interrupt(scratch.path())?;
+
+    let seed = random_seed();
+    let (mut recorded, mut build_failed, mut not_recorded) = (0usize, Vec::new(), Vec::new());
+    for p in &todo {
+        let short = &p.sha[..12];
+        println!("\n{short}  {}", p.subject);
+        match backfill_commit(
+            p,
+            &build,
+            &plans,
+            &rel,
+            scratch.path(),
+            &hooks,
+            seed,
+            &opts,
+            settings,
+        )? {
+            Outcome::Recorded(n) => {
+                println!("  recorded {n} measurement(s)");
+                recorded += 1;
+            }
+            Outcome::BuildFailed => build_failed.push(short),
+            Outcome::NotRecorded => not_recorded.push(short),
+        }
+    }
+
+    println!(
+        "\n  recorded {recorded} commit(s) → {}; {recorded_before} already recorded",
+        notes::NOTES_REF
+    );
+    if !build_failed.is_empty() {
+        println!("  build failed: {}", build_failed.join(", "));
+    }
+    if !not_recorded.is_empty() {
+        println!("  not recorded: {}", not_recorded.join(", "));
+    }
+    if !beyond.is_empty() {
+        println!(
+            "  {} more commit(s) beyond --limit {}; run again to continue",
+            beyond.len(),
+            o.limit
+        );
+    }
+    if recorded > 0 {
+        println!("  push with: tak push");
+    }
+    // A range where some old commits no longer build is normal and still a
+    // success, and so is a second run that only retries those. One that has
+    // no record at all to show for the range is not: a CI job seeding
+    // history must not pass having seeded none.
+    let failed = !(build_failed.is_empty() && not_recorded.is_empty());
+    if recorded == 0 && recorded_before == 0 && failed {
+        bail!("no commit in {} was recorded", o.range);
+    }
+    Ok(())
+}
+
+/// Check out, build and measure one commit, and record it whole or not at
+/// all. `Err` only for what would fail every later commit too, such as
+/// being unable to write the note.
+#[allow(clippy::too_many_arguments)]
+fn backfill_commit(
+    p: &Pending,
+    build: &config::Build,
+    plans: &[BenchPlan],
+    rel: &Path,
+    scratch: &Path,
+    hooks: &Path,
+    seed: u64,
+    opts: &RunOpts,
+    settings: &Settings,
+) -> Result<Outcome> {
+    let wt = match tak_cli::worktree::Worktree::add(&scratch.join(&p.sha[..12]), &p.sha, hooks) {
+        Ok(wt) => wt,
+        Err(e) => {
+            println!("  not recorded — {e:#}");
+            return Ok(Outcome::NotRecorded);
+        }
+    };
+    let root = wt.path().join(rel);
+
+    let mut build = build.clone();
+    build.anchor(&root);
+    match backfill::run_build(&build) {
+        Ok(took) => println!("  built in {:.1}s", took.as_secs_f64()),
+        Err(e) => {
+            println!("  build failed — skipped");
+            for line in format!("{e:#}").lines() {
+                println!("    {line}");
+            }
+            return Ok(Outcome::BuildFailed);
+        }
+    }
+
+    let mut records = Vec::new();
+    for (name, multi, subjects) in plans.iter().filter(|(n, _, _)| p.benches.contains(n)) {
+        let mut subjects = subjects.clone();
+        for s in &mut subjects {
+            s.anchor(&root);
+        }
+        let problem = match missing_input(&subjects, &root) {
+            Some(missing) => Some(missing),
+            None => match measure_bench(name, &subjects, *multi, seed, opts, settings) {
+                Err(e) => Some(format!("{e:#}")),
+                // The same rules `tak run --record` applies: a missing
+                // subject or a failed check would leave a set in history
+                // that looks complete and is not.
+                Ok((_, failed)) if !failed.is_empty() => {
+                    Some(format!("subject(s) failed: {}", failed.join(", ")))
+                }
+                Ok((measured, _)) => {
+                    let failing = failed_checks(&measured);
+                    if failing.is_empty() {
+                        records.extend(measured.into_iter().map(|m| m.record));
+                        None
+                    } else {
+                        Some(format!("check failed: {}", failing.join(", ")))
+                    }
+                }
+            },
+        };
+        if let Some(problem) = problem {
+            // Nothing from this commit is written, including benchmarks that
+            // did measure: a commit with half its benchmarks looks, later,
+            // exactly like one where the rest were never declared.
+            println!("  not recorded — {name}: {problem}");
+            return Ok(Outcome::NotRecorded);
+        }
+    }
+
+    // The commit's own date, as release backfill uses the release's: this
+    // is when the code existed, which is what a series is plotted against.
+    let ts = rfc3339(p.time);
+    for r in &mut records {
+        r.ts = ts.clone();
+    }
+    notes::append(&p.sha, &records)?;
+    Ok(Outcome::Recorded(records.len()))
+}
+
+/// A `dir` or program path the current tak.toml names that this checkout
+/// does not have, described for the user.
+///
+/// Only for subjects without a `setup`, which may be what creates them.
+/// Without this, the failure surfaces as a spawn error that says nothing
+/// about the file having been read from a newer commit than the tree.
+fn missing_input(subjects: &[Subject], root: &Path) -> Option<String> {
+    let shown = |p: &Path| p.strip_prefix(root).unwrap_or(p).display().to_string();
+    for s in subjects.iter().filter(|s| s.setup.is_none()) {
+        if let Some(d) = &s.dir
+            && !d.is_dir()
+        {
+            return Some(format!(
+                "`dir` {} does not exist at this commit (tak.toml is read from the current checkout)",
+                shown(d)
+            ));
+        }
+        let program = Path::new(&s.cmd[0]);
+        if program.is_absolute() && program.starts_with(root) && !program.exists() {
+            return Some(format!(
+                "{} does not exist at this commit after the build",
+                shown(program)
+            ));
+        }
+    }
+    None
+}
+
 /// Resolve settings from the CLI layer, the environment, and `tak.toml`.
 ///
 /// Called only by the commands that measure something or report settings.
@@ -1499,6 +1893,8 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Backfill {
+            commits,
+            force,
             repo,
             bin,
             args,
@@ -1506,16 +1902,49 @@ fn main() -> Result<()> {
             limit,
             runs,
             dry_run,
-        } => cmd_backfill(
-            repo,
-            bin,
-            args,
-            bench,
-            limit,
-            runs,
-            dry_run,
-            &resolve_settings(&overrides)?,
-        ),
+        } => {
+            let settings = resolve_settings(&overrides)?;
+            match commits {
+                Some(range) => {
+                    // Refused rather than ignored: each names something a
+                    // release backfill downloads, and a commit backfill
+                    // silently measuring tak.toml's benchmarks instead would
+                    // record a different series from the one asked for.
+                    if repo.is_some() || bin.is_some() || !args.is_empty() {
+                        bail!(
+                            "--repo, --bin and arguments after `--` select release binaries; \
+                             --commits measures the benchmarks tak.toml declares"
+                        );
+                    }
+                    cmd_backfill_commits(
+                        CommitBackfill {
+                            range,
+                            bench,
+                            limit,
+                            runs,
+                            force,
+                            dry_run,
+                        },
+                        &settings,
+                    )
+                }
+                None => {
+                    if force {
+                        bail!("--force only applies with --commits");
+                    }
+                    cmd_backfill(
+                        repo,
+                        bin,
+                        args,
+                        bench.unwrap_or_else(|| "release".to_string()),
+                        limit,
+                        runs.unwrap_or(10),
+                        dry_run,
+                        &settings,
+                    )
+                }
+            }
+        }
         Cmd::Compare {
             base,
             rev,

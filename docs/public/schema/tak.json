@@ -24,6 +24,41 @@
         "$ref": "#/definitions/subject"
       }
     },
+    "build": {
+      "description": "How to build the project in a fresh checkout of a past commit, for `tak backfill --commits`. Not run by `tak run`. Values are not templates.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cmd"],
+      "properties": {
+        "cmd": {
+          "description": "The build command: a list of arguments, or a string split on whitespace. Never run through a shell. A program path containing `/` is relative to tak.toml's directory in the checkout.",
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            {
+              "type": "string",
+              "minLength": 1
+            }
+          ]
+        },
+        "dir": {
+          "description": "Directory to build in, relative to tak.toml's directory in the checkout. Must stay inside the checkout.",
+          "type": "string"
+        },
+        "env": {
+          "description": "Variables set for the build, on top of tak's own environment.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "env": {
       "type": "object",
       "additionalProperties": false,

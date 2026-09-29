@@ -19,3 +19,4 @@ pub mod progress;
 pub mod record;
 pub mod settings;
 pub mod template;
+pub mod worktree;

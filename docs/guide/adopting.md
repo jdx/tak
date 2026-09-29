@@ -143,8 +143,9 @@ jobs:
 Keep one runner class for the series and serialise writers. `tak push` retries by fetching and
 merging if another writer wins the race, but serialisation avoids unnecessary retries. Do not
 cancel an in-progress main run: that would leave a hole in the push-tip history. A push that
-contains multiple commits records only its final commit; use one commit per push if every
-intermediate commit must have a measurement.
+contains multiple commits records only its final commit. Use one commit per push if every
+intermediate commit must have a measurement, or fill the gap afterwards with
+[`tak backfill --commits`](#backfill-commits-by-building-them).
 
 The hosted runner label alone does not capture every input. If its image, compiler, standard
 library, build profile, or CPU class changes, update `[runner].class` to start a new series.
@@ -277,6 +278,77 @@ available, limit backfill to binaries produced by a release pipeline you trust. 
 shows the separate measurement and publishing jobs; it does not provide an execution sandbox.
 `env_deny` only changes the binary's direct environment; it cannot stop hostile code from
 inspecting other same-user processes or files and is not a substitute for that isolation.
+
+## Backfill commits by building them
+
+`tak backfill --commits RANGE` builds and measures past commits instead of downloading
+releases. Use it to seed a baseline before the first pull-request gate, or to fill in the
+commits of a multi-commit push that recorded only its tip. Declare the build in
+[`[build]`](/guide/configuration#building-past-commits):
+
+```toml
+[build]
+cmd = ["cargo", "build", "--release", "--locked"]
+
+[bench.startup]
+cmd = ["./target/release/mycli", "--help"]
+```
+
+Check what would happen first. A dry run lists the commits and builds nothing:
+
+```sh
+tak backfill --commits main~20..main --dry-run
+tak backfill --commits main~20..main
+tak push
+```
+
+For each first-parent commit in the range, newest first, tak:
+
+1. checks the commit out into a detached `git worktree` under a private temporary directory,
+   with the repository's hooks turned off;
+2. runs `[build]` there;
+3. runs the benchmarks declared in the **current** `tak.toml`, anchored at the same place in
+   that checkout, so `./target/release/mycli` is the binary built from that commit; and
+4. appends the results to that commit's note, with the commit's date as `ts`.
+
+The range is whatever `git rev-list` accepts as one argument. `A..B` includes `B` and excludes
+`A`, so `main~20..main` is the last twenty commits. Merged branches are not walked, because
+their commits were never points on the main branch's timeline. A commit that already has a
+record for this runner class and benchmark is skipped. Pass `--force` to measure it again,
+which adds a second record rather than replacing the first. `--limit` (default 20) caps how
+many commits are built, so running the same command again continues where the last run
+stopped. `--bench NAME` limits the backfill to one declared benchmark, and `--runs N` overrides
+the file's run count. tak fetches `refs/notes/tak` from `origin` first, so commits that CI
+already recorded are skipped rather than measured twice.
+
+Each commit is recorded whole or not at all. A commit whose build fails is reported and
+skipped, and the rest of the range continues; old commits that no longer build are normal. A
+commit where any benchmark fails, a subject is dropped, or a check fails records nothing, not
+even the benchmarks that did measure. The command fails only when the range ends with no
+record at all. The checkouts are removed when tak finishes, fails, or is stopped with Ctrl-C
+or SIGTERM. On Windows, and if a subject's `version_cmd` is running when the signal arrives,
+an interrupted run can leave its checkout in the temporary directory; the next run clears
+git's record of it.
+
+The benchmarks come from the current `tak.toml`, not each commit's own copy, so a series keeps
+measuring the same thing when someone edits a benchmark. The cost is that an old tree may lack
+a fixture or path the current file names. That commit is then reported and left unrecorded.
+To measure old commits against a fixture they did not contain, create it in a `setup`, or point
+`dir` at an absolute path outside the repository with a [template](/guide/configuration#templates)
+such as `{{ env.FIXTURES }}`.
+
+Backfilled numbers are only comparable with the ones CI records if they are produced the same
+way. That means the same runner class, compiler, build profile, flags and lockfile policy as
+the main-branch workflow. Run the backfill on the runner class that records main, with the
+`[runner].class` it uses, and build with the same command the main-branch workflow runs.
+If `[build]` differs from how CI builds, record the backfill under a different benchmark or
+runner class rather than mixing the two into one series. A step between the backfilled points
+and the first CI point is a sign they were not built identically.
+
+Every commit is built from a clean checkout. That is slow for a compiled project unless the
+build tool caches outside the tree, for example with `sccache`. Submodules are not initialised
+unless the build does it. As with release backfill, tak runs whatever those commits build, so
+backfill only history you trust, and run it without credentials the build does not need.
 
 ## Check the rollout
 
