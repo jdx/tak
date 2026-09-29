@@ -260,6 +260,71 @@ fn a_subject_printing_valgrinds_words_keeps_its_count() {
     assert_eq!(p.total, kept.min);
 }
 
+/// `TAK_TOOL` renames a single command's series, and its profile with it, so
+/// two tools measured into one directory are two files that each say which
+/// series they belong to.
+#[cfg(unix)]
+#[test]
+fn a_single_command_profile_is_named_by_its_series() {
+    if !valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    for tool in ["one", "two"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_tak"))
+            .args(["run", "--no-progress", "--runs", "1", "--warmup", "0"])
+            .args([
+                "--bench",
+                "b",
+                "--profile-dir",
+                "p",
+                "--",
+                "/bin/echo",
+                tool,
+            ])
+            .current_dir(dir.path())
+            .env("TAK_TOOL", tool)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", text(&out));
+    }
+    for tool in ["one", "two"] {
+        let p = Profile::load(&dir.path().join(format!("p/b/{tool}.cachegrind.out"))).unwrap();
+        assert_eq!(p.origin().unwrap().subject, tool);
+        assert_eq!(p.cmd.as_deref(), Some(format!("/bin/echo {tool}").as_str()));
+    }
+    assert!(!dir.path().join("p/b/self.cachegrind.out").exists());
+}
+
+/// A `TAK_TOOL` that cannot be a file name is refused before anything runs,
+/// like a benchmark name.
+#[test]
+fn a_tak_tool_that_is_a_path_is_refused_up_front() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_tak"))
+        .args([
+            "run",
+            "--profile-dir",
+            "p",
+            "--",
+            "/bin/sh",
+            "-c",
+            "touch ran",
+        ])
+        .current_dir(dir.path())
+        .env("TAK_TOOL", "../escape")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        text(&out).contains("not a plain file name"),
+        "{}",
+        text(&out)
+    );
+    assert!(!dir.path().join("ran").exists(), "nothing was measured");
+}
+
 #[cfg(unix)]
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")

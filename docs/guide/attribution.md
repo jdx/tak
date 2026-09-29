@@ -27,9 +27,10 @@ Each subject whose instructions were counted gets one file:
 profiles/<bench>/<subject>.cachegrind.out
 ```
 
-A single-command benchmark's subject is `self`. Benchmark and subject names must be usable as
-file names: a name containing `/`, `\` or a control character, or one that is `.` or `..`,
-stops the run before anything is measured.
+A single-command benchmark's subject is the name it is recorded under: `self`, or `TAK_TOOL`
+when that is set. Benchmark and subject names must be usable as file names: a name containing
+`/`, `\` or a control character, or one that is `.` or `..`, stops the run before anything is
+measured.
 
 The file is cachegrind's own output format with `desc: tak runner: …`, `desc: tak commit: …`,
 `desc: tak bench: …` and `desc: tak subject: …` lines added at the top, so `cg_annotate` and

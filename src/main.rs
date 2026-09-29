@@ -336,7 +336,7 @@ struct Measured {
 /// benchmarks before it.
 fn check_profile_paths<'a>(
     opts: &RunOpts,
-    plans: impl IntoIterator<Item = (&'a str, &'a [Subject])>,
+    plans: impl IntoIterator<Item = (&'a str, bool, &'a [Subject])>,
 ) -> Result<()> {
     let Some(dir) = &opts.profile_dir else {
         return Ok(());
@@ -346,12 +346,28 @@ fn check_profile_paths<'a>(
             "--profile-dir keeps the profiles of instruction counts, and --no-counters turns them off"
         );
     }
-    for (bench, subjects) in plans {
+    for (bench, multi, subjects) in plans {
         for s in subjects {
-            tak_cli::profile::path_for(dir, bench, &s.name)?;
+            tak_cli::profile::path_for(dir, bench, &series_tool(multi, s))?;
         }
     }
     Ok(())
+}
+
+/// The name a subject is recorded under: its own in a multi-subject
+/// benchmark, and `TAK_TOOL` or `self` for a single command.
+///
+/// TAK_TOOL only ever renames the single-command series. Keyed on the
+/// benchmark's shape rather than the subject's name, so a declared subject can
+/// never be recorded as anything but itself. Profiles are named by it too, so
+/// two `TAK_TOOL`s measured into one `--profile-dir` are two files, not one
+/// overwriting the other under `self`.
+fn series_tool(multi: bool, s: &Subject) -> String {
+    if multi {
+        s.name.clone()
+    } else {
+        std::env::var("TAK_TOOL").unwrap_or_else(|_| SELF_TOOL.into())
+    }
 }
 
 fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
@@ -389,7 +405,10 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         counters: true,
         ok_exit_codes: config::DEFAULT_OK_EXIT_CODES.to_vec(),
     };
-    check_profile_paths(&opts, [(bench.as_str(), std::slice::from_ref(&subject))])?;
+    check_profile_paths(
+        &opts,
+        [(bench.as_str(), false, std::slice::from_ref(&subject))],
+    )?;
     let seed = opts.seed.unwrap_or_else(random_seed);
     if opts.dry_run {
         print_plan(
@@ -604,7 +623,7 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
         &opts,
         plans
             .iter()
-            .map(|(name, _, subjects)| (name.as_str(), subjects.as_slice())),
+            .map(|(name, multi, subjects)| (name.as_str(), *multi, subjects.as_slice())),
     )?;
     if opts.dry_run {
         println!("{}", path.display());
@@ -764,14 +783,14 @@ fn finish(
         let mut written = 0usize;
         for m in &measured {
             if let Some(raw) = &m.profile {
-                let dest = tak_cli::profile::path_for(dir, &m.bench, &m.subject.name)?;
+                // Named, like the origin inside it, by the series the record
+                // uses — what the notes are looked up by, and for a single
+                // command that may be TAK_TOOL rather than `self`.
+                let dest = tak_cli::profile::path_for(dir, &m.bench, &m.record.tool)?;
                 let origin = tak_cli::profile::Origin {
                     runner: runner.clone(),
                     commit: commit.clone(),
                     bench: m.bench.clone(),
-                    // The series name the record uses, which is what the notes
-                    // are looked up by; for a single command that may be
-                    // TAK_TOOL rather than `self`.
                     subject: m.record.tool.clone(),
                 };
                 tak_cli::profile::write(&dest, raw, &origin)?;
@@ -993,14 +1012,7 @@ fn measure_bench(
             println!("  {:<16} {:>14}", "checks", format!("{passed}/{total}"));
         }
 
-        // TAK_TOOL only ever renames the single-command series. Keyed on the
-        // benchmark's shape rather than the subject's name, so a declared
-        // subject can never be recorded as anything but itself.
-        let tool = if multi {
-            s.name.clone()
-        } else {
-            std::env::var("TAK_TOOL").unwrap_or_else(|_| SELF_TOOL.into())
-        };
+        let tool = series_tool(multi, s);
         measured.push(Measured {
             bench: bench.to_string(),
             subject: s.clone(),
