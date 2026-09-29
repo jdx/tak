@@ -289,3 +289,68 @@ fn a_shallow_checkout_is_named_as_the_reason() {
     let md = stdout(&tak(d, &["detect"]));
     assert!(!md.contains("shallow"), "{md}");
 }
+
+/// A previous recording further back than the scan limit is never reached.
+/// The walk must say it stopped at the limit rather than report the head's
+/// series as brand new, and the empty comparison must still fail.
+#[test]
+fn hitting_the_scan_limit_is_named_as_the_reason() {
+    use std::io::Write;
+
+    let dir = tempfile::Builder::new()
+        .prefix("tak-detect-limit-")
+        .tempdir()
+        .unwrap();
+    let d = dir.path();
+    git(d, &["init", "--quiet", "-b", "main"]);
+
+    // Two more commits than the limit, so the oldest lies past it. fast-import
+    // builds them in one process; ten thousand `git commit` calls would not.
+    let total = tak_cli::detect::SCAN_LIMIT + 2;
+    let mut stream = String::new();
+    for i in 1..=total {
+        stream.push_str(&format!(
+            "commit refs/heads/main\nmark :{i}\ncommitter t <t@example.com> {i} +0000\ndata 2\nc\n"
+        ));
+        if i > 1 {
+            stream.push_str(&format!("from :{}\n", i - 1));
+        }
+        stream.push('\n');
+    }
+    let mut child = Command::new("git")
+        .args(["fast-import", "--quiet"])
+        .current_dir(d)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stream.as_bytes())
+        .unwrap();
+    assert!(child.wait().unwrap().success(), "fast-import failed");
+    git(d, &["reset", "--quiet", "--hard", "main"]);
+
+    let root = git(d, &["rev-list", "--max-parents=0", "HEAD"]);
+    for (rev, value) in [(root.as_str(), 1000), ("HEAD", 2000)] {
+        git(
+            d,
+            &[
+                "notes",
+                "--ref",
+                "refs/notes/tak",
+                "add",
+                "-m",
+                &line("startup", "gha", value),
+                rev,
+            ],
+        );
+    }
+
+    let out = tak(d, &["detect"]);
+    let md = stdout(&out);
+    assert!(!out.status.success(), "nothing was compared: {md}");
+    assert!(md.contains("limit of 10,000 first-parent commits"), "{md}");
+    assert!(!md.contains("This checkout is shallow"), "{md}");
+}

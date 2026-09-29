@@ -31,8 +31,47 @@ use crate::record::Record;
 /// A bound rather than the whole history because `rev-list` output is held in
 /// memory and a monorepo trunk can run to hundreds of thousands of commits. Ten
 /// thousand is far more than any window needs unless recordings are extremely
-/// sparse, and still lists in tens of milliseconds.
-const SCAN_LIMIT: usize = 10_000;
+/// sparse, and still lists in tens of milliseconds. Reaching it before the
+/// window fills is reported as a [`Cutoff`], never passed over silently.
+pub const SCAN_LIMIT: usize = 10_000;
+
+/// Why a walk stopped before its window filled, when the reason is the walk's
+/// and not the project's.
+///
+/// Either way a recording further back exists, or may exist, and was never
+/// compared. Without saying so, a series whose previous point lay just past
+/// the boundary reads as brand new, and a step onto the head goes unchecked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cutoff {
+    /// The checkout is a shallow clone and the walk reached its boundary.
+    Shallow,
+    /// The walk covered [`SCAN_LIMIT`] first-parent commits.
+    ScanLimit,
+}
+
+/// Decide whether the walk was cut short, and by what.
+///
+/// `listed` is how many commits `rev-list` returned when asked for at most
+/// `limit`. Returning exactly `limit` means it stopped because it was told to,
+/// so history continues past the walk. Fewer means it reached the end of the
+/// history this checkout has — the root, or a shallow clone's boundary, which
+/// only `shallow` can tell apart. A window that filled was cut short by
+/// neither, however deep the history.
+pub fn cutoff(
+    recorded: usize,
+    window: usize,
+    listed: usize,
+    limit: usize,
+    shallow: impl FnOnce() -> Result<bool>,
+) -> Result<Option<Cutoff>> {
+    if recorded >= window {
+        return Ok(None);
+    }
+    if listed >= limit {
+        return Ok(Some(Cutoff::ScanLimit));
+    }
+    Ok(shallow()?.then_some(Cutoff::Shallow))
+}
 
 /// One series' reduced value at one commit.
 #[derive(Debug, Clone, Copy)]
@@ -97,9 +136,9 @@ pub struct Detection {
     /// Measured earlier in the window and not at the head.
     pub missing_at_head: Vec<Key>,
     pub trend: Trend,
-    /// The walk hit a shallow clone's boundary before the window filled, so a
-    /// short history here may be the checkout's rather than the project's.
-    pub shallow_cutoff: bool,
+    /// Set when the walk stopped before the window filled for a reason of its
+    /// own, so a short history here may be the walk's rather than the project's.
+    pub cutoff: Option<Cutoff>,
     /// Whether an empty comparison was accepted (`--allow-empty`) rather than
     /// failed. Carried here so the report and the exit status cannot disagree.
     pub allow_empty: bool,
@@ -173,8 +212,8 @@ pub type Walk = Vec<(String, Vec<Record>)>;
 
 /// Walk `head`'s first-parent history and read the notes along it.
 ///
-/// Returns the walk oldest first, plus whether a shallow checkout cut it short.
-pub fn gather(head: &str, window: usize) -> Result<(Walk, bool)> {
+/// Returns the walk oldest first, plus what cut it short, if anything did.
+pub fn gather(head: &str, window: usize) -> Result<(Walk, Option<Cutoff>)> {
     let commits = notes::rev_list(head, SCAN_LIMIT)?;
     let annotated = notes::annotated()?;
     let chosen = select(&commits, &annotated, window);
@@ -189,10 +228,14 @@ pub fn gather(head: &str, window: usize) -> Result<(Walk, bool)> {
         };
         walked.push((sha, records));
     }
-    // Only when the walk actually reached the end of the available history:
-    // a shallow clone deep enough to fill the window is not a problem.
-    let cutoff = recorded < window && commits.len() < SCAN_LIMIT && notes::is_shallow()?;
-    Ok((walked, cutoff))
+    let cut = cutoff(
+        recorded,
+        window,
+        commits.len(),
+        SCAN_LIMIT,
+        notes::is_shallow,
+    )?;
+    Ok((walked, cut))
 }
 
 /// One value per instruction-counted series at one commit, minimum across its
@@ -525,12 +568,18 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
             list(&d.missing_at_head)
         ));
     }
-    if d.shallow_cutoff {
-        out.push_str(
+    match d.cutoff {
+        Some(Cutoff::Shallow) => out.push_str(
             "\nThis checkout is shallow, and the walk reached its boundary before \
              the window filled. Fetch more history (`fetch-depth: 0` with \
              `actions/checkout`) so earlier recordings are visible.\n",
-        );
+        ),
+        Some(Cutoff::ScanLimit) => out.push_str(&format!(
+            "\nThe walk stopped at its limit of {} first-parent commits before the \
+             window filled. Recordings older than that were not compared.\n",
+            thousands(SCAN_LIMIT as f64)
+        )),
+        None => {}
     }
 
     out.push_str(
@@ -743,6 +792,47 @@ mod tests {
         let md = markdown(&d, false);
         assert!(md.contains("No instruction counts are recorded"), "{md}");
         assert!(md.contains("not at `c2`"), "{md}");
+    }
+
+    #[test]
+    fn a_filled_window_is_never_cut_short() {
+        let shallow = || -> Result<bool> { panic!("no need to ask") };
+        assert_eq!(cutoff(20, 20, 10_000, 10_000, shallow).unwrap(), None);
+    }
+
+    /// Returning exactly as many commits as allowed means history goes on past
+    /// the walk; that has to be reported, not read as the end of the project.
+    #[test]
+    fn hitting_the_scan_limit_is_a_cutoff() {
+        let shallow = || -> Result<bool> { panic!("the limit decides first") };
+        assert_eq!(
+            cutoff(3, 20, 10_000, 10_000, shallow).unwrap(),
+            Some(Cutoff::ScanLimit)
+        );
+    }
+
+    /// Fewer commits than the limit is the end of the available history:
+    /// a shallow boundary when the clone is shallow, the real root otherwise.
+    #[test]
+    fn the_end_of_history_is_a_cutoff_only_when_shallow() {
+        assert_eq!(
+            cutoff(3, 20, 40, 10_000, || Ok(true)).unwrap(),
+            Some(Cutoff::Shallow)
+        );
+        assert_eq!(cutoff(3, 20, 40, 10_000, || Ok(false)).unwrap(), None);
+    }
+
+    #[test]
+    fn each_cutoff_is_named_in_the_report() {
+        let mut d = analyze(&walk(&[Some(1000.0), Some(1000.0)]), 1.0);
+        d.cutoff = Some(Cutoff::ScanLimit);
+        let md = markdown(&d, false);
+        assert!(md.contains("limit of 10,000 first-parent commits"), "{md}");
+        d.cutoff = Some(Cutoff::Shallow);
+        assert!(markdown(&d, false).contains("This checkout is shallow"));
+        d.cutoff = None;
+        let md = markdown(&d, false);
+        assert!(!md.contains("shallow") && !md.contains("limit of"), "{md}");
     }
 
     /// Comparing nothing fails unless it was explicitly accepted, and the

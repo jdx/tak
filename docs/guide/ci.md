@@ -119,6 +119,8 @@ earlier commit on the same runner class. Other causes are configuration problems
 - The checkout has no history. The walk needs the commits between recorded points, and the
   default `actions/checkout` fetch of one commit leaves nothing to walk. The report notes when
   a shallow clone cut the walk short.
+- The previous recording is more than 10,000 first-parent commits back. The walk stops at
+  that limit, and the report says when the limit stopped it before the window filled.
 - The recording step ran without Valgrind, so it stored timing but no instruction counts.
 - The commit was never recorded. Run `tak detect` after `tak run --record`.
 

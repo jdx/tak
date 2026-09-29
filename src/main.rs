@@ -1101,9 +1101,9 @@ fn cmd_detect(
     // falls back to what is recorded locally.
     let _ = notes::fetch(&remote);
 
-    let (walked, shallow_cutoff) = detect::gather(&head, window)?;
+    let (walked, cutoff) = detect::gather(&head, window)?;
     let mut found = detect::analyze(&walked, settings.gate_pct);
-    found.shallow_cutoff = shallow_cutoff;
+    found.cutoff = cutoff;
     found.allow_empty = allow_empty;
     found.no_gate = no_gate;
     print!("{}", detect::markdown(&found, settings.credit));
