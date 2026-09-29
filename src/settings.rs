@@ -102,6 +102,11 @@ pub struct Settings {
     /// Raise it to report without effectively failing. Setting it to zero fails on any
     /// increase at all, which sounds appealing and is not: one extra instruction on a
     /// startup path is not worth blocking a pull request over.
+    ///
+    /// This is the gate for every series without its own. A benchmark or subject can
+    /// set one with `gate = { pct = N }` in `tak.toml`, and that wins over this setting
+    /// from any source, `--gate-pct` included: the flag moves the default, not the
+    /// benchmarks a project has singled out.
     #[usage(
         default = 1.0,
         cli("--gate-pct"),
@@ -144,6 +149,27 @@ pub struct Settings {
         since = "0.0.14"
     )]
     pub accept_trailers: bool,
+
+    /// How many instructions a count may rise by before `tak compare` fails, whatever
+    /// the percentage.
+    ///
+    /// A regression has to exceed both this and `gate_pct`. A percentage alone serves
+    /// small benchmarks badly: on a 450k-instruction startup check, 1% is 4,500
+    /// instructions, which one new dependency's relocations in the dynamic loader can
+    /// account for before `main` runs. A floor lets such a benchmark keep a tight
+    /// percentage without failing on a handful of instructions.
+    ///
+    /// The default of 0 means no floor: any rise beyond `gate_pct` fails. A benchmark or
+    /// subject can set its own with `gate = { min_delta = N }` in `tak.toml`.
+    #[usage(
+        default = 0,
+        cli("--gate-min-delta"),
+        env = "TAK_GATE_MIN_DELTA",
+        source("config", "gate.min_delta"),
+        example("tak compare origin/main --gate-min-delta 20000"),
+        since = "0.0.14"
+    )]
+    pub gate_min_delta: u64,
 
     /// Whether generated reports end with a line naming tak.
     ///
@@ -469,6 +495,7 @@ impl Settings {
                 self.runner_class.clone()
             }),
             "gate_pct" => Some(format!("{}", self.gate_pct)),
+            "gate_min_delta" => Some(format!("{}", self.gate_min_delta)),
             _ => None,
         }
     }
@@ -653,6 +680,7 @@ mod tests {
             Ty::List(_) => vec!["[\"SENTINEL\"]".to_string()],
             Ty::Float => vec!["12345.0".to_string()],
             Ty::Bool => vec!["false".to_string(), "true".to_string()],
+            Ty::Uint => vec!["12345".to_string()],
             Ty::String => vec!["\"SENTINEL\"".to_string()],
             other => panic!(
                 "the drift check has no sentinel for type `{}`",

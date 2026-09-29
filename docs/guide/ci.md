@@ -73,6 +73,20 @@ An instruction-count increase beyond the configured gate fails the command. Wall
 changes are displayed but never gate the result. A deliberate increase can be
 [accepted](#accept-an-intentional-regression) for the benchmarks it affects.
 
+Each benchmark can have its own gate in `tak.toml`: a different percentage, an absolute
+`min_delta` floor, or `enabled = false` to report a benchmark without failing on it. See
+[per-benchmark gates](/guide/configuration#per-benchmark-gates). `tak compare` reads these from
+the `tak.toml` in the working tree, not from the notes or from the base revision. In a
+pull-request job that checks out the head, the pull request's own `tak.toml` decides, so a
+change to a gate is part of the diff under review.
+
+When some benchmark's gate differs from `[gate]`, the verdict says
+`N benchmark(s) above their gate` instead of `N benchmark(s) above the 1% gate`, and a
+report-only benchmark that rose is listed as `N report-only benchmark(s) above their gate`.
+A script that greps the report for a regression should match both forms. The exit status is
+simpler to rely on: `tak compare` exits non-zero only for a regression in a gated benchmark, or
+for an error.
+
 Always keep measurements partitioned by runner class. Comparing numbers across runner classes
 turns an infrastructure change into an apparent code regression.
 
@@ -87,14 +101,27 @@ tak compare "$BASE_SHA" --accept startup
 ```
 
 `--accept` is repeatable. Each value is one exact benchmark name. It is neither split on
-commas nor trimmed, so it can accept any name, and an empty value is an error. It accepts only the benchmarks it names. Every other benchmark still gates. An acceptance names a benchmark and covers each of
-its tools and runner classes. It has no size limit.
+commas nor trimmed, so it can accept any name, and an empty value is an error. It accepts only
+the benchmarks it names. Every other benchmark still gates. An acceptance names a benchmark and
+covers each of its tools and runner classes. It has no size limit.
+
+Each series is first judged against its own gate: the benchmark's
+[`gate`](/guide/configuration#per-benchmark-gates) if it has one, `[gate]` otherwise, including any
+`min_delta` floor. An acceptance only waives a change that crossed that gate and would
+otherwise fail.
 
 An accepted regression still appears in the report. Its row is marked `(accepted)`, and a
-separate line names where each acceptance came from. It does not fail the command. The report
-also lists acceptances that accepted nothing, either because the benchmark did not regress
-above the gate or because no benchmark by that name was compared. A misspelt name does not fail
-the command by itself, but the regression it was meant to cover still does.
+separate line names its runner class, its gate when benchmarks have their own, and where the
+acceptance came from. It does not fail the command. The report also lists acceptances that
+accepted nothing, with the reason:
+
+- the benchmark did not rise above its gate;
+- the benchmark is report-only (`gate = { enabled = false }`), so it can never fail and needs no
+  acceptance; or
+- no benchmark by that name was compared.
+
+A misspelt name does not fail the command by itself, but the regression it was meant to cover
+still does.
 
 ### Accept from a pull-request label
 

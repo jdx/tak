@@ -49,8 +49,13 @@
       "additionalProperties": false,
       "properties": {
         "pct": {
-          "description": "Percentage an instruction count may rise before `tak compare` fails.",
+          "description": "Percentage an instruction count may rise before `tak compare` fails. The gate for every series without its own `gate` table.",
           "type": "number",
+          "minimum": 0
+        },
+        "min_delta": {
+          "description": "Instructions a count may rise by before `tak compare` fails, whatever the percentage. A regression must exceed both. Default 0, no floor.",
+          "type": "integer",
           "minimum": 0
         },
         "accept_trailers": {
@@ -96,6 +101,27 @@
           "minLength": 1
         }
       ]
+    },
+    "gate": {
+      "description": "This series' regression gate, overriding [gate] key by key. A subject's stacks on its benchmark's. Read by `tak compare` from the working tree's tak.toml; not recorded.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pct": {
+          "description": "Percentage an instruction count may rise before `tak compare` fails.",
+          "type": "number",
+          "minimum": 0
+        },
+        "min_delta": {
+          "description": "Instructions a count may rise by before `tak compare` fails, whatever the percentage. A regression must exceed both.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "enabled": {
+          "description": "false reports a rise beyond the gate without failing on it.",
+          "type": "boolean"
+        }
+      }
     },
     "layerProperties": {
       "runs": {
@@ -273,6 +299,9 @@
         "when": {
           "description": "Measure only when this expr condition holds, e.g. '(env.VLT_BIN ?? \"\") != \"\"'. Sees env, os, arch, ci, bench and subject.",
           "type": "string"
+        },
+        "gate": {
+          "$ref": "#/definitions/gate"
         }
       }
     },
@@ -341,6 +370,9 @@
         "when": {
           "description": "Run this benchmark only when this expr condition holds. Sees env, os, arch, ci and bench.",
           "type": "string"
+        },
+        "gate": {
+          "$ref": "#/definitions/gate"
         }
       },
       "anyOf": [

@@ -331,3 +331,45 @@ fn a_trailer_outside_the_final_paragraph_is_not_one() {
     assert!(!ok, "{stdout}");
     assert!(!stdout.contains("accepted"), "{stdout}");
 }
+
+/// Acceptance layers on the per-benchmark gates in `tak.toml`: each series is
+/// judged against its own gate first. `startup` at 20% did not regress, so
+/// accepting it accepted nothing; `resolve` at the global 1% did, and a
+/// report-only `help` needs no acceptance to pass.
+#[test]
+fn acceptance_uses_each_benchmarks_own_gate() {
+    let dir = repo();
+    std::fs::write(
+        dir.path().join("tak.toml"),
+        "[bench.startup]\ncmd = \"true\"\ngate = { pct = 20.0 }\n\n\
+         [bench.resolve]\ncmd = \"true\"\n\n\
+         [bench.help]\ncmd = \"true\"\ngate = { enabled = false }\n",
+    )
+    .unwrap();
+    let base = commit(dir.path(), "base");
+    note(
+        dir.path(),
+        &base,
+        &[("startup", 1e6), ("resolve", 1e6), ("help", 1e6)],
+    );
+    let head = commit(dir.path(), "slower");
+    note(
+        dir.path(),
+        &head,
+        &[("startup", 1.1e6), ("resolve", 1.1e6), ("help", 1.1e6)],
+    );
+    let (ok, stdout, _) = compare(
+        dir.path(),
+        &[&base, "--accept", "resolve", "--accept", "startup"],
+    );
+    assert!(ok, "{stdout}");
+    assert!(
+        stdout.contains("`resolve` on `test` +10.00% (gate 1%) (`--accept`)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("not above its gate, so nothing was accepted: `startup`"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("**+10.00%** (not gated)"), "{stdout}");
+}

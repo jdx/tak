@@ -575,6 +575,85 @@ accept_trailers = true
 `TAK_ACCEPT_TRAILERS=0` in a workflow overrides the file. Use it where the gate is enforced
 against pull requests you do not trust, because a pull request can edit `tak.toml`.
 
+### An absolute floor
+
+A percentage alone serves small benchmarks badly. On a 450k-instruction `--version`, 1% is
+4,500 instructions, and most of such a benchmark can be the dynamic loader relocating the binary
+before `main` runs, which grows with every dependency. `min_delta` sets a floor: a count has to
+rise by more than `pct` percent *and* by more than `min_delta` instructions before `tak compare`
+fails.
+
+```toml
+[gate]
+pct = 1.0
+min_delta = 20000
+```
+
+The default is 0, meaning no floor. It can also be set with `--gate-min-delta` or
+`TAK_GATE_MIN_DELTA`.
+
+### Per-benchmark gates
+
+A benchmark or subject can have its own gate. The `gate` table takes the same `pct` and
+`min_delta` keys as `[gate]`, plus `enabled`:
+
+```toml
+[bench.startup]
+cmd = ["./target/release/mycli", "--version"]
+gate = { pct = 5.0, min_delta = 20000 }
+
+[bench.install]
+cmd = ["./target/release/mycli", "install"]
+# no gate table: held to [gate]
+
+[bench.help]
+cmd = ["./target/release/mycli", "--help"]
+gate = { enabled = false }   # report only
+```
+
+- **Report only.** `enabled = false` keeps the benchmark in the report and holds it to its
+  threshold, but never fails the command on it. A rise beyond the threshold is marked
+  `(not gated)` in the table and listed under the verdict as a report-only benchmark. It's
+  meant for a benchmark you want to watch but can't gate yet, not for turning off a gate that
+  fails, which you should investigate first.
+- **Key by key.** A `gate` table only replaces the keys it sets. The rest come from `[gate]`,
+  so `gate = { enabled = false }` keeps the project's percentage.
+- **Subjects stack.** A subject's `gate` stacks on its benchmark's, in the same order as other
+  settings: the benchmark, then the shared `[subject.NAME]`, then `[bench.B.subject.NAME]`.
+  Only subjects with `counters = true` have an instruction count to gate.
+- **Not in `[defaults]`.** A gate for every benchmark is `[gate]`.
+- **The file wins over the flag.** `--gate-pct`, `--gate-min-delta` and their environment
+  variables set the `[gate]` values, which are what a benchmark without its own gate uses. They
+  don't override a benchmark that declares its own.
+- **Validated when the file loads.** `tak run` and `tak compare` both reject a negative, NaN or
+  infinite `pct`, a negative or fractional `min_delta`, and unknown keys in a `gate` table. The
+  same check covers `[gate]` itself, whether it comes from `tak.toml`, a flag or an environment
+  variable, so a bad value fails `tak run` before anything is measured.
+
+When any row in a comparison has a gate other than `[gate]`, the report adds a `gate` column
+that shows every row's gate, and the verdict lists each regression with its gate:
+
+```text
+| benchmark | instructions | Δ | gate | wall (min) | Δ |
+|---|---:|---:|---|---:|---:|
+| install | 104,882,113 → 105,001,234 | **+0.11%** | 1% | 88.40 → 87.95ms | -0.51% |
+| startup | 452,310 → 463,102 | **+2.39%** (not gated) | report only (1%) | 1.21 → 1.19ms | -1.65% |
+
+No gated benchmark rose beyond its gate.
+
+**1 report-only benchmark(s) above their gate, not failing:** `startup` +2.39% (gate 1%)
+```
+
+If every row uses `[gate]`, the report looks the same as it did before per-benchmark gates.
+
+Gates are not recorded. They're policy rather than measurement, so `tak compare` reads them from
+the `tak.toml` in the working tree, which in CI is the checked-out head. A pull request that
+changes a gate is compared under the new gate, and the change shows up in its diff. A series in
+the notes whose benchmark `tak.toml` no longer declares is held to `[gate]`. A series whose
+subject the benchmark no longer declares is held to the benchmark's gate. `tak compare` works
+without a `tak.toml` and holds every series to `[gate]`. A `tak.toml` that doesn't parse is an
+error.
+
 ## Environment filtering
 
 tak removes known sources of non-determinism from the measured command's environment. The
