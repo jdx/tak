@@ -30,6 +30,7 @@ fn settings_output(args: &[&str]) -> String {
         .env_remove("TAK_ENV_DENY")
         .env_remove("TAK_ENV_ALLOW")
         .env_remove("TAK_GATE_PCT")
+        .env_remove("TAK_GATE_MIN_DELTA")
         .env_remove("TAK_CREDIT")
         .current_dir(std::env::temp_dir())
         .output()

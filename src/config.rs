@@ -9,6 +9,7 @@
 //! thing. A command line in a workflow file drifts from the one people use
 //! locally, and the numbers stop being comparable without anyone noticing.
 
+use crate::compare::{Gate, Gates};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -104,6 +105,8 @@ pub struct Bench {
     layer: Layer,
     /// Run this benchmark only when this expr condition holds.
     when: Option<String>,
+    /// This benchmark's gate, where it differs from `[gate]`.
+    gate: Option<GateDecl>,
     /// Shared `[subject.NAME]` tables this benchmark measures.
     #[serde(default)]
     subjects: Vec<String>,
@@ -132,6 +135,44 @@ pub struct SubjectDecl {
     /// programs, whose instruction counts are not this project's to gate on:
     /// a competitor's upgrade would fail the gate.
     counters: Option<bool>,
+    /// This subject's gate, stacked on the benchmark's.
+    gate: Option<GateDecl>,
+}
+
+/// A `gate = { ... }` table on a benchmark or subject: the `[gate]` settings,
+/// overridden for one series.
+///
+/// Not part of [`Layer`], and so not settable in `[defaults]`. A gate for
+/// every benchmark is what `[gate]` already is, and a second spelling of it
+/// would outrank `--gate-pct` for no reason anyone could see from the command
+/// line. On a benchmark and a subject rather than in the layer stack also keeps
+/// it out of `tak run`, which has no use for it.
+///
+/// `deny_unknown_fields`, unlike the tables around it. A mistyped key here —
+/// `pc = 5` — would otherwise leave the benchmark at the global gate while the
+/// file reads as though it had its own, which is a gate the user thought they
+/// set.
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateDecl {
+    /// Percentage of the base an instruction count may rise by.
+    pct: Option<f64>,
+    /// Instructions a count may rise by, whatever the percentage.
+    min_delta: Option<u64>,
+    /// False reports the series and never fails on it.
+    enabled: Option<bool>,
+}
+
+impl GateDecl {
+    /// `gate` with what this table sets replaced, key by key: a subject that
+    /// only says `enabled = false` keeps its benchmark's percentage.
+    fn over(&self, gate: Gate) -> Gate {
+        Gate {
+            pct: self.pct.unwrap_or(gate.pct),
+            min_delta: self.min_delta.unwrap_or(gate.min_delta),
+            enabled: self.enabled.unwrap_or(gate.enabled),
+        }
+    }
 }
 
 /// A command, written either as a list or as a plain string.
@@ -490,6 +531,60 @@ impl Config {
         out
     }
 
+    /// Every `gate` table in the file, with where it is.
+    fn gate_decls(&self) -> Vec<(String, &GateDecl)> {
+        let mut out = Vec::new();
+        for (n, d) in &self.subject {
+            out.extend(d.gate.as_ref().map(|g| (format!("subject.{n}.gate"), g)));
+        }
+        for (b, bench) in &self.bench {
+            out.extend(bench.gate.as_ref().map(|g| (format!("bench.{b}.gate"), g)));
+            for (n, d) in &bench.subject {
+                out.extend(
+                    d.gate
+                        .as_ref()
+                        .map(|g| (format!("bench.{b}.subject.{n}.gate"), g)),
+                );
+            }
+        }
+        out
+    }
+
+    /// The gate for every series this file declares, starting from `global`.
+    ///
+    /// Stacked in the same order as every other setting — the benchmark, then
+    /// the shared `[subject.NAME]`, then the benchmark's own subject table —
+    /// key by key, so a subject that only sets `enabled = false` keeps the
+    /// benchmark's percentage.
+    ///
+    /// `when` is not consulted. It decides whether a series is measured, and a
+    /// series that was measured on either side is compared under the gate the
+    /// file gives it, whichever machine is reading the notes.
+    pub fn gates(&self, global: Gate) -> Gates {
+        let mut gates = Gates::uniform(global);
+        for (name, b) in &self.bench {
+            let bench = b.gate.map_or(global, |d| d.over(global));
+            gates.set_bench(name, bench);
+            if !b.is_multi() {
+                gates.set_series(name, SELF_TOOL, bench);
+                continue;
+            }
+            for n in b.subjects.iter().chain(b.subject.keys()) {
+                let mut gate = bench;
+                for d in [self.subject.get(n), b.subject.get(n)]
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(decl) = &d.gate {
+                        gate = decl.over(gate);
+                    }
+                }
+                gates.set_series(name, n, gate);
+            }
+        }
+        gates
+    }
+
     /// Every string that may hold a template, as written, with where it is.
     fn template_strings(&self) -> Vec<(String, &str)> {
         fn layer<'a>(out: &mut Vec<(String, &'a str)>, at: &str, l: &'a Layer) {
@@ -726,6 +821,14 @@ impl Config {
         for (place, l) in cfg.layers() {
             if let Some(codes) = &l.ok_exit_codes {
                 ok_exit_codes(codes).with_context(|| format!("in {place}"))?;
+            }
+        }
+        // Every gate, including a shared subject's that no benchmark lists
+        // yet: `tak compare` is where a bad one would bite, and by then it is
+        // a pull request's check that fails rather than the file's author.
+        for (place, g) in cfg.gate_decls() {
+            if let Some(pct) = g.pct {
+                crate::compare::check_pct(pct).with_context(|| format!("in {place}.pct"))?;
             }
         }
         // Every declared benchmark is validated up front rather than failing
@@ -1531,5 +1634,144 @@ cmd = "mycli 'two words'""#,
             Config::parse(overridden).is_err(),
             "shared value an override replaces"
         );
+    }
+
+    fn global() -> Gate {
+        Gate::new(1.0, 0).unwrap()
+    }
+
+    fn gate(pct: f64, min_delta: u64, enabled: bool) -> Gate {
+        Gate {
+            pct,
+            min_delta,
+            enabled,
+        }
+    }
+
+    #[test]
+    fn a_benchmark_without_a_gate_gets_the_global_one() {
+        let c = Config::parse("[bench.a]\ncmd = \"x\"").unwrap();
+        assert_eq!(c.gates(global()).get("a", SELF_TOOL), global());
+    }
+
+    #[test]
+    fn a_benchmark_gate_overrides_the_global_one_key_by_key() {
+        let c = Config::parse(
+            r#"
+            [bench.startup]
+            cmd = "x --version"
+            gate = { pct = 5.0 }
+
+            [bench.quiet]
+            cmd = "x --help"
+            gate = { enabled = false, min_delta = 20000 }
+            "#,
+        )
+        .unwrap();
+        let gates = c.gates(Gate::new(1.0, 100).unwrap());
+        assert_eq!(gates.get("startup", SELF_TOOL), gate(5.0, 100, true));
+        assert_eq!(gates.get("quiet", SELF_TOOL), gate(1.0, 20_000, false));
+    }
+
+    /// The same order every other setting stacks in: benchmark, shared
+    /// subject, then the benchmark's own subject table — and each only
+    /// replaces the keys it sets.
+    #[test]
+    fn subject_gates_stack_by_specificity() {
+        let c = Config::parse(
+            r#"
+            [subject.mine]
+            cmd = "mine install"
+            counters = true
+
+            [subject.theirs]
+            cmd = "theirs install"
+            counters = true
+            gate = { enabled = false }
+
+            [bench.install]
+            subjects = ["mine", "theirs"]
+            gate = { pct = 3.0 }
+
+            [bench.install.subject.theirs]
+            gate = { min_delta = 5000 }
+
+            [bench.install.subject.local]
+            cmd = "local install"
+            counters = true
+            gate = { pct = 0.5 }
+            "#,
+        )
+        .unwrap();
+        let gates = c.gates(global());
+        assert_eq!(gates.get("install", "mine"), gate(3.0, 0, true));
+        assert_eq!(gates.get("install", "theirs"), gate(3.0, 5_000, false));
+        assert_eq!(gates.get("install", "local"), gate(0.5, 0, true));
+        assert_eq!(
+            gates.get("install", "removed"),
+            gate(3.0, 0, true),
+            "a subject no longer declared falls back to its benchmark"
+        );
+        assert_eq!(
+            gates.get("gone", SELF_TOOL),
+            global(),
+            "a benchmark no longer declared falls back to the global gate"
+        );
+    }
+
+    /// A subject can turn a report-only benchmark's gate back on for itself.
+    #[test]
+    fn a_subject_may_re_enable_its_benchmarks_gate() {
+        let c = Config::parse(
+            r#"
+            [bench.b]
+            gate = { enabled = false }
+            [bench.b.subject.ours]
+            cmd = "x"
+            counters = true
+            gate = { enabled = true }
+            [bench.b.subject.other]
+            cmd = "y"
+            "#,
+        )
+        .unwrap();
+        let gates = c.gates(global());
+        assert!(gates.get("b", "ours").enabled);
+        assert!(!gates.get("b", "other").enabled);
+    }
+
+    /// Checked at load, and everywhere in the file, not when `tak compare`
+    /// finally reads the gate on a pull request.
+    #[test]
+    fn bad_gates_are_rejected_at_parse_time() {
+        for (bad, needle) in [
+            ("gate = { pct = -1.0 }", "bench.a.gate.pct"),
+            ("gate = { pct = nan }", "bench.a.gate.pct"),
+            ("gate = { pct = inf }", "bench.a.gate.pct"),
+            ("gate = { min_delta = -1 }", "min_delta"),
+            ("gate = { min_delta = 1.5 }", "min_delta"),
+            ("gate = { enabled = \"no\" }", "enabled"),
+            // A typo must not leave the benchmark at the global gate while
+            // the file reads as though it had its own.
+            ("gate = { pc = 5.0 }", "pc"),
+            ("gate = false", "gate"),
+        ] {
+            let toml = format!("[bench.a]\ncmd = \"x\"\n{bad}");
+            let err = Config::parse(&toml).expect_err(bad);
+            let msg = format!("{err:#}");
+            assert!(msg.contains(needle), "{bad}: {msg}");
+        }
+        let unused = "[subject.spare]\ncmd = \"y\"\ngate = { pct = -2.0 }\n[bench.a]\ncmd = \"x\"";
+        let msg = format!("{:#}", Config::parse(unused).unwrap_err());
+        assert!(msg.contains("subject.spare.gate.pct"), "{msg}");
+        let local = "[bench.b.subject.s]\ncmd = \"y\"\ngate = { pct = -2.0 }";
+        let msg = format!("{:#}", Config::parse(local).unwrap_err());
+        assert!(msg.contains("bench.b.subject.s.gate.pct"), "{msg}");
+    }
+
+    #[test]
+    fn an_integer_percentage_is_a_percentage() {
+        let c = Config::parse("[bench.a]\ncmd = \"x\"\ngate = { pct = 5 }").unwrap();
+        assert_eq!(c.gates(global()).get("a", SELF_TOOL).pct, 5.0);
     }
 }
