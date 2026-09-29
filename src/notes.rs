@@ -258,9 +258,117 @@ pub fn rev_list(rev: &str, n: usize) -> Result<Vec<String>> {
 /// separator keeps repeated trailers on one line, so a line is always exactly
 /// one commit. Commits with no such trailer still print their SHA; the parser
 /// skips the empty value.
+///
+/// `--no-show-signature` for the same reason [`log`] passes it: a user's
+/// `log.showSignature` would otherwise put GPG output on stdout, between the
+/// lines this parses. `--end-of-options` and `--` keep the range a revision
+/// whatever it looks like.
 pub fn trailers(base: &str, head: &str, key: &str) -> Result<String> {
     let format = format!("--format=%H%x00%(trailers:key={key},valueonly,unfold,separator=%x2C)");
-    git(&["log", &format, &format!("{base}..{head}")])
+    git(&[
+        "log",
+        "--no-show-signature",
+        &format,
+        "--end-of-options",
+        &format!("{base}..{head}"),
+        "--",
+    ])
+}
+
+/// One commit on a first-parent walk, with whatever tak recorded on it.
+#[derive(Debug, Clone)]
+pub struct Logged {
+    pub sha: String,
+    /// Committer date, strict ISO 8601. The committer date rather than the
+    /// author date because a trunk timeline is about when a change landed; a
+    /// branch rebased and merged a month later was authored long before it
+    /// could have moved anything.
+    pub date: String,
+    pub subject: String,
+    /// Empty for a commit nothing was recorded on — the common case.
+    pub records: Vec<Record>,
+}
+
+/// Fields per commit in [`log`]'s output: SHA, date, subject, note.
+const LOG_FIELDS: usize = 4;
+
+/// Every commit on `rev`'s first-parent history, newest first, with its records.
+///
+/// One `git log`, with each note inlined through `%N`, rather than a
+/// `notes show` per commit: a series view wants hundreds of commits, and a
+/// subprocess each put a noticeable pause in front of what should be an
+/// instant read of local objects.
+///
+/// Every field ends in NUL (`%x00` between fields, `-z` after the last), the
+/// one byte none of them can hold: git will not store it in a commit message,
+/// and JSON escapes it. A printable-looking separator such as `\x1e` was
+/// tried first and can appear in a subject, which cut that commit in two and
+/// dropped its measurements.
+///
+/// First-parent for the same reason as [`rev_list`]. `--no-notes` first clears
+/// whatever refs `core.notesRef` and `notes.displayRef` configure, so only this
+/// ref's notes reach `%N` and are parsed as records — explicitly, rather than
+/// relying on an explicit `--notes=<ref>` happening to replace the defaults.
+pub fn log(rev: &str) -> Result<Vec<Logged>> {
+    let notes = format!("--notes={NOTES_REF}");
+    let out = git(&[
+        "log",
+        "-z",
+        "--first-parent",
+        "--no-show-signature",
+        "--no-notes",
+        &notes,
+        "--format=%H%x00%cI%x00%s%x00%N",
+        "--end-of-options",
+        rev,
+        "--",
+    ])?;
+    Ok(parse_log(&out))
+}
+
+fn parse_log(out: &str) -> Vec<Logged> {
+    let fields: Vec<&str> = out.split('\0').collect();
+    fields
+        .chunks(LOG_FIELDS)
+        .filter_map(|f| {
+            let [sha, date, subject, note] = f else {
+                // The empty piece after the final terminator.
+                return None;
+            };
+            // Nothing else here can come out of git misaligned, but a note is
+            // arbitrary bytes a person could have written by hand; refusing a
+            // group that does not start with a SHA stops one such note from
+            // inventing a commit.
+            if sha.is_empty() || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            Some(Logged {
+                sha: sha.to_string(),
+                date: date.to_string(),
+                subject: subject.to_string(),
+                records: parse_note(note),
+            })
+        })
+        .collect()
+}
+
+/// Whether `sha` is where this clone's history was cut off, so a walk that
+/// ended there ran out of *clone* rather than out of project.
+///
+/// Asked of the commit the walk ended on rather than of the repository as a
+/// whole. `rev-parse --is-shallow-repository` answers for every ref, and the
+/// notes refresh is itself a `--depth 1` fetch: after the first one, a full
+/// clone reports itself shallow because the *notes* history is, and a report
+/// built in it warned that older measurements might be missing when none were.
+///
+/// `actions/checkout` defaults to a depth of one, so a genuinely cut-off walk
+/// is the normal state of a CI checkout rather than an edge case.
+pub fn is_shallow_boundary(sha: &str) -> bool {
+    let Ok(path) = git(&["rev-parse", "--git-path", "shallow"]) else {
+        return false;
+    };
+    // No file is the common case: nothing in this clone is shallow.
+    std::fs::read_to_string(path).is_ok_and(|grafts| grafts.lines().any(|l| l.trim() == sha))
 }
 
 /// Teach plain `git fetch` about the notes ref, so the data is visible to users
@@ -274,4 +382,41 @@ pub fn install_refspec(remote: &str) -> Result<()> {
     }
     git(&["config", "--add", &key, USER_FETCH_REFSPEC])?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LINE: &str =
+        r#"{"bench":"a","metrics":{"instructions":5.0},"runner":"r","tool":"self","ts":"t","v":1}"#;
+
+    /// `%N` ends with a newline and is empty for a commit with no note; both
+    /// have to come out as a commit, the second with no records.
+    #[test]
+    fn a_log_parses_noted_and_unnoted_commits() {
+        // As `git log -z` writes it: NUL after every field, including the
+        // last, and a newline ending a note that exists.
+        let out = format!(
+            "aaa\u{0}2026-01-02T00:00:00+00:00\u{0}second\u{0}{LINE}\n\u{0}\
+             bbb\u{0}2026-01-01T00:00:00+00:00\u{0}first\u{0}\u{0}"
+        );
+        let log = parse_log(&out);
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].sha, "aaa");
+        assert_eq!(log[0].subject, "second");
+        assert_eq!(log[0].records.len(), 1);
+        assert_eq!(log[1].sha, "bbb");
+        assert!(log[1].records.is_empty());
+    }
+
+    /// The byte the first version of this format used as its separator.
+    #[test]
+    fn a_control_character_in_a_subject_stays_in_the_subject() {
+        let out = format!("aaa\u{0}2026-01-02T00:00:00+00:00\u{0}odd \u{1e} one\u{0}{LINE}\n\u{0}");
+        let log = parse_log(&out);
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].subject, "odd \u{1e} one");
+        assert_eq!(log[0].records.len(), 1);
+    }
 }

@@ -18,5 +18,6 @@ pub mod measure;
 pub mod notes;
 pub mod progress;
 pub mod record;
+pub mod report;
 pub mod settings;
 pub mod template;
