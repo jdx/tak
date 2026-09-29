@@ -231,17 +231,30 @@ jobs:
           name: tak-perf-binary
           path: /tmp/tak-build
 
+      - name: Install tak
+        # Artifacts drop the executable bit.
+        run: chmod +x /tmp/tak-build/tak
+
       # Proof this job has the data before anything may pass for want of it.
       # tak detect treats a failed notes refresh as "offline" and carries on
       # with what is local, which in this fresh checkout is nothing — and with
       # --allow-empty below that would pass without examining anything. So the
-      # fetch must succeed, and the commit publish just wrote must be there
-      # with instruction counts in it.
+      # fetch must succeed, and the commit publish just wrote must carry an
+      # instruction count that tak itself can read.
+      #
+      # Read through `tak history`, not by grepping the note: it goes through
+      # the same parser detect uses, which skips malformed lines and records
+      # from a newer schema, so text that merely contains "instructions" does
+      # not count. This couples the check to history's output format — one line
+      # per record with `instructions=<count>`, or `instructions=-` when there
+      # is none. If that format changes, change this pattern with it.
       - name: Fetch the published measurements
         run: |
           git fetch --quiet origin '+refs/notes/tak:refs/notes/tak'
-          if ! git notes --ref=tak show "$GITHUB_SHA" | grep -q '"instructions"'; then
-            echo "::error::refs/notes/tak has no instruction counts for $GITHUB_SHA"
+          history=$(/tmp/tak-build/tak history "$GITHUB_SHA")
+          echo "$history"
+          if ! grep -Eq 'instructions=[0-9]' <<<"$history"; then
+            echo "::error::tak reads no instruction counts for $GITHUB_SHA in refs/notes/tak"
             exit 1
           fi
 
@@ -258,6 +271,4 @@ jobs:
       - name: Detect
         run: |
           set -o pipefail
-          # Artifacts drop the executable bit.
-          chmod +x /tmp/tak-build/tak
           /tmp/tak-build/tak detect --allow-empty | tee -a "$GITHUB_STEP_SUMMARY"
