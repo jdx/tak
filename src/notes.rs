@@ -244,25 +244,6 @@ pub fn rev_list(rev: &str, n: usize) -> Result<Vec<String>> {
     Ok(out.lines().map(str::to_string).collect())
 }
 
-/// Every commit that carries a note under [`NOTES_REF`], in one call.
-///
-/// Walking a long history by asking each commit for its note costs a process
-/// per commit, and most commits on a busy trunk have none — a push of several
-/// commits records only its tip. The notes tree already names every annotated
-/// commit, so listing it once and intersecting is the cheap way round.
-///
-/// A ref that does not exist yet lists as empty rather than failing, which is
-/// the state of every repository before its first recording.
-pub fn annotated() -> Result<std::collections::BTreeSet<String>> {
-    let out = git(&["notes", "--ref", NOTES_REF, "list"])?;
-    // Each line is `<note blob> <annotated object>`.
-    Ok(out
-        .lines()
-        .filter_map(|l| l.split_whitespace().nth(1))
-        .map(str::to_string)
-        .collect())
-}
-
 /// One commit on a first-parent walk, with whatever tak recorded on it.
 #[derive(Debug, Clone)]
 pub struct Logged {
@@ -297,9 +278,14 @@ const LOG_FIELDS: usize = 4;
 /// whatever refs `core.notesRef` and `notes.displayRef` configure, so only this
 /// ref's notes reach `%N` and are parsed as records — explicitly, rather than
 /// relying on an explicit `--notes=<ref>` happening to replace the defaults.
-pub fn log(rev: &str) -> Result<Vec<Logged>> {
+///
+/// `max` bounds the walk to the newest `max` commits, for a caller that has to
+/// stop somewhere on a trunk of hundreds of thousands of commits and needs to
+/// know whether it did.
+pub fn log(rev: &str, max: Option<usize>) -> Result<Vec<Logged>> {
     let notes = format!("--notes={NOTES_REF}");
-    let out = git(&[
+    let limit = max.map(|n| format!("--max-count={n}"));
+    let mut args = vec![
         "log",
         "-z",
         "--first-parent",
@@ -307,10 +293,12 @@ pub fn log(rev: &str) -> Result<Vec<Logged>> {
         "--no-notes",
         &notes,
         "--format=%H%x00%cI%x00%s%x00%N",
-        "--end-of-options",
-        rev,
-        "--",
-    ])?;
+    ];
+    if let Some(limit) = &limit {
+        args.push(limit);
+    }
+    args.extend(["--end-of-options", rev, "--"]);
+    let out = git(&args)?;
     Ok(parse_log(&out))
 }
 

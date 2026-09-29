@@ -149,6 +149,12 @@ build needs another action first, such as `jdx/mise-action`, run the action with
 [README](https://github.com/jdx/tak-action#readme) has the complete workflows, including the
 `workflow_run` reporting job, every input, and the security model and limitations.
 
+None of the three modes runs `tak detect`, which checks whether a push to main introduced an
+instruction-count step. To add that check to the main-branch job, give its checkout
+`fetch-depth: 0` and add a later step that runs `tak detect` with tak on `PATH`, as described
+under [Record the main branch](#record-the-main-branch). The manual workflow there already
+includes it.
+
 Pin the action to the full commit SHA of a release you have reviewed; the tags above are for
 readability. The sections below show the same workflows without the action, for projects that
 cannot use it or need to change what it does.

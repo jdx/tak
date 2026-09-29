@@ -1076,7 +1076,7 @@ fn cmd_log(opts: LogOpts, settings: &Settings) -> Result<()> {
     // Never fatal, as in `notes::read`: offline, or a remote with no notes
     // yet, falls back to the local ref.
     let _ = notes::fetch(&opts.remote);
-    let walked = notes::log(&opts.rev)?;
+    let walked = notes::log(&opts.rev, None)?;
     // Whether the walk stopped at a graft, not whether anything in the clone
     // is shallow: the notes fetch above is shallow by design.
     let shallow = walked
@@ -1131,6 +1131,18 @@ fn gather_trend(base: &str, head_sha: &str, head_records: &[Record]) -> Result<c
     Ok(compare::build_trend(&walked, head_sha, head_records))
 }
 
+/// The floor, for the one-line error `compare` and `detect` fail with when
+/// every series is at the global gate: ` and N instructions`, or nothing.
+///
+/// Shared so the two commands word the same gate the same way; a script that
+/// learns one error learns the other.
+fn floor_suffix(gate: &compare::Gate) -> String {
+    match gate.min_delta {
+        0 => String::new(),
+        n => format!(" and {n} instructions"),
+    }
+}
+
 /// Compare `rev` against `base`, print the report, and gate on it.
 fn cmd_compare(
     base: String,
@@ -1182,10 +1194,7 @@ fn cmd_compare(
     // A non-zero exit is the gate. The table above already says which and by
     // how much, so this only has to be unambiguous about why the job failed.
     if comparison.gated_uniformly(&gates) {
-        let floor = match gates.global.min_delta {
-            0 => String::new(),
-            n => format!(" and {n} instructions"),
-        };
+        let floor = floor_suffix(&gates.global);
         bail!(
             "{} benchmark(s) regressed by more than {}%{floor}",
             regressions.len(),
@@ -1243,10 +1252,7 @@ fn cmd_detect(
     // only has to be unambiguous about why the job failed — and reads as it did
     // before per-benchmark gates when every series is at the global one.
     if found.uniform() {
-        let floor = match gates.global.min_delta {
-            0 => String::new(),
-            n => format!(" and {n} instructions"),
-        };
+        let floor = floor_suffix(&gates.global);
         bail!(
             "{} benchmark(s) stepped up by more than {}%{floor} at {}",
             failures.len(),

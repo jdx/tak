@@ -277,28 +277,38 @@ pub fn gather(head: &str, window: usize) -> Result<(Walk, Option<Cutoff>)> {
     // ambiguous — a history of exactly that length returns it too — and
     // reading it as a cut-off sent people looking for recordings that did not
     // exist. An extra commit is proof that history goes on.
-    let mut commits = notes::rev_list(head, SCAN_LIMIT + 1)?;
-    let truncated = commits.len() > SCAN_LIMIT;
-    commits.truncate(SCAN_LIMIT);
-    let annotated = notes::annotated()?;
-    let chosen = select(&commits, &annotated, window);
-    let mut walked = Vec::with_capacity(chosen.len());
-    let mut recorded = 0;
-    for sha in chosen {
-        let records = if annotated.contains(&sha) {
-            recorded += 1;
-            notes::read(None, &sha)?
-        } else {
-            vec![]
-        };
-        walked.push((sha, records));
-    }
-    // The oldest commit rev-list reached, not the oldest one kept: the walk
+    //
+    // The same first-parent walker as `tak log`: one `git log` with every note
+    // inlined, rather than a `notes show` per recorded commit.
+    let mut logged = notes::log(head, Some(SCAN_LIMIT + 1))?;
+    let truncated = logged.len() > SCAN_LIMIT;
+    logged.truncate(SCAN_LIMIT);
+    // The oldest commit the walk reached, not the oldest one kept: the walk
     // ended there, so that is where a shallow boundary would have stopped it.
+    let oldest = logged.last().map(|l| l.sha.clone());
+
+    // A commit counts as recorded when tak can read a record on it. A note
+    // with nothing parseable in it holds no point, so it must not use up a
+    // place in the window either.
+    let shas: Vec<String> = logged.iter().map(|l| l.sha.clone()).collect();
+    let recorded_at: BTreeSet<String> = logged
+        .iter()
+        .filter(|l| !l.records.is_empty())
+        .map(|l| l.sha.clone())
+        .collect();
+    // `select` keeps a newest-first prefix and reverses it, so its length is
+    // all that is needed to take the same commits, records and all.
+    let kept = select(&shas, &recorded_at, window).len();
+    logged.truncate(kept);
+    let walked: Walk = logged
+        .into_iter()
+        .rev()
+        .map(|l| (l.sha, l.records))
+        .collect();
+    let recorded = walked.iter().filter(|(_, r)| !r.is_empty()).count();
+
     let cut = cutoff(recorded, window, truncated, || {
-        Ok(commits
-            .last()
-            .is_some_and(|oldest| notes::is_shallow_boundary(oldest)))
+        Ok(oldest.as_deref().is_some_and(notes::is_shallow_boundary))
     })?;
     Ok((walked, cut))
 }
