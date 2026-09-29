@@ -699,7 +699,8 @@ fn custom_table(c: &Comparison) -> String {
 }
 
 /// A custom metric's value: separated like a count when it is whole, which
-/// sizes and counts are, and as written otherwise.
+/// sizes and counts are, and as written otherwise. `abs`, unlike when tak
+/// prints its own measurement: a note may hold a line from any writer.
 fn plain(v: f64) -> String {
     if v.fract() == 0.0 && v.abs() < 1e15 {
         thousands(v)

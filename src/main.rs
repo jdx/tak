@@ -790,8 +790,10 @@ fn label(m: &Measured) -> String {
 
 /// A metric value for the summary: whole numbers without a fraction, since
 /// most custom metrics are sizes and counts, and anything else as written.
+/// Never negative: `parse_metric_value` refuses a sign and a size has none.
+/// Past 1e15 the fraction test says nothing, so large values print as-is.
 fn metric_value(v: f64) -> String {
-    if v.fract() == 0.0 && v.abs() < 1e15 {
+    if v.fract() == 0.0 && v < 1e15 {
         format!("{v:.0}")
     } else {
         v.to_string()

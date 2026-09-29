@@ -1387,7 +1387,9 @@ struct Captured {
 /// [`stop_group`]. The command itself has been reaped, but its group id
 /// cannot be handed to a new process while any member of the group lives,
 /// so this reaches only what the command started. Elsewhere there is no
-/// group to reach.
+/// group to reach. When nothing is left, `killpg` fails with ESRCH, which
+/// is expected and ignored. It is called only when the output was rejected,
+/// which is when something may be left.
 fn stop_leftovers(pgid: u32) {
     #[cfg(unix)]
     // SAFETY: killpg only sends a signal.
