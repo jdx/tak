@@ -49,6 +49,9 @@ struct Cli {
     /// Percentage an instruction count may rise before `compare` fails.
     #[usage(long, global, value_name = "PCT", setting = "gate_pct")]
     gate_pct: Option<f64>,
+    /// Instructions a count may rise by before `compare` fails, whatever the percentage.
+    #[usage(long, global, value_name = "N", setting = "gate_min_delta")]
+    gate_min_delta: Option<u64>,
     /// Leave the line naming tak off the end of generated reports.
     // `SetFalse`: the long spelling is the negation of the setting, so `--no-credit`
     // contributes `false` to the settings layer and its absence contributes nothing.
@@ -122,8 +125,9 @@ enum Cmd {
         /// regression.
         #[usage(long, value_name = "NAME")]
         baseline: Option<String>,
-        /// With --baseline, fail when an instruction count rose by more than
-        /// gate_pct, or when no instruction count could be compared at all.
+        /// With --baseline, fail when an instruction count rose beyond its
+        /// gate — the one `tak compare` would apply — or when a gated benchmark
+        /// could not be compared.
         #[usage(long)]
         gate: bool,
         /// Command to benchmark, after `--`. Omit to run what tak.toml declares.
@@ -177,8 +181,9 @@ enum Cmd {
     },
     /// Compare this commit's measurements against another's.
     ///
-    /// Fails when an instruction count has risen by more than `gate_pct`. Wall
-    /// clock is reported and never gated.
+    /// Fails when an instruction count has risen by more than `gate_pct` and
+    /// `gate_min_delta`, or by more than a benchmark's own `gate` in the
+    /// working tree's tak.toml. Wall clock is reported and never gated.
     Compare {
         /// Revision to compare against.
         #[usage(arg, default = "origin/main")]
@@ -316,9 +321,13 @@ struct Local {
     /// Present whenever either flag was given.
     store: Option<Store>,
     against: Option<Baseline>,
+    /// Each series' gate, with `--baseline`: the same lookup `tak compare`
+    /// makes, so a report-only benchmark or a `min_delta` floor means the same
+    /// thing against a baseline as against a commit.
+    gates: Option<compare::Gates>,
 }
 
-fn open_local(opts: &RunOpts) -> Result<Local> {
+fn open_local(opts: &RunOpts, settings: &Settings) -> Result<Local> {
     if opts.gate && opts.baseline.is_none() {
         bail!(
             "--gate applies to --baseline; to gate against another commit's recorded \
@@ -337,9 +346,17 @@ fn open_local(opts: &RunOpts) -> Result<Local> {
         .as_deref()
         .map(|name| store.load(name))
         .transpose()?;
+    // Read with the baseline, before measuring, so a bad `[gate]` fails in a
+    // second. From `--config` when it is given: that is the file whose
+    // benchmarks this run measures.
+    let gates = against
+        .is_some()
+        .then(|| compare_gates(settings, opts.config.as_deref()))
+        .transpose()?;
     Ok(Local {
         store: Some(store),
         against,
+        gates,
     })
 }
 
@@ -355,7 +372,8 @@ struct Measured {
 }
 
 fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
-    let local = open_local(&opts)?;
+    global_gate(settings)?;
+    let local = open_local(&opts, settings)?;
     // An explicit command always wins; tak.toml is only consulted when none is
     // given, so ad-hoc measurement never depends on repository state.
     if cmd.is_empty() {
@@ -773,10 +791,10 @@ fn finish(
     // Reported before a failed subject stops the run: the question this
     // answers is whether an edit helped, and the subjects that did measure
     // answer it.
-    let compared = local
-        .against
-        .as_ref()
-        .map(|b| report_against(b, &measured, &failing, settings));
+    let compared = match (&local.against, &local.gates) {
+        (Some(b), Some(gates)) => Some(report_against(b, &measured, &failing, gates)),
+        _ => None,
+    };
     // What a failure below keeps from being written, named so the message
     // says which store was left untouched.
     let storing = match (opts.record, &opts.save_baseline) {
@@ -810,7 +828,7 @@ fn finish(
   not {storing}: stored measurements keep timings without check verdicts, so a \
                  run with a failed check would be stored as if it had passed"
             );
-            bail!("check failed: {}", failing.join(", "));
+            bail!("check failed: {}", labels(&failing));
         }
         let records: Vec<Record> = measured.into_iter().map(|m| m.record).collect();
         // The baseline first. Saving it replaces this run's series, so doing
@@ -836,15 +854,25 @@ fn finish(
     // measurement a `--record` run exists to keep, and gating first would
     // throw it away.
     if opts.gate
-        && let (Some(against), Some(compared)) = (&local.against, &compared)
+        && let (Some(against), Some(compared), Some(gates)) =
+            (&local.against, &compared, &local.gates)
     {
-        gate_against(against, compared, &failing, settings)?;
+        gate_against(against, compared, &failing, gates)?;
     }
     Ok(())
 }
 
-/// Each subject whose check failed on any sample, labelled for a message.
-fn failing_checks(measured: &[Measured]) -> Vec<String> {
+/// A subject whose check failed on at least one sample.
+struct FailedCheck {
+    bench: String,
+    /// As recorded, so its gate can be looked up the way the comparison's is.
+    tool: String,
+    /// `bench (subject) failed N of M`, for messages.
+    label: String,
+}
+
+/// Each subject whose check failed on any sample.
+fn failing_checks(measured: &[Measured]) -> Vec<FailedCheck> {
     measured
         .iter()
         .filter(|m| m.samples.passed() < m.samples.checks.len())
@@ -854,13 +882,25 @@ fn failing_checks(measured: &[Measured]) -> Vec<String> {
             } else {
                 format!("{} ({})", m.bench, m.subject.name)
             };
-            format!(
-                "{label} failed {} of {}",
-                m.samples.checks.len() - m.samples.passed(),
-                m.samples.checks.len()
-            )
+            FailedCheck {
+                bench: m.bench.clone(),
+                tool: m.record.tool.clone(),
+                label: format!(
+                    "{label} failed {} of {}",
+                    m.samples.checks.len() - m.samples.passed(),
+                    m.samples.checks.len()
+                ),
+            }
         })
         .collect()
+}
+
+fn labels<'a>(failing: impl IntoIterator<Item = &'a FailedCheck>) -> String {
+    failing
+        .into_iter()
+        .map(|f| f.label.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// What a baseline comparison found, kept for `--gate`.
@@ -879,13 +919,18 @@ struct Against {
 fn report_against(
     against: &Baseline,
     measured: &[Measured],
-    failing: &[String],
-    settings: &Settings,
+    failing: &[FailedCheck],
+    gates: &compare::Gates,
 ) -> Against {
     let current: Vec<Record> = measured.iter().map(|m| m.record.clone()).collect();
     let base = baseline::relevant(&against.records, &current);
     let comparison = compare::compare(&base, &current);
-    let gaps = baseline::gaps(&against.records, &current);
+    // A report-only series is never a reason to fail, so it cannot leave a
+    // gap in what the gate checked either.
+    let gaps: Vec<_> = baseline::gaps(&against.records, &current)
+        .into_iter()
+        .filter(|(k, _)| gates.get(&k.0, &k.1).enabled)
+        .collect();
 
     // Series the baseline holds only for other runner classes. The table
     // leaves them out, as it should, so this says why they are absent: a
@@ -930,12 +975,7 @@ fn report_against(
     // a terminal report is not headed for a stranger's pull request.
     print!(
         "{}",
-        compare::markdown(
-            &comparison,
-            &compare::Trend::new(),
-            settings.gate_pct,
-            false
-        )
+        compare::markdown(&comparison, &compare::Trend::new(), gates, false)
     );
     // In the report itself, not only in the warning above it: the table has
     // no way to mark a row whose samples did the wrong work, and a check
@@ -944,7 +984,7 @@ fn report_against(
         println!(
             "\n**Check failed, so this comparison is not evidence of an improvement:** {}. \
              Those numbers come from samples that did the wrong work.",
-            failing.join(", ")
+            labels(failing)
         );
     }
     if !gaps.is_empty() {
@@ -990,17 +1030,26 @@ fn describe_series(key: &compare::Key) -> String {
 /// this run counted has not passed. And a failed check fails the gate, since
 /// a subject that stopped doing its work retires fewer instructions, which is
 /// the one direction the gate lets through.
+///
+/// Each series is held to its own gate, as `tak compare` holds it: the same
+/// [`compare::Gates`], so a `min_delta` floor applies and a report-only
+/// benchmark never fails this — not by regressing, not by a gap, and not by a
+/// failed check, which the report still flags.
 fn gate_against(
     against: &Baseline,
     compared: &Against,
-    failing: &[String],
-    settings: &Settings,
+    failing: &[FailedCheck],
+    gates: &compare::Gates,
 ) -> Result<()> {
+    let failing: Vec<&FailedCheck> = failing
+        .iter()
+        .filter(|f| gates.get(&f.bench, &f.tool).enabled)
+        .collect();
     if !failing.is_empty() {
         bail!(
             "check failed, so nothing is gated against baseline `{}`: {}",
             against.name,
-            failing.join(", ")
+            labels(failing)
         );
     }
     if !compared.gaps.is_empty() {
@@ -1025,16 +1074,28 @@ fn gate_against(
             against.name
         );
     }
-    let regressions = comparison.regressions(settings.gate_pct);
-    if !regressions.is_empty() {
+    let regressions = comparison.regressions(gates);
+    if regressions.is_empty() {
+        return Ok(());
+    }
+    // Worded as `tak compare` words it, so one grep matches both.
+    if comparison.gated_uniformly(gates) {
+        let floor = match gates.global.min_delta {
+            0 => String::new(),
+            n => format!(" and {n} instructions"),
+        };
         bail!(
-            "{} benchmark(s) regressed by more than {}% against baseline `{}`",
+            "{} benchmark(s) regressed by more than {}%{floor} against baseline `{}`",
             regressions.len(),
-            settings.gate_pct,
+            gates.global.pct,
             against.name
         );
     }
-    Ok(())
+    bail!(
+        "{} benchmark(s) regressed beyond their gate against baseline `{}`",
+        regressions.len(),
+        against.name
+    )
 }
 
 /// Save records as a local baseline and say where they went.
@@ -1333,6 +1394,7 @@ fn cmd_compare(
     no_gate: bool,
     settings: &Settings,
 ) -> Result<()> {
+    let gates = compare_gates(settings, None)?;
     let base_sha = notes::rev_parse(&base).with_context(|| format!("cannot resolve {base}"))?;
     let head_sha = notes::rev_parse(&rev).with_context(|| format!("cannot resolve {rev}"))?;
 
@@ -1347,20 +1409,68 @@ fn cmd_compare(
     let trend = gather_trend(&base_sha, &head_sha, &head_records).unwrap_or_default();
     print!(
         "{}",
-        compare::markdown(&comparison, &trend, settings.gate_pct, settings.credit)
+        compare::markdown(&comparison, &trend, &gates, settings.credit)
     );
 
-    let regressions = comparison.regressions(settings.gate_pct);
+    let regressions = comparison.regressions(&gates);
     if regressions.is_empty() || no_gate {
         return Ok(());
     }
     // A non-zero exit is the gate. The table above already says which and by
     // how much, so this only has to be unambiguous about why the job failed.
+    if comparison.gated_uniformly(&gates) {
+        let floor = match gates.global.min_delta {
+            0 => String::new(),
+            n => format!(" and {n} instructions"),
+        };
+        bail!(
+            "{} benchmark(s) regressed by more than {}%{floor}",
+            regressions.len(),
+            gates.global.pct
+        )
+    }
     bail!(
-        "{} benchmark(s) regressed by more than {}%",
-        regressions.len(),
-        settings.gate_pct
+        "{} benchmark(s) regressed beyond their gate",
+        regressions.len()
     )
+}
+
+/// The gate for every series: `[gate]` and its flags, overridden per benchmark
+/// by the `tak.toml` in the working tree.
+///
+/// The working tree's file, not one read from either revision's history. That
+/// is where `[gate]` already comes from, and in CI it is the checked-out head:
+/// a pull request that loosens a benchmark's gate does so in its own diff,
+/// where a reviewer can see it. Reading the base's file instead would make a
+/// new benchmark's gate take effect one merge late.
+///
+/// Loaded before any notes are read, so a bad gate fails the command before it
+/// has fetched anything. No `tak.toml` is fine — every series gets the global
+/// gate, as before per-benchmark gates existed — but one that does not parse
+/// is an error rather than a quiet fallback to a gate the file did not ask for.
+///
+/// `config` is `tak run --config`, for `tak run --baseline`: the file that run
+/// measures from is the one whose gates apply to it.
+fn compare_gates(settings: &Settings, config: Option<&Path>) -> Result<compare::Gates> {
+    let global = global_gate(settings)?;
+    let found = match config {
+        Some(path) => Some((path.to_path_buf(), Config::load(path)?)),
+        None => Config::find(&std::env::current_dir()?)?,
+    };
+    Ok(match found {
+        Some((_, cfg)) => cfg.gates(global),
+        None => compare::Gates::uniform(global),
+    })
+}
+
+/// The `[gate]` settings, checked, from whichever source set them.
+///
+/// Checked by `tak run` as well as `tak compare`. A `TAK_GATE_PCT=-1` exported
+/// in CI would otherwise let a run spend minutes measuring and fail only at
+/// the comparison afterwards, which is the late failure `tak.toml` validation
+/// exists to prevent.
+fn global_gate(settings: &Settings) -> Result<compare::Gate> {
+    compare::Gate::new(settings.gate_pct, settings.gate_min_delta).context("gate_pct")
 }
 
 /// Diagnose the plumbing.

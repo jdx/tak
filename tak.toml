@@ -1,8 +1,16 @@
 # Benchmarks for tak itself. Startup cost is what a CLI's users feel first, and
 # it is the metric instruction counting measures best.
+#
+# Both are report-only. Each is around 450k instructions, three quarters of
+# which is the dynamic loader relocating the binary before `main` runs, so any
+# new dependency moves them by more than 1% without tak doing more work. The
+# comparison still flags a rise beyond the gate; it does not fail on one. See
+# the header of .github/workflows/perf-pr.yml.
 [bench.version]
 cmd = ["./target/release/tak", "--version"]
+gate = { enabled = false }
 
 [bench.help]
 cmd = ["./target/release/tak", "--help"]
 runs = 10
+gate = { enabled = false }

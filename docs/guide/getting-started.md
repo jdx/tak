@@ -105,13 +105,17 @@ is never gated.
   warning names them and nothing is compared for it.
 - `--baseline` reports and exits 0 whatever the numbers say. If a check failed, the report
   says so under the table, because a subject that skips its work usually looks faster.
-- Add `--gate` to fail when an instruction count rose by more than `gate_pct`. `--gate` also
-  fails in every case where it could not check everything it was asked to:
+- Add `--gate` to fail when an instruction count rose beyond its gate. Each benchmark is held
+  to the same gate `tak compare` would use, from `[gate]` and the benchmark's own `gate`
+  table (see [regression gate](/guide/configuration#regression-gate)). That includes the
+  `min_delta` floor. A report-only benchmark (`gate = { enabled = false }`) is flagged but
+  never fails `--gate`.
+- `--gate` also fails for a gated benchmark it could not check:
   - nothing ran;
   - no instruction count appears on both sides;
-  - a benchmark has an instruction count on one side only (its count failed, counters were
-    off, it is new since the baseline was saved, or the baseline is from another runner
-    class);
+  - a benchmark measured in this run cannot be compared on this runner class: its count
+    failed or counters were off, it is new since the baseline was saved, or the baseline
+    holds it only for other runner classes;
   - a check failed.
 
   A gate that passed in those cases would pass changes it never measured.

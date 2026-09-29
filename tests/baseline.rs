@@ -619,3 +619,153 @@ fn a_baseline_on_two_other_runners_is_named_and_not_compared() {
         stdout(&out)
     );
 }
+
+/// A shell loop of `n` iterations: about 11,500 instructions each, so 2000
+/// against 2500 is a rise of roughly 25% and 5.8M instructions.
+fn shell_loop(n: u32) -> String {
+    format!(r#"["sh", "-c", "i=0; while [ $i -lt {n} ]; do i=$((i+1)); done"]"#)
+}
+
+/// `--baseline --gate` holds each benchmark to its own gate, as `tak compare`
+/// does: a loosened `pct` absorbs a rise, a report-only benchmark never
+/// fails, and the global `min_delta` floor applies.
+#[test]
+fn a_baseline_gate_holds_each_benchmark_to_its_own_gate() {
+    if !tak_cli::measure::valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let repo = Repo::new();
+    let toml = |strict: u32, other: u32| {
+        format!(
+            "[bench.strict]\ncmd = {}\n\n\
+             [bench.loose]\ncmd = {}\ngate = {{ pct = 50.0 }}\n\n\
+             [bench.watch]\ncmd = {}\ngate = {{ enabled = false }}\n",
+            shell_loop(strict),
+            shell_loop(other),
+            shell_loop(other)
+        )
+    };
+    let write =
+        |strict, other| std::fs::write(repo.dir.join("tak.toml"), toml(strict, other)).unwrap();
+
+    write(2000, 2000);
+    ok(&tak_run(&repo.dir, &["--save-baseline", "x"], &[]));
+
+    // `loose` and `watch` rise ~25%: within 50%, and report only.
+    write(2000, 2500);
+    let out = tak_run(&repo.dir, &["--baseline", "x", "--gate"], &[]);
+    let report = stdout(ok(&out));
+    assert!(report.contains("report only"), "{report}");
+
+    // `strict` rises too, past the global 1%.
+    write(2500, 2500);
+    let err = fail(&tak_run(&repo.dir, &["--baseline", "x", "--gate"], &[]));
+    assert!(
+        err.contains("1 benchmark(s) regressed beyond their gate against baseline `x`"),
+        "{err}"
+    );
+
+    // A floor above the rise lets it through.
+    ok(&tak_run(
+        &repo.dir,
+        &["--baseline", "x", "--gate", "--gate-min-delta", "100000000"],
+        &[],
+    ));
+}
+
+/// A subject this run did not count, whose count the baseline holds only for
+/// another runner class, must not be skipped while its neighbour passes.
+#[test]
+fn an_uncounted_subject_counted_only_on_another_runner_fails_the_gate() {
+    if !tak_cli::measure::valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let repo = Repo::new();
+    let toml = |b_counters: bool| {
+        format!(
+            "[bench.m.subject.a]\ncmd = [\"sh\", \"-c\", \"exit 0\"]\ncounters = true\n\n\
+             [bench.m.subject.b]\ncmd = [\"sh\", \"-c\", \"exit 0\"]\ncounters = {b_counters}\n"
+        )
+    };
+    std::fs::write(repo.dir.join("tak.toml"), toml(true)).unwrap();
+    // Both subjects on `r1`; only `a` on `r2`.
+    ok(&tak_run(
+        &repo.dir,
+        &["--runner", "r1", "--save-baseline", "x"],
+        &[],
+    ));
+    ok(&tak_run(
+        &repo.dir,
+        &["--runner", "r2", "--subject", "a", "--save-baseline", "x"],
+        &[],
+    ));
+
+    std::fs::write(repo.dir.join("tak.toml"), toml(false)).unwrap();
+    let err = fail(&tak_run(
+        &repo.dir,
+        &["--runner", "r2", "--baseline", "x", "--gate"],
+        &[],
+    ));
+    assert!(
+        err.contains(
+            "`m` (b) on `r2` (not counted in this run, and counted in the baseline only on \
+             runner class `r1`)"
+        ),
+        "{err}"
+    );
+}
+
+/// The same gap, reported without valgrind: nothing is counted here, and the
+/// baseline counted the benchmark only on another class.
+#[test]
+fn an_uncounted_benchmark_counted_only_elsewhere_is_reported() {
+    let repo = Repo::new();
+    write_baseline(
+        &repo,
+        "x",
+        &[&counted_line("s").replace("test-runner", "r1")],
+    );
+    let out = tak_run(
+        &repo.dir,
+        &[NC, "--runner", "r2", "--bench", "s", "--baseline", "x"],
+        &["true"],
+    );
+    assert!(
+        stdout(ok(&out)).contains(
+            "Not gated: `s` on `r2` (not counted in this run, and counted in the baseline \
+             only on runner class `r1`)"
+        ),
+        "{}",
+        stdout(&out)
+    );
+}
+
+/// A report-only benchmark's failed check is still flagged, but does not fail
+/// the gate on its own; a gated one's does.
+#[test]
+fn a_report_only_failed_check_is_flagged_not_failed() {
+    if !tak_cli::measure::valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let repo = Repo::new();
+    let toml = |check: &str| {
+        format!(
+            "[bench.gated]\ncmd = [\"sh\", \"-c\", \"exit 0\"]\n\n\
+             [bench.watch]\ncmd = [\"sh\", \"-c\", \"exit 0\"]\ncheck = \"{check}\"\n\
+             gate = {{ enabled = false }}\n"
+        )
+    };
+    std::fs::write(repo.dir.join("tak.toml"), toml("true")).unwrap();
+    ok(&tak_run(&repo.dir, &["--save-baseline", "x"], &[]));
+
+    std::fs::write(repo.dir.join("tak.toml"), toml("false")).unwrap();
+    let out = tak_run(&repo.dir, &["--baseline", "x", "--gate"], &[]);
+    assert!(
+        stdout(ok(&out)).contains("Check failed"),
+        "{}",
+        stdout(&out)
+    );
+}

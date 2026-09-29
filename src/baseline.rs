@@ -265,6 +265,17 @@ pub enum Gap {
     /// This run counted it and the baseline has never seen it: new since the
     /// baseline was saved.
     NotInBaseline,
+    /// This run did not count it, and the baseline counted it only on these
+    /// other runner classes.
+    UncountedAndOnlyOnOtherRunners(Vec<String>),
+}
+
+fn classes(runners: &[String]) -> String {
+    runners
+        .iter()
+        .map(|r| format!("`{r}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl std::fmt::Display for Gap {
@@ -272,16 +283,15 @@ impl std::fmt::Display for Gap {
         match self {
             Gap::NotCountedHere => write!(f, "not counted in this run"),
             Gap::SavedWithoutCount => write!(f, "saved without an instruction count"),
-            Gap::OnlyOnOtherRunners(runners) => write!(
-                f,
-                "saved only on runner class {}",
-                runners
-                    .iter()
-                    .map(|r| format!("`{r}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            Gap::OnlyOnOtherRunners(runners) => {
+                write!(f, "saved only on runner class {}", classes(runners))
+            }
             Gap::NotInBaseline => write!(f, "not in the baseline"),
+            Gap::UncountedAndOnlyOnOtherRunners(runners) => write!(
+                f,
+                "not counted in this run, and counted in the baseline only on runner class {}",
+                classes(runners)
+            ),
         }
     }
 }
@@ -308,7 +318,22 @@ pub fn gaps(baseline: &[Record], current: &[Record]) -> Vec<(Key, Gap)> {
         let same: Vec<&Record> = baseline.iter().filter(|r| key(r) == k).collect();
         let saved = same.iter().any(|r| counted(r));
         let gap = match (here, saved) {
-            (true, true) | (false, false) => continue,
+            (true, true) => continue,
+            // Uncounted on both sides of this class: wall-clock only by
+            // design, unless this class is absent and another class counted
+            // it. Then the benchmark is one the project gates, and this run
+            // neither counted it nor has anything to hold it to. Skipping it
+            // let `--gate` pass on the strength of the other benchmarks.
+            (false, false) => {
+                if !same.is_empty() {
+                    continue;
+                }
+                let elsewhere = counted_runners(baseline, &k);
+                if elsewhere.is_empty() {
+                    continue;
+                }
+                Gap::UncountedAndOnlyOnOtherRunners(elsewhere)
+            }
             (false, true) => Gap::NotCountedHere,
             (true, false) if !same.is_empty() => Gap::SavedWithoutCount,
             (true, false) => {
@@ -331,6 +356,18 @@ pub fn other_runners(baseline: &[Record], k: &Key) -> Vec<String> {
     let runners: BTreeSet<&str> = baseline
         .iter()
         .filter(|r| r.bench == k.0 && r.tool == k.1 && r.runner != k.2)
+        .map(|r| r.runner.as_str())
+        .collect();
+    runners.into_iter().map(str::to_string).collect()
+}
+
+/// Like [`other_runners`], but only the classes that saved an instruction
+/// count for it.
+fn counted_runners(baseline: &[Record], k: &Key) -> Vec<String> {
+    let runners: BTreeSet<&str> = baseline
+        .iter()
+        .filter(|r| r.bench == k.0 && r.tool == k.1 && r.runner != k.2)
+        .filter(|r| r.metrics.contains_key(crate::compare::GATED_METRIC))
         .map(|r| r.runner.as_str())
         .collect();
     runners.into_iter().map(str::to_string).collect()
@@ -572,6 +609,30 @@ mod tests {
         assert_eq!(
             got[0].1.to_string(),
             "saved only on runner class `r1`, `r2`"
+        );
+    }
+
+    /// Uncounted here and counted only on another class: a gated benchmark
+    /// this run neither counted nor can compare, which a gate must not skip.
+    /// Uncounted on this class on both sides stays wall-clock only.
+    #[test]
+    fn uncounted_here_and_counted_only_elsewhere_is_a_gap() {
+        let base = [rec("a", "r1", 1.0)];
+        let got = gaps(&base, &[wall_only("a", "r2")]);
+        assert_eq!(
+            got[0].1,
+            Gap::UncountedAndOnlyOnOtherRunners(vec!["r1".into()])
+        );
+        assert_eq!(
+            gaps(&[wall_only("a", "r1")], &[wall_only("a", "r2")]),
+            vec![]
+        );
+        assert_eq!(
+            gaps(
+                &[rec("a", "r1", 1.0), wall_only("a", "r2")],
+                &[wall_only("a", "r2")]
+            ),
+            vec![]
         );
     }
 

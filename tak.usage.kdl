@@ -12,6 +12,9 @@ flag --env-allow help="Keep a variable that --env-deny would remove. Repeatable.
 flag --gate-pct help="Percentage an instruction count may rise before `compare` fails." global=#true {
     arg <PCT>
 }
+flag --gate-min-delta help="Instructions a count may rise by before `compare` fails, whatever the percentage." global=#true {
+    arg <N>
+}
 flag no-credit: help="Leave the line naming tak off the end of generated reports." global=#true negate=--no-credit default="true"
 flag --runner help="Machine class to record under. Overrides the derived name." global=#true {
     arg <CLASS>
@@ -56,7 +59,7 @@ cmd run help="Benchmark a command, or everything declared in tak.toml." {
     flag --baseline help="Compare the results against a saved local baseline and print the report `tak compare` prints. Reports only; add --gate to fail on a regression." {
         arg <NAME>
     }
-    flag --gate help="With --baseline, fail when an instruction count rose by more than gate_pct, or when no instruction count could be compared at all."
+    flag --gate help="With --baseline, fail when an instruction count rose beyond its gate — the one `tak compare` would apply — or when a gated benchmark could not be compared."
     flag "-h --help" help="Print help" action=help builtin=#true
     arg "[CMD]..." help="Command to benchmark, after `--`. Omit to run what tak.toml declares." double_dash=required
 }
@@ -130,7 +133,7 @@ cmd compare help="Compare this commit's measurements against another's." {
     long_help #"""
 Compare this commit's measurements against another's.
 
-Fails when an instruction count has risen by more than `gate_pct`. Wall clock is reported and never gated.
+Fails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate` in the working tree's tak.toml. Wall clock is reported and never gated.
 """#
     flag --rev help="Revision to compare. Defaults to HEAD." default=HEAD {
         arg <REV>
@@ -168,12 +171,18 @@ config {
         example "tak run --env-deny GITHUB_TOKEN --env-allow GITHUB_TOKEN"
         source "config" "env.allow"
     }
-    prop "gate_pct" type="float" default=1.0 since="0.0.4" help="How much an instruction count may rise before `tak compare` fails." long_help="How much an instruction count may rise before `tak compare` fails.\n\nA percentage of the base measurement. Only instruction counts are gated. Wall clock is reported and never gated: on the same hardware it moves 4-20% run to run, so a threshold tight enough to catch a real regression would fire constantly, and one loose enough to stay quiet would catch nothing.\n\nThe default of 1% is about fifty times the ~0.02% instruction counting reproduces to, leaving room for the small differences a compiler or dependency bump can produce without turning the gate into noise.\n\nRaise it to report without effectively failing. Setting it to zero fails on any increase at all, which sounds appealing and is not: one extra instruction on a startup path is not worth blocking a pull request over." {
+    prop "gate_pct" type="float" default=1.0 since="0.0.4" help="How much an instruction count may rise before `tak compare` fails." long_help="How much an instruction count may rise before `tak compare` fails.\n\nA percentage of the base measurement. Only instruction counts are gated. Wall clock is reported and never gated: on the same hardware it moves 4-20% run to run, so a threshold tight enough to catch a real regression would fire constantly, and one loose enough to stay quiet would catch nothing.\n\nThe default of 1% is about fifty times the ~0.02% instruction counting reproduces to, leaving room for the small differences a compiler or dependency bump can produce without turning the gate into noise.\n\nRaise it to report without effectively failing. Setting it to zero fails on any increase at all, which sounds appealing and is not: one extra instruction on a startup path is not worth blocking a pull request over.\n\nThis is the gate for every series without its own. A benchmark or subject can set one with `gate = { pct = N }` in `tak.toml`, and that wins over this setting from any source, `--gate-pct` included: the flag moves the default, not the benchmarks a project has singled out." {
         env "TAK_GATE_PCT"
         cli "--gate-pct"
         example "tak compare origin/main --gate-pct 0.5"
         example "TAK_GATE_PCT=5 tak compare origin/main"
         source "config" "gate.pct"
+    }
+    prop "gate_min_delta" type="uint" default=0 since="0.0.14" help="How many instructions a count may rise by before `tak compare` fails, whatever the percentage." long_help="How many instructions a count may rise by before `tak compare` fails, whatever the percentage.\n\nA regression has to exceed both this and `gate_pct`. A percentage alone serves small benchmarks badly: on a 450k-instruction startup check, 1% is 4,500 instructions, which one new dependency's relocations in the dynamic loader can account for before `main` runs. A floor lets such a benchmark keep a tight percentage without failing on a handful of instructions.\n\nThe default of 0 means no floor: any rise beyond `gate_pct` fails. A benchmark or subject can set its own with `gate = { min_delta = N }` in `tak.toml`." {
+        env "TAK_GATE_MIN_DELTA"
+        cli "--gate-min-delta"
+        example "tak compare origin/main --gate-min-delta 20000"
+        source "config" "gate.min_delta"
     }
     prop "credit" type="bool" default=#true since="0.0.4" help="Whether generated reports end with a line naming tak." long_help="Whether generated reports end with a line naming tak.\n\nOn by default. A report that appears in someone's pull request should say what put it there — a reader who has never heard of tak needs a way to find out, and a maintainer evaluating the comment needs to know what to turn off.\n\nTurn it off with `--no-credit`, `TAK_CREDIT=0`, or `credit = false` under `[report]`. Nothing else about the report changes." {
         env "TAK_CREDIT"
