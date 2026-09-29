@@ -70,6 +70,24 @@ TAK_ENV_DENY=GITHUB_TOKEN,GH_TOKEN,NPM_TOKEN tak run
 ```
 
 
+## `gate_min_delta`
+
+- **Type:** `uint`
+- **Default:** `0`
+- **Since:** 0.0.14
+- **Set with:** `--gate-min-delta`, `TAK_GATE_MIN_DELTA`, config `gate.min_delta`
+
+How many instructions a count may rise by before `tak compare` fails, whatever the percentage.
+
+A regression has to exceed both this and `gate_pct`. A percentage alone serves small benchmarks badly: on a 450k-instruction startup check, 1% is 4,500 instructions, which one new dependency's relocations in the dynamic loader can account for before `main` runs. A floor lets such a benchmark keep a tight percentage without failing on a handful of instructions.
+
+The default of 0 means no floor: any rise beyond `gate_pct` fails. A benchmark or subject can set its own with `gate = { min_delta = N }` in `tak.toml`.
+
+```
+tak compare origin/main --gate-min-delta 20000
+```
+
+
 ## `gate_pct`
 
 - **Type:** `float`
@@ -84,6 +102,8 @@ A percentage of the base measurement. Only instruction counts are gated. Wall cl
 The default of 1% is about fifty times the ~0.02% instruction counting reproduces to, leaving room for the small differences a compiler or dependency bump can produce without turning the gate into noise.
 
 Raise it to report without effectively failing. Setting it to zero fails on any increase at all, which sounds appealing and is not: one extra instruction on a startup path is not worth blocking a pull request over.
+
+This is the gate for every series without its own. A benchmark or subject can set one with `gate = { pct = N }` in `tak.toml`, and that wins over this setting from any source, `--gate-pct` included: the flag moves the default, not the benchmarks a project has singled out.
 
 ```
 tak compare origin/main --gate-pct 0.5

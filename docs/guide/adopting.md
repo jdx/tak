@@ -253,8 +253,8 @@ stopped recording pass without comparing anything. A regression still fails unde
 `--allow-empty`; only `--no-gate` reports without ever failing.
 
 If the workflow also posts a sticky pull-request comment, keep the write token in a separate
-reporting job that checks out no code and executes nothing from the pull request. Pass the Markdown report
-and exit status to it as an artifact. mise's
+reporting job that checks out no code and executes nothing from the pull request. Pass the
+Markdown report and exit status to it as an artifact. mise's
 [pull-request workflow](https://github.com/jdx/mise/blob/main/.github/workflows/perf-pr.yml)
 shows that separation.
 

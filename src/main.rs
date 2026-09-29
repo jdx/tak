@@ -48,6 +48,9 @@ struct Cli {
     /// Percentage an instruction count may rise before `compare` fails.
     #[usage(long, global, value_name = "PCT", setting = "gate_pct")]
     gate_pct: Option<f64>,
+    /// Instructions a count may rise by before `compare` fails, whatever the percentage.
+    #[usage(long, global, value_name = "N", setting = "gate_min_delta")]
+    gate_min_delta: Option<u64>,
     /// Leave the line naming tak off the end of generated reports.
     // `SetFalse`: the long spelling is the negation of the setting, so `--no-credit`
     // contributes `false` to the settings layer and its absence contributes nothing.
@@ -162,9 +165,10 @@ enum Cmd {
     },
     /// Compare this commit's measurements against another's.
     ///
-    /// Fails when an instruction count has risen by more than `gate_pct`, or
-    /// when no series was measured on both sides. Wall clock is reported and
-    /// never gated.
+    /// Fails when an instruction count has risen by more than `gate_pct` and
+    /// `gate_min_delta`, or by more than a benchmark's own `gate` in the
+    /// working tree's tak.toml, or when no series was measured on both
+    /// sides. Wall clock is reported and never gated.
     Compare {
         /// Revision to compare against.
         #[usage(arg, default = "origin/main")]
@@ -309,6 +313,7 @@ struct Measured {
 }
 
 fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
+    global_gate(settings)?;
     // An explicit command always wins; tak.toml is only consulted when none is
     // given, so ad-hoc measurement never depends on repository state.
     if cmd.is_empty() {
@@ -1029,6 +1034,7 @@ fn cmd_compare(
     allow_empty: bool,
     settings: &Settings,
 ) -> Result<()> {
+    let gates = compare_gates(settings)?;
     let base_sha = notes::rev_parse(&base).with_context(|| format!("cannot resolve {base}"))?;
     let head_sha = notes::rev_parse(&rev).with_context(|| format!("cannot resolve {rev}"))?;
 
@@ -1043,7 +1049,7 @@ fn cmd_compare(
     let trend = gather_trend(&base_sha, &head_sha, &head_records).unwrap_or_default();
     print!(
         "{}",
-        compare::markdown(&comparison, &trend, settings.gate_pct, settings.credit)
+        compare::markdown(&comparison, &trend, &gates, settings.credit)
     );
 
     if no_gate {
@@ -1063,17 +1069,58 @@ fn cmd_compare(
              pull request after adopting tak or across a runner-class migration"
         )
     }
-    let regressions = comparison.regressions(settings.gate_pct);
+    let regressions = comparison.regressions(&gates);
     if regressions.is_empty() {
         return Ok(());
     }
     // A non-zero exit is the gate. The table above already says which and by
     // how much, so this only has to be unambiguous about why the job failed.
+    if comparison.gated_uniformly(&gates) {
+        let floor = match gates.global.min_delta {
+            0 => String::new(),
+            n => format!(" and {n} instructions"),
+        };
+        bail!(
+            "{} benchmark(s) regressed by more than {}%{floor}",
+            regressions.len(),
+            gates.global.pct
+        )
+    }
     bail!(
-        "{} benchmark(s) regressed by more than {}%",
-        regressions.len(),
-        settings.gate_pct
+        "{} benchmark(s) regressed beyond their gate",
+        regressions.len()
     )
+}
+
+/// The gate for every series: `[gate]` and its flags, overridden per benchmark
+/// by the `tak.toml` in the working tree.
+///
+/// The working tree's file, not one read from either revision's history. That
+/// is where `[gate]` already comes from, and in CI it is the checked-out head:
+/// a pull request that loosens a benchmark's gate does so in its own diff,
+/// where a reviewer can see it. Reading the base's file instead would make a
+/// new benchmark's gate take effect one merge late.
+///
+/// Loaded before any notes are read, so a bad gate fails the command before it
+/// has fetched anything. No `tak.toml` is fine — every series gets the global
+/// gate, as before per-benchmark gates existed — but one that does not parse
+/// is an error rather than a quiet fallback to a gate the file did not ask for.
+fn compare_gates(settings: &Settings) -> Result<compare::Gates> {
+    let global = global_gate(settings)?;
+    Ok(match Config::find(&std::env::current_dir()?)? {
+        Some((_, cfg)) => cfg.gates(global),
+        None => compare::Gates::uniform(global),
+    })
+}
+
+/// The `[gate]` settings, checked, from whichever source set them.
+///
+/// Checked by `tak run` as well as `tak compare`. A `TAK_GATE_PCT=-1` exported
+/// in CI would otherwise let a run spend minutes measuring and fail only at
+/// the comparison afterwards, which is the late failure `tak.toml` validation
+/// exists to prevent.
+fn global_gate(settings: &Settings) -> Result<compare::Gate> {
+    compare::Gate::new(settings.gate_pct, settings.gate_min_delta).context("gate_pct")
 }
 
 /// Diagnose the plumbing.

@@ -83,5 +83,19 @@ Older tak releases print the same report and exit 0. A workflow that may run one
 fail when the report contains `**Nothing was compared`, as the
 [pull-request example](/guide/adopting#gate-pull-requests) does.
 
+Each benchmark can have its own gate in `tak.toml`: a different percentage, an absolute
+`min_delta` floor, or `enabled = false` to report a benchmark without failing on it. See
+[per-benchmark gates](/guide/configuration#per-benchmark-gates). `tak compare` reads these from
+the `tak.toml` in the working tree, not from the notes or from the base revision. In a
+pull-request job that checks out the head, the pull request's own `tak.toml` decides, so a
+change to a gate is part of the diff under review.
+
+When some benchmark's gate differs from `[gate]`, the verdict says
+`N benchmark(s) above their gate` instead of `N benchmark(s) above the 1% gate`, and a
+report-only benchmark that rose is listed as `N report-only benchmark(s) above their gate`.
+A script that greps the report for a regression should match both forms. The exit status is
+simpler to rely on: `tak compare` exits non-zero only for a regression in a gated benchmark, for
+an empty comparison without `--allow-empty`, or for an error.
+
 Always keep measurements partitioned by runner class. Comparing numbers across runner classes
 turns an infrastructure change into an apparent code regression.
