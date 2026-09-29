@@ -123,7 +123,7 @@ cmd compare help="Compare this commit's measurements against another's." {
     long_help #"""
 Compare this commit's measurements against another's.
 
-Fails when an instruction count has risen by more than `gate_pct`. Wall clock is reported and never gated.
+Fails when an instruction count has risen by more than `gate_pct`. Wall clock is reported and never gated. A regression in a benchmark named by `--accept`, or by a `Tak-Accept:` trailer on a commit in BASE..REV, is reported as accepted and does not fail.
 """#
     flag --rev help="Revision to compare. Defaults to HEAD." default=HEAD {
         arg <REV>
@@ -132,6 +132,9 @@ Fails when an instruction count has risen by more than `gate_pct`. Wall clock is
         arg <REMOTE>
     }
     flag --no-gate help="Report without failing, whatever the numbers say."
+    flag --accept help="Accept a regression in this benchmark: report it, but do not fail on it. Repeatable, or comma-separated." var=#true {
+        arg <BENCH>
+    }
     flag "-h --help" help="Print help" action=help builtin=#true
     arg "[BASE]" help="Revision to compare against." default="origin/main"
 }

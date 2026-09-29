@@ -5,7 +5,7 @@
 
 Compare this commit's measurements against another's.
 
-Fails when an instruction count has risen by more than `gate_pct`. Wall clock is reported and never gated.
+Fails when an instruction count has risen by more than `gate_pct`. Wall clock is reported and never gated. A regression in a benchmark named by `--accept`, or by a `Tak-Accept:` trailer on a commit in BASE..REV, is reported as accepted and does not fail.
 
 ## Arguments
 - **`[BASE]`** — Revision to compare against.
@@ -20,4 +20,5 @@ Fails when an instruction count has risen by more than `gate_pct`. Wall clock is
 
   **Default:** `origin`
 - **`--no-gate`** — Report without failing, whatever the numbers say.
+- **`--accept <BENCH>`** — Accept a regression in this benchmark: report it, but do not fail on it. Repeatable, or comma-separated.
 - **`-h --help`** — Print help

@@ -244,6 +244,26 @@ and exit status to it as an artifact. mise's
 [pull-request workflow](https://github.com/jdx/mise/blob/main/.github/workflows/perf-pr.yml)
 shows that separation.
 
+### When a regression is intentional
+
+A change that makes a benchmark more expensive on purpose should say so rather than weaken
+the gate. Add a trailer to the final paragraph of the commit message:
+
+```text
+Tak-Accept: startup
+```
+
+The comparison above reads trailers from every commit between the merge base and the pull
+request's head. The `fetch-depth: 0` checkout provides those commits. The regression in
+`startup` is reported as accepted, with the commit that accepted it. Every other benchmark
+still gates. To map a pull-request label to the same result, pass `--accept startup` to
+`tak compare` instead.
+
+If the repository squash-merges pull requests, keep the trailer in the final paragraph of the
+squashed commit message. Otherwise the acceptance is not recorded in main-branch history. See
+[accepting an intentional regression](/guide/ci#accept-an-intentional-regression) for the
+details and for who can add a trailer.
+
 ## Backfill published releases
 
 A new adopter can seed history with `tak backfill` instead of rebuilding many historical

@@ -927,6 +927,26 @@
             "global": false
           },
           {
+            "name": "accept",
+            "usage": "--accept <BENCH>",
+            "help": "Accept a regression in this benchmark: report it, but do not fail on it. Repeatable, or comma-separated.",
+            "help_first_line": "Accept a regression in this benchmark: report it, but do not fail on it. Repeatable, or comma-separated.",
+            "short": [],
+            "long": [
+              "accept"
+            ],
+            "var": true,
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "BENCH",
+              "usage": "<BENCH>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
             "name": "help",
             "usage": "-h --help",
             "help": "Print help",
@@ -948,7 +968,7 @@
         "hide": false,
         "args_override_self": true,
         "help": "Compare this commit's measurements against another's.",
-        "help_long": "Compare this commit's measurements against another's.\n\nFails when an instruction count has risen by more than `gate_pct`. Wall clock is reported and never gated.",
+        "help_long": "Compare this commit's measurements against another's.\n\nFails when an instruction count has risen by more than `gate_pct`. Wall clock is reported and never gated. A regression in a benchmark named by `--accept`, or by a `Tak-Accept:` trailer on a commit in BASE..REV, is reported as accepted and does not fail.",
         "name": "compare",
         "aliases": [],
         "hidden_aliases": [],

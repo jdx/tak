@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use usage_rs::{Args, Cli, Subcommands};
 
+use tak_cli::accept::{self, Acceptances};
 use tak_cli::backfill;
 use tak_cli::compare;
 use tak_cli::config::{
@@ -163,7 +164,9 @@ enum Cmd {
     /// Compare this commit's measurements against another's.
     ///
     /// Fails when an instruction count has risen by more than `gate_pct`. Wall
-    /// clock is reported and never gated.
+    /// clock is reported and never gated. A regression in a benchmark named by
+    /// `--accept`, or by a `Tak-Accept:` trailer on a commit in BASE..REV, is
+    /// reported as accepted and does not fail.
     Compare {
         /// Revision to compare against.
         #[usage(arg, default = "origin/main")]
@@ -177,6 +180,10 @@ enum Cmd {
         /// Report without failing, whatever the numbers say.
         #[usage(long)]
         no_gate: bool,
+        /// Accept a regression in this benchmark: report it, but do not fail
+        /// on it. Repeatable, or comma-separated.
+        #[usage(long, value_name = "BENCH")]
+        accept: Vec<String>,
     },
     /// Diagnose the git-notes plumbing.
     Doctor,
@@ -1019,17 +1026,33 @@ fn cmd_compare(
     rev: String,
     remote: String,
     no_gate: bool,
+    accept_flags: Vec<String>,
     settings: &Settings,
 ) -> Result<()> {
     let base_sha = notes::rev_parse(&base).with_context(|| format!("cannot resolve {base}"))?;
     let head_sha = notes::rev_parse(&rev).with_context(|| format!("cannot resolve {rev}"))?;
+
+    let mut accepted = Acceptances::default();
+    for list in &accept_flags {
+        accepted.add(list, accept::Source::Flag);
+    }
+    // Fatal, unlike the trend below. Carrying on without the trailers would
+    // still fail closed, but on a regression the author already accepted, with
+    // a report that says nothing about why the acceptance was not seen.
+    let log = notes::trailers(&base_sha, &head_sha, accept::TRAILER).with_context(|| {
+        format!(
+            "cannot read {} trailers from {base}..{rev}",
+            accept::TRAILER
+        )
+    })?;
+    accepted.add_trailer_log(&log);
 
     // One fetch, not two: `read` refreshes from the remote, and doing it twice
     // doubles the round trip for the same ref.
     let base_records = notes::read(Some(&remote), &base_sha)?;
     let head_records = notes::read(None, &head_sha)?;
 
-    let comparison = compare::compare(&base_records, &head_records);
+    let comparison = compare::compare(&base_records, &head_records).with_accepted(accepted);
     // Never fatal: a shallow checkout has no history to walk, and a missing
     // sparkline is a smaller loss than a failed gate.
     let trend = gather_trend(&base_sha, &head_sha, &head_records).unwrap_or_default();
@@ -1038,15 +1061,15 @@ fn cmd_compare(
         compare::markdown(&comparison, &trend, settings.gate_pct, settings.credit)
     );
 
-    let regressions = comparison.regressions(settings.gate_pct);
-    if regressions.is_empty() || no_gate {
+    let failures = comparison.failures(settings.gate_pct);
+    if failures.is_empty() || no_gate {
         return Ok(());
     }
     // A non-zero exit is the gate. The table above already says which and by
     // how much, so this only has to be unambiguous about why the job failed.
     bail!(
         "{} benchmark(s) regressed by more than {}%",
-        regressions.len(),
+        failures.len(),
         settings.gate_pct
     )
 }
@@ -1474,7 +1497,15 @@ fn main() -> Result<()> {
             rev,
             remote,
             no_gate,
-        } => cmd_compare(base, rev, remote, no_gate, &resolve_settings(&overrides)?),
+            accept,
+        } => cmd_compare(
+            base,
+            rev,
+            remote,
+            no_gate,
+            accept,
+            &resolve_settings(&overrides)?,
+        ),
         // Tolerant on purpose: doctor diagnoses a broken setup, so a tak.toml
         // it cannot read must not stop it from running. Falling all the way
         // back to the defaults threw away the flag and the environment too, so
