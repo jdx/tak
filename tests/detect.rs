@@ -173,16 +173,52 @@ fn the_window_bounds_what_is_examined() {
     assert!(!out.status.success(), "a window of one cannot hold a step");
 }
 
-/// A head with nothing recorded compares nothing and must say so, rather than
-/// read like a pass.
+/// A head with nothing recorded compares nothing. That fails, and says why,
+/// rather than reading like a pass.
 #[test]
-fn an_unrecorded_head_says_nothing_was_compared() {
+fn an_unrecorded_head_fails_as_nothing_compared() {
     let (dir, c) = repo();
     let out = tak(dir.path(), &["detect", &c[2]]);
     let md = stdout(&out);
-    assert!(out.status.success(), "{md}");
-    assert!(md.contains("**Nothing was compared"), "{md}");
+    assert!(!out.status.success(), "{md}");
+    assert!(
+        md.contains("**Nothing was compared at `") && md.contains("so this check fails.**"),
+        "{md}"
+    );
     assert!(md.contains("No instruction counts are recorded"), "{md}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("pass --allow-empty"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The first recording has nothing before it. It fails by default, passes
+/// with `--allow-empty`, and `--no-gate` — which is about what the numbers
+/// say — does not also waive it.
+#[test]
+fn a_first_recording_needs_allow_empty() {
+    let (dir, c) = repo();
+    let out = tak(dir.path(), &["detect", &c[0]]);
+    let md = stdout(&out);
+    assert!(!out.status.success(), "{md}");
+    assert!(
+        md.contains("has an earlier recorded point in the window"),
+        "{md}"
+    );
+    assert!(md.contains("pass `--allow-empty`"), "{md}");
+
+    let out = tak(dir.path(), &["detect", &c[0], "--no-gate"]);
+    assert!(!out.status.success(), "--no-gate is not --allow-empty");
+
+    let out = tak(dir.path(), &["detect", &c[0], "--allow-empty"]);
+    let md = stdout(&out);
+    assert!(out.status.success(), "{md}");
+    assert!(md.contains("nothing was gated** (`--allow-empty`)"), "{md}");
+
+    // It waives only the empty case: a real step still fails.
+    let out = tak(dir.path(), &["detect", &c[3], "--allow-empty"]);
+    assert!(!out.status.success(), "{}", stdout(&out));
 }
 
 /// First-parent only: a merged side branch's measurements are not trunk

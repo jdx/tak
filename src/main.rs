@@ -200,6 +200,13 @@ enum Cmd {
         /// Report without failing, whatever the numbers say.
         #[usage(long)]
         no_gate: bool,
+        /// Succeed when nothing could be compared: REV has no instruction
+        /// counts, or none of its series has an earlier point in the window.
+        /// Without it that fails, because a check that examined nothing
+        /// otherwise looks like a pass. Needed on a first recording or the
+        /// first on a new runner class.
+        #[usage(long)]
+        allow_empty: bool,
     },
     /// Diagnose the git-notes plumbing.
     Doctor,
@@ -1080,6 +1087,7 @@ fn cmd_detect(
     window: usize,
     remote: String,
     no_gate: bool,
+    allow_empty: bool,
     settings: &Settings,
 ) -> Result<()> {
     // Up front, before any git work: one recorded commit has no step to find,
@@ -1095,8 +1103,17 @@ fn cmd_detect(
     let (walked, shallow_cutoff) = detect::gather(&head, window)?;
     let mut found = detect::analyze(&walked, settings.gate_pct);
     found.shallow_cutoff = shallow_cutoff;
+    found.allow_empty = allow_empty;
     print!("{}", detect::markdown(&found, settings.credit));
 
+    // Independent of --no-gate, which is about what the numbers say. Here
+    // there are no numbers, and passing would claim a check that never ran.
+    if found.empty_fails() {
+        bail!(
+            "nothing was compared at {}; pass --allow-empty if that is expected",
+            &head[..12]
+        );
+    }
     let failures = found.failures();
     if failures.is_empty() || no_gate {
         return Ok(());
@@ -1540,7 +1557,15 @@ fn main() -> Result<()> {
             window,
             remote,
             no_gate,
-        } => cmd_detect(rev, window, remote, no_gate, &resolve_settings(&overrides)?),
+            allow_empty,
+        } => cmd_detect(
+            rev,
+            window,
+            remote,
+            no_gate,
+            allow_empty,
+            &resolve_settings(&overrides)?,
+        ),
         // Tolerant on purpose: doctor diagnoses a broken setup, so a tak.toml
         // it cannot read must not stop it from running. Falling all the way
         // back to the defaults threw away the flag and the environment too, so

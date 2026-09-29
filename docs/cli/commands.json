@@ -1033,6 +1033,18 @@
             "global": false
           },
           {
+            "name": "allow-empty",
+            "usage": "--allow-empty",
+            "help": "Succeed when nothing could be compared: REV has no instruction counts, or none of its series has an earlier point in the window. Without it that fails, because a check that examined nothing otherwise looks like a pass. Needed on a first recording or the first on a new runner class.",
+            "help_first_line": "Succeed when nothing could be compared: REV has no instruction counts, or none of its series has an earlier point in the window. Without it that fails, because a check that examined nothing otherwise looks like a pass. Needed on a first recording or the first on a new runner class.",
+            "short": [],
+            "long": [
+              "allow-empty"
+            ],
+            "hide": false,
+            "global": false
+          },
+          {
             "name": "help",
             "usage": "-h --help",
             "help": "Print help",

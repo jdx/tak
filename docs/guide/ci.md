@@ -93,7 +93,7 @@ with measurements (`--window` changes the count) and compares each series' conse
 recorded points. A series is a benchmark, tool, and runner class; different runner classes
 are never compared.
 
-- **A step onto the newest commit** above the gate fails the command. Only that step fails: the
+- **A step onto the newest commit** above the gate fails the command. No older step can: the
   run for the next commit passes, so a main workflow fails once, on the push that introduced
   the step, instead of on every push after it.
 - **A step across unrecorded commits** is reported as a range, such as `a1b2c3d4e5f6..0f9e8d7c6b5a
@@ -107,10 +107,19 @@ Only instruction counts are examined. Wall-clock time is shown beside each step 
 gates. The gate is the same `gate_pct` setting that `tak compare` uses.
 
 When the newest commit has no instruction counts, or no series on it has an earlier point in
-the window, the report says **Nothing was compared** and the command succeeds. The first
-recording on a new runner class is normal. A checkout without history is not: the walk needs
-the commits between recorded points, and the default `actions/checkout` fetch of one commit
-leaves nothing to walk. The report notes when a shallow clone cut the walk short.
+the window, the report says **Nothing was compared** and the command fails, because a check
+that examined nothing would otherwise look like a pass. `--no-gate` does not change this; it
+only stops a step from failing the command.
+
+On the first recording, or the first on a new runner class, there is nothing earlier to
+compare with. Pass `--allow-empty` for that run, or seed the history first by recording an
+earlier commit on the same runner class. Other causes are configuration problems:
+
+- The checkout has no history. The walk needs the commits between recorded points, and the
+  default `actions/checkout` fetch of one commit leaves nothing to walk. The report notes when
+  a shallow clone cut the walk short.
+- The recording step ran without Valgrind, so it stored timing but no instruction counts.
+- The commit was never recorded. Run `tak detect` after `tak run --record`.
 
 This is a simple step detector for near-deterministic counts, not statistical change-point
 detection. It does not model noise and does not look at timing metrics.

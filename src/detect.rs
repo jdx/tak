@@ -100,6 +100,9 @@ pub struct Detection {
     /// The walk hit a shallow clone's boundary before the window filled, so a
     /// short history here may be the checkout's rather than the project's.
     pub shallow_cutoff: bool,
+    /// Whether an empty comparison was accepted (`--allow-empty`) rather than
+    /// failed. Carried here so the report and the exit status cannot disagree.
+    pub allow_empty: bool,
 }
 
 impl Detection {
@@ -118,6 +121,20 @@ impl Detection {
     /// No series at the head had anything to be compared against.
     pub fn nothing_compared(&self) -> bool {
         self.latest.is_empty()
+    }
+
+    /// Whether comparing nothing fails the command.
+    ///
+    /// By default it does. A check that passes when it examined nothing is
+    /// indistinguishable, from the outside, from one that examined everything
+    /// and found it clean — and the ways to get here by accident (a shallow
+    /// checkout, a recording step that stopped producing instruction counts, a
+    /// runner class that drifted) are exactly the ones nobody reads a green
+    /// job's summary to find. The legitimate cases, a first recording or a new
+    /// runner class, are rare and known in advance, so they are the ones asked
+    /// to opt out.
+    pub fn empty_fails(&self) -> bool {
+        self.nothing_compared() && !self.allow_empty
     }
 }
 
@@ -381,12 +398,22 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
              `tak run --record` before running `tak detect`."
         } else {
             "No series measured here has an earlier recorded point in the window: \
-             this is the first recording, the history is too short, or the runner \
-             class changed, which deliberately starts a new series."
+             this is the first recording, the history is too short or shallow, or \
+             the runner class changed, which deliberately starts a new series."
         };
-        out.push_str(&format!(
-            "**Nothing was compared at `{head}`, and so nothing was gated.** {why}\n"
-        ));
+        if d.allow_empty {
+            out.push_str(&format!(
+                "**Nothing was compared at `{head}`, and so nothing was gated** \
+                 (`--allow-empty`). {why}\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "**Nothing was compared at `{head}`, so this check fails.** {why} \
+                 When that is expected — the first recording, or the first on a new \
+                 runner class — pass `--allow-empty`, or record an earlier commit on \
+                 the same runner class first.\n"
+            ));
+        }
     } else {
         out.push_str(
             "| benchmark | trend | step | instructions | Δ | wall (min) | Δ |\n\
@@ -497,7 +524,7 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
     }
 
     out.push_str(
-        "\n<sub>Only instruction counts gate, and only on the newest commit. Wall clock \
+        "\n<sub>Only instruction counts gate, and only a step onto the newest commit. Wall clock \
          is shown for context — on identical hardware it moves 4-20% run to run.</sub>\n",
     );
     if credit {
@@ -706,6 +733,32 @@ mod tests {
         let md = markdown(&d, false);
         assert!(md.contains("No instruction counts are recorded"), "{md}");
         assert!(md.contains("not at `c2`"), "{md}");
+    }
+
+    /// Comparing nothing fails unless it was explicitly accepted, and the
+    /// report says which of the two happened and what to do about it.
+    #[test]
+    fn nothing_compared_fails_unless_allowed() {
+        let mut d = analyze(&walk(&[Some(1000.0)]), 1.0);
+        assert!(d.nothing_compared());
+        assert!(d.empty_fails(), "empty is a failure by default");
+        let md = markdown(&d, false);
+        assert!(md.contains("so this check fails.**"), "{md}");
+        assert!(md.contains("pass `--allow-empty`"), "{md}");
+        assert!(!md.contains("nothing was gated"), "{md}");
+
+        d.allow_empty = true;
+        assert!(!d.empty_fails());
+        let md = markdown(&d, false);
+        assert!(md.contains("nothing was gated** (`--allow-empty`)"), "{md}");
+        assert!(!md.contains("this check fails"), "{md}");
+    }
+
+    /// A comparison that happened is never an empty one, whatever the flag.
+    #[test]
+    fn a_real_comparison_is_not_empty() {
+        let d = analyze(&walk(&[Some(1000.0), Some(1000.0)]), 1.0);
+        assert!(!d.empty_fails());
     }
 
     /// Only instruction counts may drive a failure, however much wall clock

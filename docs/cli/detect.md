@@ -20,4 +20,5 @@ Meant for the main-branch workflow, after recording. Walks REV's first-parent hi
 
   **Default:** `origin`
 - **`--no-gate`** — Report without failing, whatever the numbers say.
+- **`--allow-empty`** — Succeed when nothing could be compared: REV has no instruction counts, or none of its series has an earlier point in the window. Without it that fails, because a check that examined nothing otherwise looks like a pass. Needed on a first recording or the first on a new runner class.
 - **`-h --help`** — Print help

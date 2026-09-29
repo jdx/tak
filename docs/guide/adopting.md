@@ -155,20 +155,29 @@ contains multiple commits records only its final commit; use one commit per push
 intermediate commit must have a measurement.
 
 `tak detect` runs after `tak push` so the measurement is published even when the check fails.
-It fails only when the step onto the commit being measured exceeds the gate. The run for the
-next push passes again, and older steps, sub-threshold drift, and steps spread over unrecorded
-commits are listed in the job summary without failing. A failed run on the main branch is the
-notification: GitHub marks the commit with a failed check and, subject to their notification
-settings, notifies whoever triggered the run, which for a push is the person who pushed or
-merged it. A team that wants more can add an
-`if: failure()` step that opens an issue or posts to chat. See
+It fails when the step onto the commit being measured exceeds the gate, including a step
+spread over earlier pushes that were not recorded. The run for the next push passes again.
+Older steps and sub-threshold drift are listed in the job summary without failing. A failed
+run on the main branch is the notification: GitHub marks the commit with a failed check and,
+subject to their notification settings, notifies whoever triggered the run, which for a push
+is the person who pushed or merged it. A team that wants more can add an `if: failure()` step
+that opens an issue or posts to chat. See
 [CI and git notes](/guide/ci#detect-regressions-that-landed) for exactly what is reported.
+
+`tak detect` also fails when it has nothing to compare: the commit has no instruction counts,
+or none of its series has an earlier recorded point. On the first recording, and on the first
+run after changing `[runner].class`, that is expected. Either seed the history first, by
+adding the recording workflow in one push and the `tak detect` step in a later one, or run
+that one push with `tak detect --allow-empty` and remove the flag afterwards. Leaving
+`--allow-empty` in place means a checkout without history or a recording that stopped
+producing instruction counts also passes.
 
 `fetch-depth: 0` gives the walk the commits between recorded points. A bounded depth works if
 it reaches back past the oldest of the 20 recorded commits the check examines by default.
 
 The hosted runner label alone does not capture every input. If its image, compiler, standard
-library, build profile, or CPU class changes, update `[runner].class` to start a new series.
+library, build profile, or CPU class changes, update `[runner].class` to start a new series,
+and pass `--allow-empty` to `tak detect` for the push that makes the change.
 
 See mise's [main-branch workflow](https://github.com/jdx/mise/blob/main/.github/workflows/perf.yml)
 for a pinned, cache-aware example.
