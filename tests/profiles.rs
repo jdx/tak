@@ -252,8 +252,12 @@ fn a_subject_printing_valgrinds_words_keeps_its_count() {
     let (kept, raw) = measure::subject_profile(&s, &Settings::default())
         .expect("a count, not a failure")
         .expect("valgrind present");
-    assert_eq!(kept.min, plain.min);
-    assert!(!raw.expect("the profile was kept").is_empty());
+    // Against the profile from the same measurement, not against `plain`: two
+    // separate measurements need not agree to the instruction.
+    assert!(kept.min > 10_000, "implausibly low: {}", kept.min);
+    let raw = raw.expect("the profile was kept");
+    let p = profile::parse(&String::from_utf8(raw).unwrap()).expect("cachegrind's own output");
+    assert_eq!(p.total, kept.min);
 }
 
 #[cfg(unix)]
