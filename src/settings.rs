@@ -88,7 +88,7 @@ pub struct Settings {
     )]
     pub env_allow: Vec<String>,
 
-    /// How much an instruction count may rise before `tak compare` fails.
+    /// How much an instruction count may rise before `tak compare` or `tak detect` fails.
     ///
     /// A percentage of the base measurement. Only instruction counts are gated. Wall
     /// clock is reported and never gated: on the same hardware it moves 4-20% run to

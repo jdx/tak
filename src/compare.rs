@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const GATED_METRIC: &str = "instructions";
 
 /// The timing metric shown alongside it, for context only.
-const WALL_METRIC: &str = "wall_min_ms";
+pub(crate) const WALL_METRIC: &str = "wall_min_ms";
 
 /// What identifies a comparable series.
 ///
@@ -240,7 +240,7 @@ pub fn sparkline(values: &[f64]) -> String {
 }
 
 /// `12345678` -> `12,345,678`
-fn thousands(v: f64) -> String {
+pub(crate) fn thousands(v: f64) -> String {
     let n = format!("{:.0}", v.abs());
     let mut out = String::new();
     for (i, c) in n.chars().enumerate() {
@@ -253,7 +253,7 @@ fn thousands(v: f64) -> String {
 }
 
 /// A percentage for display, or `new` when there is no base to compare to.
-fn signed_pct(p: Option<f64>) -> String {
+pub(crate) fn signed_pct(p: Option<f64>) -> String {
     match p {
         Some(p) => format!("{}{:.2}%", if p >= 0.0 { "+" } else { "" }, p),
         None => "new".to_string(),
@@ -272,7 +272,7 @@ fn signed_pct(p: Option<f64>) -> String {
 /// maintainer deciding whether to keep the comment needs to know what to turn
 /// off. Small, last, and one line — advertising that gets in the way of the
 /// numbers would be its own argument for removing it.
-const CREDIT: &str = "\n<sub>Measured by [tak](https://github.com/jdx/tak) — instruction-counted \
+pub(crate) const CREDIT: &str = "\n<sub>Measured by [tak](https://github.com/jdx/tak) — instruction-counted \
      CLI benchmarks, stored in this repository's git notes.</sub>\n";
 
 pub fn markdown(c: &Comparison, trend: &Trend, gate_pct: f64, credit: bool) -> String {
@@ -406,7 +406,7 @@ fn table(c: &Comparison, trend: &Trend, gate_pct: f64) -> String {
 /// Dropping the tool made two series that differ only by tool render
 /// identically, so a report could say the same benchmark both started and
 /// stopped gating and mean two different programs.
-fn describe(key: &Key) -> String {
+pub(crate) fn describe(key: &Key) -> String {
     let (bench, tool, runner) = key;
     if tool == "self" {
         format!("`{bench}` on `{runner}`")

@@ -244,6 +244,34 @@ pub fn rev_list(rev: &str, n: usize) -> Result<Vec<String>> {
     Ok(out.lines().map(str::to_string).collect())
 }
 
+/// Every commit that carries a note under [`NOTES_REF`], in one call.
+///
+/// Walking a long history by asking each commit for its note costs a process
+/// per commit, and most commits on a busy trunk have none — a push of several
+/// commits records only its tip. The notes tree already names every annotated
+/// commit, so listing it once and intersecting is the cheap way round.
+///
+/// A ref that does not exist yet lists as empty rather than failing, which is
+/// the state of every repository before its first recording.
+pub fn annotated() -> Result<std::collections::BTreeSet<String>> {
+    let out = git(&["notes", "--ref", NOTES_REF, "list"])?;
+    // Each line is `<note blob> <annotated object>`.
+    Ok(out
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(1))
+        .map(str::to_string)
+        .collect())
+}
+
+/// Whether this is a shallow clone, whose history stops short of the root.
+///
+/// `actions/checkout` fetches one commit by default, and a walk of that history
+/// finds nothing earlier to compare with — which reads exactly like a first
+/// recording. Callers that walk history ask so they can say which it was.
+pub fn is_shallow() -> Result<bool> {
+    Ok(git(&["rev-parse", "--is-shallow-repository"])? == "true")
+}
+
 /// Teach plain `git fetch` about the notes ref, so the data is visible to users
 /// who never run `tak`. A convenience, not load-bearing — every `tak` read path
 /// fetches for itself.

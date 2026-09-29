@@ -135,6 +135,22 @@ Fails when an instruction count has risen by more than `gate_pct`. Wall clock is
     flag "-h --help" help="Print help" action=help builtin=#true
     arg "[BASE]" help="Revision to compare against." default="origin/main"
 }
+cmd detect help="Find instruction-count steps that already landed on a branch." {
+    long_help #"""
+Find instruction-count steps that already landed on a branch.
+
+Meant for the main-branch workflow, after recording. Walks REV's first-parent history and compares each series' consecutive recorded points. Fails only when the step onto REV itself rose by more than `gate_pct`, so a regression fails the run for the commit that introduced it rather than every run after. Older steps and slow drift are reported without failing. Wall clock is shown and never gated.
+"""#
+    flag --window help="Recorded commits to examine, counting REV when it is recorded." default="20" {
+        arg <N>
+    }
+    flag --remote help="Remote to refresh notes from." default=origin {
+        arg <REMOTE>
+    }
+    flag --no-gate help="Report without failing, whatever the numbers say."
+    flag "-h --help" help="Print help" action=help builtin=#true
+    arg "[REV]" help="Newest commit to examine. Defaults to HEAD." default=HEAD
+}
 cmd doctor help="Diagnose the git-notes plumbing." {
     flag "-h --help" help="Print help" action=help builtin=#true
 }
@@ -161,7 +177,7 @@ config {
         example "tak run --env-deny GITHUB_TOKEN --env-allow GITHUB_TOKEN"
         source "config" "env.allow"
     }
-    prop "gate_pct" type="float" default=1.0 since="0.0.4" help="How much an instruction count may rise before `tak compare` fails." long_help="How much an instruction count may rise before `tak compare` fails.\n\nA percentage of the base measurement. Only instruction counts are gated. Wall clock is reported and never gated: on the same hardware it moves 4-20% run to run, so a threshold tight enough to catch a real regression would fire constantly, and one loose enough to stay quiet would catch nothing.\n\nThe default of 1% is about fifty times the ~0.02% instruction counting reproduces to, leaving room for the small differences a compiler or dependency bump can produce without turning the gate into noise.\n\nRaise it to report without effectively failing. Setting it to zero fails on any increase at all, which sounds appealing and is not: one extra instruction on a startup path is not worth blocking a pull request over." {
+    prop "gate_pct" type="float" default=1.0 since="0.0.4" help="How much an instruction count may rise before `tak compare` or `tak detect` fails." long_help="How much an instruction count may rise before `tak compare` or `tak detect` fails.\n\nA percentage of the base measurement. Only instruction counts are gated. Wall clock is reported and never gated: on the same hardware it moves 4-20% run to run, so a threshold tight enough to catch a real regression would fire constantly, and one loose enough to stay quiet would catch nothing.\n\nThe default of 1% is about fifty times the ~0.02% instruction counting reproduces to, leaving room for the small differences a compiler or dependency bump can produce without turning the gate into noise.\n\nRaise it to report without effectively failing. Setting it to zero fails on any increase at all, which sounds appealing and is not: one extra instruction on a startup path is not worth blocking a pull request over." {
         env "TAK_GATE_PCT"
         cli "--gate-pct"
         example "tak compare origin/main --gate-pct 0.5"

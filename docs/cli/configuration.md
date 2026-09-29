@@ -77,7 +77,7 @@ TAK_ENV_DENY=GITHUB_TOKEN,GH_TOKEN,NPM_TOKEN tak run
 - **Since:** 0.0.4
 - **Set with:** `--gate-pct`, `TAK_GATE_PCT`, config `gate.pct`
 
-How much an instruction count may rise before `tak compare` fails.
+How much an instruction count may rise before `tak compare` or `tak detect` fails.
 
 A percentage of the base measurement. Only instruction counts are gated. Wall clock is reported and never gated: on the same hardware it moves 4-20% run to run, so a threshold tight enough to catch a real regression would fire constantly, and one loose enough to stay quiet would catch nothing.
 

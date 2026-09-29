@@ -955,6 +955,112 @@
         "examples": [],
         "headings": []
       },
+      "detect": {
+        "full_cmd": [
+          "detect"
+        ],
+        "usage": "detect [FLAGS] [REV]",
+        "subcommands": {},
+        "args": [
+          {
+            "name": "REV",
+            "usage": "[REV]",
+            "help": "Newest commit to examine. Defaults to HEAD.",
+            "help_first_line": "Newest commit to examine. Defaults to HEAD.",
+            "required": false,
+            "double_dash": "Optional",
+            "hide": false,
+            "default": [
+              "HEAD"
+            ]
+          }
+        ],
+        "flags": [
+          {
+            "name": "window",
+            "usage": "--window <N>",
+            "help": "Recorded commits to examine, counting REV when it is recorded.",
+            "help_first_line": "Recorded commits to examine, counting REV when it is recorded.",
+            "short": [],
+            "long": [
+              "window"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "N",
+              "usage": "<N>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            },
+            "default": [
+              "20"
+            ]
+          },
+          {
+            "name": "remote",
+            "usage": "--remote <REMOTE>",
+            "help": "Remote to refresh notes from.",
+            "help_first_line": "Remote to refresh notes from.",
+            "short": [],
+            "long": [
+              "remote"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "REMOTE",
+              "usage": "<REMOTE>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            },
+            "default": [
+              "origin"
+            ]
+          },
+          {
+            "name": "no-gate",
+            "usage": "--no-gate",
+            "help": "Report without failing, whatever the numbers say.",
+            "help_first_line": "Report without failing, whatever the numbers say.",
+            "short": [],
+            "long": [
+              "no-gate"
+            ],
+            "hide": false,
+            "global": false
+          },
+          {
+            "name": "help",
+            "usage": "-h --help",
+            "help": "Print help",
+            "help_first_line": "Print help",
+            "short": [
+              "h"
+            ],
+            "long": [
+              "help"
+            ],
+            "hide": false,
+            "global": false,
+            "action": "help",
+            "builtin": true
+          }
+        ],
+        "mounts": [],
+        "unknown_flags": null,
+        "hide": false,
+        "args_override_self": true,
+        "help": "Find instruction-count steps that already landed on a branch.",
+        "help_long": "Find instruction-count steps that already landed on a branch.\n\nMeant for the main-branch workflow, after recording. Walks REV's first-parent history and compares each series' consecutive recorded points. Fails only when the step onto REV itself rose by more than `gate_pct`, so a regression fails the run for the commit that introduced it rather than every run after. Older steps and slow drift are reported without failing. Wall clock is shown and never gated.",
+        "name": "detect",
+        "aliases": [],
+        "hidden_aliases": [],
+        "examples": [],
+        "headings": []
+      },
       "doctor": {
         "full_cmd": [
           "doctor"
@@ -1367,8 +1473,8 @@
             "gate.pct"
           ]
         },
-        "help": "How much an instruction count may rise before `tak compare` fails.",
-        "long_help": "How much an instruction count may rise before `tak compare` fails.\n\nA percentage of the base measurement. Only instruction counts are gated. Wall clock is reported and never gated: on the same hardware it moves 4-20% run to run, so a threshold tight enough to catch a real regression would fire constantly, and one loose enough to stay quiet would catch nothing.\n\nThe default of 1% is about fifty times the ~0.02% instruction counting reproduces to, leaving room for the small differences a compiler or dependency bump can produce without turning the gate into noise.\n\nRaise it to report without effectively failing. Setting it to zero fails on any increase at all, which sounds appealing and is not: one extra instruction on a startup path is not worth blocking a pull request over.",
+        "help": "How much an instruction count may rise before `tak compare` or `tak detect` fails.",
+        "long_help": "How much an instruction count may rise before `tak compare` or `tak detect` fails.\n\nA percentage of the base measurement. Only instruction counts are gated. Wall clock is reported and never gated: on the same hardware it moves 4-20% run to run, so a threshold tight enough to catch a real regression would fire constantly, and one loose enough to stay quiet would catch nothing.\n\nThe default of 1% is about fifty times the ~0.02% instruction counting reproduces to, leaving room for the small differences a compiler or dependency bump can produce without turning the gate into noise.\n\nRaise it to report without effectively failing. Setting it to zero fails on any increase at all, which sounds appealing and is not: one extra instruction on a startup path is not worth blocking a pull request over.",
         "help_heading": null,
         "choices": [],
         "merge": "replace",

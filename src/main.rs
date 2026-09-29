@@ -13,6 +13,7 @@ use tak_cli::config::{
     self, AutoRuns, Config, DEFAULT_BUDGET, DEFAULT_MAX_RUNS, DEFAULT_MIN_RUNS, DEFAULT_RUNS,
     DEFAULT_WARMUP, Runs, SELF_TOOL, Subject,
 };
+use tak_cli::detect;
 use tak_cli::export::{self, ExportResult};
 use tak_cli::measure::{self, Plan};
 use tak_cli::notes;
@@ -171,6 +172,28 @@ enum Cmd {
         /// Revision to compare. Defaults to HEAD.
         #[usage(long, default = "HEAD")]
         rev: String,
+        /// Remote to refresh notes from.
+        #[usage(long, default = "origin")]
+        remote: String,
+        /// Report without failing, whatever the numbers say.
+        #[usage(long)]
+        no_gate: bool,
+    },
+    /// Find instruction-count steps that already landed on a branch.
+    ///
+    /// Meant for the main-branch workflow, after recording. Walks REV's
+    /// first-parent history and compares each series' consecutive recorded
+    /// points. Fails only when the step onto REV itself rose by more than
+    /// `gate_pct`, so a regression fails the run for the commit that introduced
+    /// it rather than every run after. Older steps and slow drift are reported
+    /// without failing. Wall clock is shown and never gated.
+    Detect {
+        /// Newest commit to examine. Defaults to HEAD.
+        #[usage(arg, default = "HEAD")]
+        rev: String,
+        /// Recorded commits to examine, counting REV when it is recorded.
+        #[usage(long, default = "20", value_name = "N")]
+        window: usize,
         /// Remote to refresh notes from.
         #[usage(long, default = "origin")]
         remote: String,
@@ -1051,6 +1074,43 @@ fn cmd_compare(
     )
 }
 
+/// Walk `rev`'s recorded history, print the steps, and gate on the newest.
+fn cmd_detect(
+    rev: String,
+    window: usize,
+    remote: String,
+    no_gate: bool,
+    settings: &Settings,
+) -> Result<()> {
+    // Up front, before any git work: one recorded commit has no step to find,
+    // and a run that quietly compared nothing would read as a pass.
+    if window < 2 {
+        bail!("--window must be at least 2: a step needs two recorded commits");
+    }
+    let head = notes::rev_parse(&rev).with_context(|| format!("cannot resolve {rev}"))?;
+    // Never fatal, as for every read path: offline, or no notes pushed yet,
+    // falls back to what is recorded locally.
+    let _ = notes::fetch(&remote);
+
+    let (walked, shallow_cutoff) = detect::gather(&head, window)?;
+    let mut found = detect::analyze(&walked, settings.gate_pct);
+    found.shallow_cutoff = shallow_cutoff;
+    print!("{}", detect::markdown(&found, settings.credit));
+
+    let failures = found.failures();
+    if failures.is_empty() || no_gate {
+        return Ok(());
+    }
+    // As with compare: the report already names which and by how much, so this
+    // only has to be unambiguous about why the job failed.
+    bail!(
+        "{} benchmark(s) stepped up by more than {}% at {}",
+        failures.len(),
+        settings.gate_pct,
+        &head[..12]
+    )
+}
+
 /// Diagnose the plumbing.
 ///
 /// Takes settings by value so a `tak.toml` that will not parse cannot stop the
@@ -1475,6 +1535,12 @@ fn main() -> Result<()> {
             remote,
             no_gate,
         } => cmd_compare(base, rev, remote, no_gate, &resolve_settings(&overrides)?),
+        Cmd::Detect {
+            rev,
+            window,
+            remote,
+            no_gate,
+        } => cmd_detect(rev, window, remote, no_gate, &resolve_settings(&overrides)?),
         // Tolerant on purpose: doctor diagnoses a broken setup, so a tak.toml
         // it cannot read must not stop it from running. Falling all the way
         // back to the defaults threw away the flag and the environment too, so

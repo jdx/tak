@@ -3,7 +3,7 @@
 tak is most useful as a small loop rather than as a one-off timer:
 
 1. declare repeatable benchmarks in `tak.toml`;
-2. record the tip of every push to the main branch;
+2. record the tip of every push to the main branch, and check what landed;
 3. compare a pull request with the commit it branched from; and
 4. fail only when an instruction count crosses the configured gate.
 
@@ -91,7 +91,8 @@ runner class on the machine that will produce the shared series.
 ## Record the main branch
 
 The main-branch workflow owns the history. It measures the tip of each push after it lands,
-appends the result to `refs/notes/tak`, and pushes that ref:
+appends the result to `refs/notes/tak`, pushes that ref, and then checks whether the push
+introduced an instruction-count step:
 
 ```yaml
 name: perf
@@ -115,6 +116,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # tak detect walks the commits between recorded points.
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
@@ -138,6 +141,11 @@ jobs:
 
       - name: Summary
         run: tak history >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Detect regressions that landed
+        run: |
+          set -o pipefail
+          tak detect | tee -a "$GITHUB_STEP_SUMMARY"
 ```
 
 Keep one runner class for the series and serialise writers. `tak push` retries by fetching and
@@ -145,6 +153,19 @@ merging if another writer wins the race, but serialisation avoids unnecessary re
 cancel an in-progress main run: that would leave a hole in the push-tip history. A push that
 contains multiple commits records only its final commit; use one commit per push if every
 intermediate commit must have a measurement.
+
+`tak detect` runs after `tak push` so the measurement is published even when the check fails.
+It fails only when the step onto the commit being measured exceeds the gate. The run for the
+next push passes again, and older steps, sub-threshold drift, and steps spread over unrecorded
+commits are listed in the job summary without failing. A failed run on the main branch is the
+notification: GitHub marks the commit with a failed check and, subject to their notification
+settings, notifies whoever triggered the run, which for a push is the person who pushed or
+merged it. A team that wants more can add an
+`if: failure()` step that opens an issue or posts to chat. See
+[CI and git notes](/guide/ci#detect-regressions-that-landed) for exactly what is reported.
+
+`fetch-depth: 0` gives the walk the commits between recorded points. A bounded depth works if
+it reaches back past the oldest of the 20 recorded commits the check examines by default.
 
 The hosted runner label alone does not capture every input. If its image, compiler, standard
 library, build profile, or CPU class changes, update `[runner].class` to start a new series.
@@ -286,6 +307,7 @@ Before treating the comparison as a required check:
 - every measured command succeeds with its network pointed at a dead port;
 - setup and cache warming happen before `tak run` or in an untimed `setup` or `prepare`;
 - only main push tips are pushed into `refs/notes/tak`;
+- the main-branch workflow runs `tak detect` after `tak push`, from a checkout with history;
 - main and pull requests use the same build inputs and runner class; and
 - only instruction counts gate CI; timing remains report-only.
 

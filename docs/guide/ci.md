@@ -74,3 +74,43 @@ changes are displayed but never gate the result.
 
 Always keep measurements partitioned by runner class. Comparing numbers across runner classes
 turns an infrastructure change into an apparent code regression.
+
+## Detect regressions that landed
+
+`tak compare` only runs where a workflow runs it, usually on pull requests. A regression can
+still reach the main branch: the check was not required, someone merged over it, a commit was
+pushed directly, or several changes each stayed under the gate. `tak detect` looks at what
+landed. Run it in the main-branch workflow after recording and pushing:
+
+```sh
+tak run --record
+tak push
+tak detect
+```
+
+It walks the first-parent history of `HEAD` (or the revision given) back to the 20th commit
+with measurements (`--window` changes the count) and compares each series' consecutive
+recorded points. A series is a benchmark, tool, and runner class; different runner classes
+are never compared.
+
+- **A step onto the newest commit** above the gate fails the command. Only that step fails: the
+  run for the next commit passes, so a main workflow fails once, on the push that introduced
+  the step, instead of on every push after it.
+- **A step across unrecorded commits** is reported as a range, such as `a1b2c3d4e5f6..0f9e8d7c6b5a
+  (3 commits)`. tak cannot tell which commit in the range caused it. A push of several commits
+  records only its tip, so this is common.
+- **Earlier steps** above the gate within the window are listed without failing.
+- **Sustained drift** is listed without failing: the series rose above the gate across the
+  window, counted from its last above-gate step, while every individual step stayed under it.
+
+Only instruction counts are examined. Wall-clock time is shown beside each step and never
+gates. The gate is the same `gate_pct` setting that `tak compare` uses.
+
+When the newest commit has no instruction counts, or no series on it has an earlier point in
+the window, the report says **Nothing was compared** and the command succeeds. The first
+recording on a new runner class is normal. A checkout without history is not: the walk needs
+the commits between recorded points, and the default `actions/checkout` fetch of one commit
+leaves nothing to walk. The report notes when a shallow clone cut the walk short.
+
+This is a simple step detector for near-deterministic counts, not statistical change-point
+detection. It does not model noise and does not look at timing metrics.

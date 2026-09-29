@@ -49,9 +49,12 @@ and reasoning.
 - `tak artifact export` and `tak artifact publish` hand measurements from a
   read-only CI job to a separately trusted publisher
 - `tak compare` reports changes and gates only on instruction counts
+- `tak detect` reports instruction-count steps that already landed on a branch, and fails
+  when the newest recorded commit introduced one
 - `tak backfill` measures published release binaries to bootstrap history
 
-PR reporting and change-point detection do not exist.
+PR reporting does not exist. `tak detect` compares consecutive recorded points against the
+gate; it is not statistical change-point detection.
 
 ## Documentation
 
