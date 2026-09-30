@@ -385,9 +385,13 @@ fn walk(rev: &str, max: Option<usize>, done: impl FnMut(&Logged) -> bool) -> Res
     let status = child
         .wait()
         .with_context(|| format!("failed to wait for {}", what()))?;
-    let errors = errors.join().unwrap_or_default();
     let (logged, _) = read.with_context(|| format!("failed to read {}", what()))?;
+    // Git's own stderr closes when it dies, killed or not, but anything it
+    // spawned can inherit the pipe and hold it open. Only a failure needs
+    // the text, so only a failure waits for it — as `Command::output` would
+    // — and an early stop leaves the thread to finish on its own.
     if !stopped && !status.success() {
+        let errors = errors.join().unwrap_or_default();
         bail!("{} failed: {}", what(), errors.trim());
     }
     Ok(logged)
