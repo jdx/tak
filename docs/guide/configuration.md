@@ -618,6 +618,31 @@ benchmark will run is an error. If `when` switches off everything selected, `--r
 `--export-json` fail rather than succeed with nothing written. A `when` in a benchmark's own subject table replaces the shared subject's; a table without one keeps the shared condition, like every other setting. Conditions are only evaluated for the benchmarks and subjects being run, so an unrelated subject's condition can't stop a `--subject` run.
 Conditions are syntax-checked when `tak.toml` is loaded.
 
+## Building past commits
+
+`[build]` tells [`tak backfill --commits`](/guide/adopting#backfill-commits-by-building-them)
+how to build the project in a fresh checkout of an old commit. `tak run` never runs it and
+measures whatever is already built.
+
+```toml
+[build]
+cmd = ["cargo", "build", "--release", "--locked"]
+# Optional. Relative to tak.toml's directory in the checkout, and must stay inside it.
+dir = "."
+# Optional. Added to tak's own environment for the build.
+env = { CARGO_INCREMENTAL = "0" }
+```
+
+`cmd` follows the same rules as a benchmark's: a list or a whitespace-split string, no shell,
+and a program path containing `/` is relative to the directory holding `tak.toml`. A build that
+needs several steps can name an interpreter explicitly, such as
+`["sh", "-c", "git submodule update --init && make"]`. The build is not measured, so the shell
+adds no noise there. `[build]` values are not templates, and template syntax in one is an error. A project
+with nothing to build can declare `cmd = ["true"]`.
+
+`env_deny` does not apply to the build. It exists to keep a token from changing what a measured
+command does, and a build that fetches a private dependency may need exactly that token.
+
 ## Environment and runner settings
 
 tak removes known sources of non-determinism from measured commands. Inspect every resolved

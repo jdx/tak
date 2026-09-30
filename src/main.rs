@@ -174,11 +174,23 @@ enum Cmd {
     Artifact(Box<ArtifactArgs>),
     /// Teach plain `git fetch` about the notes ref.
     Init(RemoteArgs),
-    /// Benchmark published release binaries to bootstrap history.
+    /// Benchmark published release binaries, or build and benchmark past
+    /// commits, to bootstrap history.
     ///
-    /// A new adopter's first chart is empty. Rather than rebuilding a project at
-    /// a hundred historical commits, download what it already published.
+    /// By default, downloads the release binaries a project already published
+    /// and measures one command against each. With `--commits`, checks out
+    /// each first-parent commit in a range, runs tak.toml's `[build]` there,
+    /// and measures the benchmarks tak.toml declares.
     Backfill {
+        /// Build and measure the first-parent commits in RANGE, such as
+        /// `main~20..main`, instead of downloading releases.
+        #[usage(long, value_name = "RANGE")]
+        commits: Option<String>,
+        /// With --commits, measure every subject again even where this runner
+        /// class already has a record, and retry commits whose build failed
+        /// in an earlier run.
+        #[usage(long)]
+        force: bool,
         /// Repository to pull releases from, as "owner/name". Defaults to the
         /// `origin` remote of the current repository.
         #[usage(long)]
@@ -191,16 +203,20 @@ enum Cmd {
         /// Defaults to `--version`, which every CLI answers cheaply.
         #[usage(arg, double_dash = "required")]
         args: Vec<String>,
-        /// Name to record measurements under.
-        #[usage(long, default = "release")]
-        bench: String,
-        /// Most recent releases to measure.
+        /// Name to record release measurements under; `release` if omitted.
+        /// With --commits, the one benchmark from tak.toml to measure.
+        #[usage(long)]
+        bench: Option<String>,
+        /// Most recent releases to measure. With --commits, most commits to
+        /// build, newest first, among those not already recorded.
         #[usage(long, default = "20")]
         limit: usize,
-        /// Timed runs per release.
-        #[usage(long, default = "10")]
-        runs: u32,
-        /// Measure but do not write to refs/notes/tak.
+        /// Timed runs per release; 10 if omitted. With --commits, overrides
+        /// tak.toml's `runs` for every benchmark.
+        #[usage(long)]
+        runs: Option<u32>,
+        /// Measure releases but do not write to refs/notes/tak. With
+        /// --commits, list what would be built, and build nothing.
         #[usage(long)]
         dry_run: bool,
     },
@@ -355,10 +371,18 @@ fn now_rfc3339() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let days = secs / 86_400;
-    let rem = secs % 86_400;
+    rfc3339(i64::try_from(secs).unwrap_or(i64::MAX))
+}
+
+/// `secs` since the epoch as RFC 3339 in UTC, the one shape `ts` is written in.
+///
+/// Signed, because a commit can be dated before 1970 (`git commit --date`),
+/// and flooring division keeps such a time on the right day.
+fn rfc3339(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
     // Civil-from-days (Howard Hinnant's algorithm), epoch shifted to 0000-03-01.
-    let z = days as i64 + 719_468;
+    let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
@@ -450,6 +474,9 @@ fn open_local(opts: &RunOpts, settings: &Settings, adhoc: bool) -> Result<Local>
         return Ok(Local::default());
     }
     let store = Store::locate()?;
+    if let Some(name) = &opts.save_baseline {
+        store.check_saveable(name)?;
+    }
     let against = opts
         .baseline
         .as_deref()
@@ -481,6 +508,10 @@ struct Measured {
     /// taken. Also in `record.metrics` when it could.
     custom: BTreeMap<String, Option<f64>>,
     record: Record,
+    /// Counting was asked for, valgrind was there, and no count came back.
+    /// Kept apart from counters being off: the record looks the same either
+    /// way, and only one of them is a benchmark `--gate` meant to check.
+    count_failed: bool,
 }
 
 /// Reject the recorded names that come from outside `tak.toml` — the runner
@@ -588,6 +619,93 @@ fn run_declared(opts: RunOpts, settings: &Settings, local: &Local) -> Result<()>
         );
     };
 
+    let Planned { mut plans, skipped } = plan_declared(&cfg, &path, &opts)?;
+    print_skipped(&skipped);
+
+    // Commands are relative to tak.toml, not to wherever this was invoked.
+    let root = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    for (_, _, subjects) in &mut plans {
+        for s in subjects {
+            s.anchor(&root);
+        }
+    }
+
+    if plans.is_empty() {
+        // A gate that measured nothing has checked nothing, and exiting 0
+        // would mark the revision good: `git bisect run` would carry on past
+        // it. Same exemption as below: a dry run gates nothing either way.
+        if opts.gate && !opts.dry_run {
+            bail!(
+                "nothing to gate against baseline `{}`: {}",
+                opts.baseline.as_deref().unwrap_or_default(),
+                if skipped.is_empty() {
+                    format!("{} declares no benchmarks", path.display())
+                } else {
+                    "every selected benchmark or subject has a false `when`".to_string()
+                }
+            );
+        }
+        if skipped.is_empty() {
+            println!("{} declares no benchmarks", path.display());
+            return Ok(());
+        }
+        // Asked to leave a result behind and producing none is a failure: a
+        // CI job recording or exporting must not look like it measured
+        // something when every benchmark was switched off.
+        // A dry run writes neither, so there is nothing for it to fail over.
+        if !opts.dry_run
+            && (opts.record || opts.export_json.is_some() || opts.save_baseline.is_some())
+        {
+            bail!(
+                "nothing to {}: every selected benchmark or subject has a false `when`",
+                if opts.record {
+                    "record"
+                } else if opts.save_baseline.is_some() {
+                    "save"
+                } else {
+                    "export"
+                }
+            );
+        }
+        println!("nothing to run: every selected benchmark or subject has a false `when`");
+        return Ok(());
+    }
+
+    if opts.dry_run {
+        println!("{}", path.display());
+        for (name, multi, subjects) in &plans {
+            print_plan(name, *multi, subjects, opts.no_counters);
+        }
+        return Ok(());
+    }
+
+    let seed = opts.seed.unwrap_or_else(random_seed);
+    let mut measured = Vec::new();
+    let mut failed = Vec::new();
+    for (name, multi, subjects) in &plans {
+        let (m, f) = measure_bench(name, subjects, *multi, seed, &opts, settings)?;
+        measured.extend(m);
+        failed.extend(f);
+    }
+    finish(measured, failed, &opts, seed, settings, local)
+}
+
+/// One benchmark ready to measure: its name, whether it compares several
+/// subjects, and those subjects.
+type BenchPlan = (String, bool, Vec<Subject>);
+
+/// What `tak.toml` asks to measure, with every layer applied and every
+/// template rendered, but not yet anchored to a directory: `tak run` anchors
+/// it at the directory holding `tak.toml`, `tak backfill --commits` at the
+/// same place in each commit's checkout.
+struct Planned {
+    plans: Vec<BenchPlan>,
+    /// Benchmarks, or subjects of one, that a false `when` switched off.
+    skipped: Vec<(String, Option<String>, String)>,
+}
+
+/// Resolve the benchmarks `opts` selects from `cfg`, found at `path`.
+fn plan_declared(cfg: &Config, path: &Path, opts: &RunOpts) -> Result<Planned> {
     let selected: Vec<_> = match &opts.bench {
         Some(name) => {
             let b = cfg.bench.get(name).with_context(|| {
@@ -605,9 +723,6 @@ fn run_declared(opts: RunOpts, settings: &Settings, local: &Local) -> Result<()>
         }
         None => cfg.bench.iter().map(|(k, v)| (k.clone(), v)).collect(),
     };
-
-    // Commands are relative to tak.toml, not to wherever this was invoked.
-    let root = path.parent().map(Path::to_path_buf).unwrap_or_default();
 
     // Resolve and filter everything before measuring anything, so a mistyped
     // --subject fails now rather than after the benchmarks before it ran.
@@ -703,7 +818,6 @@ fn run_declared(opts: RunOpts, settings: &Settings, local: &Local) -> Result<()>
                     range.end()
                 );
             }
-            s.anchor(&root);
             // An explicit flag beats the file; the file beats the default.
             s.runs = opts.runs.unwrap_or(s.runs);
             s.warmup = opts.warmup.unwrap_or(s.warmup);
@@ -737,71 +851,16 @@ fn run_declared(opts: RunOpts, settings: &Settings, local: &Local) -> Result<()>
         check_tak_tool()?;
     }
 
-    for (bench, subject, when) in &skipped {
+    Ok(Planned { plans, skipped })
+}
+
+fn print_skipped(skipped: &[(String, Option<String>, String)]) {
+    for (bench, subject, when) in skipped {
         let what = subject
             .as_ref()
             .map_or(bench.to_string(), |s| format!("{bench} ({s})"));
         eprintln!("  skipping {what}: `when` is false: {when}");
     }
-
-    if plans.is_empty() {
-        // A gate that measured nothing has checked nothing, and exiting 0
-        // would mark the revision good: `git bisect run` would carry on past
-        // it. Same exemption as below: a dry run gates nothing either way.
-        if opts.gate && !opts.dry_run {
-            bail!(
-                "nothing to gate against baseline `{}`: {}",
-                opts.baseline.as_deref().unwrap_or_default(),
-                if skipped.is_empty() {
-                    format!("{} declares no benchmarks", path.display())
-                } else {
-                    "every selected benchmark or subject has a false `when`".to_string()
-                }
-            );
-        }
-        if skipped.is_empty() {
-            println!("{} declares no benchmarks", path.display());
-            return Ok(());
-        }
-        // Asked to leave a result behind and producing none is a failure: a
-        // CI job recording or exporting must not look like it measured
-        // something when every benchmark was switched off.
-        // A dry run writes neither, so there is nothing for it to fail over.
-        if !opts.dry_run
-            && (opts.record || opts.export_json.is_some() || opts.save_baseline.is_some())
-        {
-            bail!(
-                "nothing to {}: every selected benchmark or subject has a false `when`",
-                if opts.record {
-                    "record"
-                } else if opts.save_baseline.is_some() {
-                    "save"
-                } else {
-                    "export"
-                }
-            );
-        }
-        println!("nothing to run: every selected benchmark or subject has a false `when`");
-        return Ok(());
-    }
-
-    if opts.dry_run {
-        println!("{}", path.display());
-        for (name, multi, subjects) in &plans {
-            print_plan(name, *multi, subjects, opts.no_counters);
-        }
-        return Ok(());
-    }
-
-    let seed = opts.seed.unwrap_or_else(random_seed);
-    let mut measured = Vec::new();
-    let mut failed = Vec::new();
-    for (name, multi, subjects) in &plans {
-        let (m, f) = measure_bench(name, subjects, *multi, seed, &opts, settings)?;
-        measured.extend(m);
-        failed.extend(f);
-    }
-    finish(measured, failed, &opts, seed, settings, local)
 }
 
 /// A random seed below 2^53, so it survives any JSON reader — JavaScript and
@@ -1100,6 +1159,8 @@ struct Against {
     comparison: compare::Comparison,
     /// Series this run measured that cannot be gated; see [`baseline::gaps`].
     gaps: Vec<(compare::Key, baseline::Gap)>,
+    /// Every series this run measured, compared or not.
+    measured: BTreeSet<compare::Key>,
 }
 
 /// Print how this run compares with a saved baseline, and return the
@@ -1119,7 +1180,18 @@ fn report_against(
     let comparison = compare::compare(&base, &current);
     // A report-only series is never a reason to fail, so it cannot leave a
     // gap in what the gate checked either.
-    let gaps: Vec<_> = baseline::gaps(&against.records, &current)
+    let count_failed: BTreeSet<compare::Key> = measured
+        .iter()
+        .filter(|m| m.count_failed)
+        .map(|m| {
+            (
+                m.record.bench.clone(),
+                m.record.tool.clone(),
+                m.record.runner.clone(),
+            )
+        })
+        .collect();
+    let gaps: Vec<_> = baseline::gaps(&against.records, &current, &count_failed)
         .into_iter()
         .filter(|(k, _)| gates.get(&k.0, &k.1).enabled)
         .collect();
@@ -1182,7 +1254,11 @@ fn report_against(
     if !gaps.is_empty() {
         println!("\nNot gated: {}", describe_gaps(&gaps));
     }
-    Against { comparison, gaps }
+    Against {
+        comparison,
+        gaps,
+        measured: keys,
+    }
 }
 
 fn describe_gaps(gaps: &[(compare::Key, baseline::Gap)]) -> String {
@@ -1251,6 +1327,20 @@ fn gate_against(
         );
     }
     let comparison = &compared.comparison;
+    let enabled = |bench: &str, tool: &str| gates.get(bench, tool).enabled;
+    // Report-only never fails, so a run of nothing else passes, counted or
+    // not. It says so on stderr as well as in the table: an exit status of 0
+    // from `--gate` otherwise reads, to a script, as "checked and fine".
+    let nothing_gated = |why: &str| {
+        eprintln!(
+            "  note: nothing was gated against baseline `{}`: {why}",
+            against.name
+        );
+        Ok(())
+    };
+    if !compared.measured.iter().any(|k| enabled(&k.0, &k.1)) {
+        return nothing_gated("every benchmark measured is report-only");
+    }
     if !comparison
         .changes
         .iter()
@@ -1261,6 +1351,13 @@ fn gate_against(
              baseline `{}`",
             against.name
         );
+    }
+    if !comparison
+        .changes
+        .iter()
+        .any(|c| c.metric == compare::GATED_METRIC && enabled(&c.bench, &c.tool))
+    {
+        return nothing_gated("every benchmark compared by instruction count is report-only");
     }
     let regressions = comparison.regressions(gates);
     if regressions.is_empty() {
@@ -1446,9 +1543,8 @@ fn measure_bench(
                 samples.first_failure.as_deref().unwrap_or("(no detail)")
             );
         }
-        if s.counters && !opts.no_counters {
-            count_into(&mut metrics, s, settings);
-        }
+        let count_failed =
+            s.counters && !opts.no_counters && !count_into(&mut metrics, s, settings);
         // Last, once the subject is done running: setup or the samples may
         // be what produced the file or output being measured. A failure is
         // reported here and fails the run in `finish`, after every other
@@ -1512,20 +1608,14 @@ fn measure_bench(
             println!("  {:<16} {:>14}", "checks", format!("{passed}/{total}"));
         }
 
-        // TAK_TOOL only ever renames the single-command series. Keyed on the
-        // benchmark's shape rather than the subject's name, so a declared
-        // subject can never be recorded as anything but itself.
-        let tool = if multi {
-            s.name.clone()
-        } else {
-            std::env::var("TAK_TOOL").unwrap_or_else(|_| SELF_TOOL.into())
-        };
+        let tool = record_tool(multi, s);
         measured.push(Measured {
             bench: bench.to_string(),
             subject: s.clone(),
             version: version.clone(),
             samples,
             custom,
+            count_failed,
             record: Record {
                 v: SCHEMA_VERSION,
                 bench: bench.to_string(),
@@ -1542,9 +1632,26 @@ fn measure_bench(
     Ok((measured, failed))
 }
 
+/// The `tool` a subject's records are stored under.
+///
+/// TAK_TOOL only ever renames the single-command series. Keyed on the
+/// benchmark's shape rather than the subject's name, so a declared subject
+/// can never be recorded as anything but itself.
+fn record_tool(multi: bool, s: &Subject) -> String {
+    if multi {
+        s.name.clone()
+    } else {
+        std::env::var("TAK_TOOL").unwrap_or_else(|_| SELF_TOOL.into())
+    }
+}
+
 /// Add a subject's instruction count to its metrics, warning rather than
 /// failing when it cannot be had: the timing already collected is still good.
-fn count_into(metrics: &mut BTreeMap<String, f64>, s: &Subject, settings: &Settings) {
+///
+/// False only when valgrind was there and the count still failed. A missing
+/// valgrind is not a failure: nothing on this host could be counted, and
+/// `--gate` already has nothing to check then.
+fn count_into(metrics: &mut BTreeMap<String, f64>, s: &Subject, settings: &Settings) -> bool {
     match measure::subject_instructions(s, settings) {
         Ok(Some(c)) => {
             metrics.insert("instructions".into(), c.min as f64);
@@ -1559,15 +1666,22 @@ fn count_into(metrics: &mut BTreeMap<String, f64>, s: &Subject, settings: &Setti
                     c.runs
                 );
             }
+            true
         }
-        Ok(None) => eprintln!(
-            "note: valgrind not found — recording timing only. \
-             Instruction counts are the only gate-able metric; on macOS/Windows \
-             run tak in a Linux container to get them."
-        ),
+        Ok(None) => {
+            eprintln!(
+                "note: valgrind not found — recording timing only. \
+                 Instruction counts are the only gate-able metric; on macOS/Windows \
+                 run tak in a Linux container to get them."
+            );
+            true
+        }
         // Valgrind exists but the measurement failed. Say so rather than
         // blaming a missing install, and keep the timing we did collect.
-        Err(e) => eprintln!("warning: instruction counting failed: {e}"),
+        Err(e) => {
+            eprintln!("warning: instruction counting failed: {e}");
+            false
+        }
     }
 }
 
@@ -1625,7 +1739,8 @@ fn cmd_log(opts: LogOpts, settings: &Settings) -> Result<()> {
     // Never fatal, as in `notes::read`: offline, or a remote with no notes
     // yet, falls back to the local ref.
     let _ = notes::fetch(&opts.remote);
-    let walked = notes::log(&opts.rev, None)?;
+    let mut enough = tak_cli::report::Enough::new(opts.limit, &opts.bench);
+    let walked = notes::log_until(&opts.rev, |c| enough.after(c))?;
     // Whether the walk stopped at a graft, not whether anything in the clone
     // is shallow: the notes fetch above is shallow by design.
     let shallow = walked
@@ -2147,6 +2262,529 @@ fn cmd_backfill(
     Ok(())
 }
 
+/// `tak backfill --commits`'s options, gathered so they travel as one value.
+struct CommitBackfill {
+    range: String,
+    bench: Option<String>,
+    limit: usize,
+    runs: Option<u32>,
+    force: bool,
+    dry_run: bool,
+}
+
+/// A commit in the range, and what it still needs.
+struct Pending {
+    sha: String,
+    subject: String,
+    /// Benchmark to the names of its subjects with no record for this runner
+    /// class yet, or every selected one under `--force`. Empty means nothing
+    /// to do.
+    needs: BTreeMap<String, Vec<String>>,
+    /// Its build failed in an earlier run, under the same `[build]`.
+    failed_before: bool,
+}
+
+impl Pending {
+    fn wanted(&self) -> bool {
+        !self.needs.is_empty() && !self.failed_before
+    }
+}
+
+/// What a commit still needs, given the `(bench, tool)` pairs it already has
+/// records for: per benchmark, the subjects that have none.
+///
+/// Keyed on the subject and not only the benchmark, so a subject added to a
+/// benchmark after some commits were recorded is still backfilled on them,
+/// without measuring again the subjects that already have a point there.
+fn needs_for(
+    plans: &[BenchPlan],
+    have: &std::collections::BTreeSet<(String, String)>,
+    force: bool,
+) -> BTreeMap<String, Vec<String>> {
+    let mut needs = BTreeMap::new();
+    for (bench, multi, subjects) in plans {
+        let missing: Vec<String> = subjects
+            .iter()
+            .filter(|s| force || !have.contains(&(bench.clone(), record_tool(*multi, s))))
+            .map(|s| s.name.clone())
+            .collect();
+        if !missing.is_empty() {
+            needs.insert(bench.clone(), missing);
+        }
+    }
+    needs
+}
+
+/// `needs` for a dry run: benchmarks whole where every subject is missing,
+/// otherwise with the subjects that are.
+fn describe_needs(needs: &BTreeMap<String, Vec<String>>, plans: &[BenchPlan]) -> String {
+    needs
+        .iter()
+        .map(|(bench, subjects)| {
+            let all = plans
+                .iter()
+                .find(|(b, _, _)| b == bench)
+                .is_some_and(|(_, _, s)| s.len() == subjects.len());
+            if all {
+                bench.clone()
+            } else {
+                format!("{bench} ({})", subjects.join(", "))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// How far one commit got.
+enum Outcome {
+    Recorded(usize),
+    BuildFailed,
+    NotRecorded,
+}
+
+/// Build and measure past commits, recording each to its own note.
+///
+/// The benchmarks are the *current* tak.toml's, run inside each old checkout.
+/// Using each commit's own tak.toml instead would change what a series
+/// measures whenever someone edited a benchmark, and the step that edit
+/// produced would read as a change in the code. The cost is that an old tree
+/// may lack a fixture or path the current file names; that commit is then
+/// reported and left unrecorded rather than measured against the wrong thing.
+fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let Some((path, cfg)) = Config::find(&cwd)? else {
+        bail!(
+            "no {} found in {} or any parent — --commits measures the benchmarks it declares",
+            config::FILE_NAME,
+            cwd.display()
+        );
+    };
+    let Some(build) = cfg.build()? else {
+        bail!(
+            "{} has no [build]. --commits checks each commit out fresh, so it has \
+             to be built before it can be measured:\n\n\
+             \x20   [build]\n\
+             \x20   cmd = [\"cargo\", \"build\", \"--release\"]\n\n\
+             A project with nothing to build can declare cmd = [\"true\"].",
+            path.display()
+        );
+    };
+    let opts = RunOpts {
+        bench: o.bench.clone(),
+        runs: o.runs.map(Runs::Fixed),
+        warmup: None,
+        no_counters: false,
+        record: true,
+        no_progress: false,
+        subjects: Vec::new(),
+        seed: None,
+        export_json: None,
+        config: None,
+        dry_run: o.dry_run,
+        // Backfill records to each commit's note; local baselines belong to
+        // `tak run` on the working tree.
+        save_baseline: None,
+        baseline: None,
+        gate: false,
+    };
+    // Everything resolved and rendered before the first checkout, so a
+    // mistake in tak.toml fails in a second rather than after a build.
+    let Planned { plans, skipped } = plan_declared(&cfg, &path, &opts)?;
+    print_skipped(&skipped);
+    if plans.is_empty() {
+        bail!(
+            "nothing to backfill: {}",
+            if skipped.is_empty() {
+                "tak.toml declares no benchmarks"
+            } else {
+                "every selected benchmark or subject has a false `when`"
+            }
+        );
+    }
+
+    // Where tak.toml sits within the repository, so the same place can be
+    // found in each checkout: relative programs, `dir` and the build are all
+    // anchored there, exactly as `tak run` anchors them in this one.
+    let config_dir = path.parent().context("tak.toml has no parent directory")?;
+    let top = tak_cli::worktree::toplevel(config_dir)?;
+    let rel = config_dir
+        .canonicalize()?
+        .strip_prefix(top.canonicalize()?)
+        .map(Path::to_path_buf)
+        .with_context(|| {
+            format!(
+                "{} is outside the repository at {}",
+                path.display(),
+                top.display()
+            )
+        })?;
+
+    // `notes::log` passes the range after `--end-of-options`, so a leading
+    // `-` could not become an option anyway; this only gives it a clearer
+    // error than git's.
+    if o.range.starts_with('-') || o.range.trim().is_empty() {
+        bail!("not a commit range: {:?} (try `main~20..main`)", o.range);
+    }
+    // So what CI already pushed counts as recorded. Without it a backfill
+    // re-measures the commits the main-branch workflow did, and those get a
+    // second point each. Offline or without a remote, the local ref decides.
+    let _ = notes::fetch("origin");
+    // One first-parent walk with every note inlined, the same one `tak log`
+    // reads, rather than a subprocess or two per commit. Unbounded: the
+    // range bounds it, and `--limit` counts builds among the commits still
+    // needing one, which a cap on the walk would cut short.
+    let commits = notes::log(&o.range, None)
+        .with_context(|| format!("could not list the commits in {}", o.range))?;
+    if commits.is_empty() {
+        println!("no commits in {}", o.range);
+        return Ok(());
+    }
+
+    let runner = runner_class(settings);
+    // A stable one-line description of the build and where it ran, so a
+    // remembered failure is forgotten as soon as `[build]` changes, and does
+    // not follow the clone onto a new runner class: a toolchain upgrade is
+    // exactly what a new class marks, and may be what makes an old commit
+    // build again. JSON escapes tabs and newlines.
+    let build_key = serde_json::to_string(&(
+        &runner,
+        &build.cmd,
+        build.dir.as_ref().map(|d| d.to_string_lossy()),
+        &build.env,
+    ))?;
+    let mut failed_builds = tak_cli::worktree::FailedBuilds::load(build_key)?;
+
+    let mut pending = Vec::with_capacity(commits.len());
+    for c in commits {
+        let have: std::collections::BTreeSet<(String, String)> = c
+            .records
+            .into_iter()
+            .filter(|r| r.runner == runner)
+            .map(|r| (r.bench, r.tool))
+            .collect();
+        pending.push(Pending {
+            failed_before: !o.force && failed_builds.contains(&c.sha),
+            needs: needs_for(&plans, &have, o.force),
+            sha: c.sha,
+            subject: c.subject,
+        });
+    }
+    let recorded_before = pending.iter().filter(|p| p.needs.is_empty()).count();
+    let failed_before = pending
+        .iter()
+        .filter(|p| !p.needs.is_empty() && p.failed_before)
+        .count();
+    // Newest first, and `--limit` counts builds rather than commits. A
+    // commit whose build failed is remembered and passed over next time, so
+    // the same command run again carries on from where the last one stopped
+    // instead of retrying the same broken commit at the top of every run.
+    let (todo, beyond): (Vec<&Pending>, Vec<&Pending>) = {
+        let needed: Vec<&Pending> = pending.iter().filter(|p| p.wanted()).collect();
+        let split = needed.len().min(o.limit);
+        (needed[..split].to_vec(), needed[split..].to_vec())
+    };
+
+    println!(
+        "{} commit(s) in {}, first parent only, runner {runner}",
+        pending.len(),
+        o.range
+    );
+    println!("build: {}", shell_words(&build.cmd));
+
+    if o.dry_run {
+        println!();
+        let everything = needs_for(&plans, &Default::default(), true);
+        for p in &pending {
+            let status = if p.needs.is_empty() {
+                "recorded".to_string()
+            } else if p.failed_before {
+                "build failed before".to_string()
+            } else if beyond.iter().any(|b| b.sha == p.sha) {
+                "beyond --limit".to_string()
+            } else if p.needs == everything {
+                "would build".to_string()
+            } else {
+                format!("would build ({})", describe_needs(&p.needs, &plans))
+            };
+            println!("  {}  {status:<19}  {}", &p.sha[..12], p.subject);
+        }
+        println!("\n  dry run — nothing built or written");
+        return Ok(());
+    }
+
+    // Owner-only for the reason release backfill's is: the build writes
+    // executables here that tak then runs. Every checkout lives inside it.
+    let scratch = backfill_workdir()?;
+    let hooks = scratch.path().join("hooks");
+    std::fs::create_dir(&hooks).context("could not create an empty hooks directory")?;
+    tak_cli::worktree::prune();
+    tak_cli::worktree::clean_up_on_interrupt(scratch.path())?;
+
+    let seed = random_seed();
+    let (mut recorded, mut build_failed, mut not_recorded) = (0usize, Vec::new(), Vec::new());
+    for p in &todo {
+        let short = &p.sha[..12];
+        println!("\n{short}  {}", p.subject);
+        match backfill_commit(
+            p,
+            &build,
+            &plans,
+            &rel,
+            scratch.path(),
+            &hooks,
+            seed,
+            &opts,
+            settings,
+        )? {
+            Outcome::Recorded(n) => {
+                println!("  recorded {n} measurement(s)");
+                recorded += 1;
+                failed_builds.remove(&p.sha)?;
+            }
+            Outcome::BuildFailed => {
+                build_failed.push(short);
+                // The interrupt handler kills the build before it removes
+                // anything, so a build that failed while it runs says
+                // nothing about the commit. Remembering it would leave a
+                // cancelled job's commit out of every later run. The flag
+                // is set before the kill, so it is always seen here.
+                if !tak_cli::worktree::stopping() {
+                    failed_builds.add(&p.sha)?;
+                }
+            }
+            Outcome::NotRecorded => {
+                not_recorded.push(short);
+                // Matters only for a remembered failure retried under
+                // --force: it built this time, so it is not passed over next
+                // time either.
+                failed_builds.remove(&p.sha)?;
+            }
+        }
+    }
+
+    println!(
+        "\n  recorded {recorded} commit(s) → {}; {recorded_before} already recorded",
+        notes::NOTES_REF
+    );
+    if !build_failed.is_empty() {
+        println!("  build failed: {}", build_failed.join(", "));
+    }
+    if failed_before > 0 {
+        println!(
+            "  {failed_before} commit(s) passed over: their build failed in an earlier run \
+             (--force retries them)"
+        );
+    }
+    if !not_recorded.is_empty() {
+        println!("  not recorded: {}", not_recorded.join(", "));
+    }
+    if !beyond.is_empty() {
+        println!(
+            "  {} more commit(s) beyond --limit {}; run again to continue",
+            beyond.len(),
+            o.limit
+        );
+    }
+    if recorded > 0 {
+        println!("  push with: tak push");
+    }
+    // A range where some old commits no longer build is normal and still a
+    // success, and so is a second run that only retries those. One that has
+    // no record at all to show for the range is not: a CI job seeding
+    // history must not pass having seeded none.
+    let failed = !(build_failed.is_empty() && not_recorded.is_empty()) || failed_before > 0;
+    if recorded == 0 && recorded_before == 0 && failed {
+        bail!("no commit in {} was recorded", o.range);
+    }
+    Ok(())
+}
+
+/// Check out, build and measure one commit, and record it whole or not at
+/// all. `Err` only for what would fail every later commit too, such as
+/// being unable to write the note.
+#[allow(clippy::too_many_arguments)]
+fn backfill_commit(
+    p: &Pending,
+    build: &config::Build,
+    plans: &[BenchPlan],
+    rel: &Path,
+    scratch: &Path,
+    hooks: &Path,
+    seed: u64,
+    opts: &RunOpts,
+    settings: &Settings,
+) -> Result<Outcome> {
+    let wt = match tak_cli::worktree::Worktree::add(&scratch.join(&p.sha[..12]), &p.sha, hooks) {
+        Ok(wt) => wt,
+        Err(e) => {
+            println!("  not recorded — {e:#}");
+            return Ok(Outcome::NotRecorded);
+        }
+    };
+    let root = wt.path().join(rel);
+    // The commit's own date, as release backfill uses the release's: this is
+    // when the code existed, which is what a series is plotted against. It
+    // is also the same every time the commit is measured, so its points keep
+    // one place on the timeline, and nothing in a record depends on when the
+    // backfill ran except the metrics themselves: a record written twice
+    // stays byte-identical, which is all cat_sort_uniq dedupes on. A commit
+    // object with no readable committer date would be malformed; it still
+    // costs only its own date, with a warning, rather than failing.
+    let ts = match tak_cli::worktree::commit_time(&p.sha) {
+        Ok(t) => rfc3339(t),
+        Err(e) => {
+            eprintln!("  warning: {e:#}; recording the measurement time instead");
+            now_rfc3339()
+        }
+    };
+
+    let mut build = build.clone();
+    build.anchor(&root);
+    // The checked path has no `..`, but the old tree may put a symlink where
+    // the current tak.toml expects a directory.
+    // Counted as a failed build: which paths a commit's tree holds never
+    // changes, so this would fail the same way next time, and retrying it
+    // first on every run would stop `--limit` from reaching older commits.
+    for dir in [Some(&root), build.dir.as_ref()].into_iter().flatten() {
+        if let Err(e) = wt.check_contains(dir) {
+            println!("  build failed — skipped: {e:#}");
+            return Ok(Outcome::BuildFailed);
+        }
+    }
+    match backfill::run_build(&build, &scratch.join("build.log")) {
+        Ok(took) => println!("  built in {:.1}s", took.as_secs_f64()),
+        Err(e) => {
+            println!("  build failed — skipped");
+            for line in format!("{e:#}").lines() {
+                println!("    {line}");
+            }
+            return Ok(Outcome::BuildFailed);
+        }
+    }
+
+    let mut records = Vec::new();
+    for (name, multi, subjects) in plans {
+        let Some(wanted) = p.needs.get(name) else {
+            continue;
+        };
+        // Only the subjects with no point on this commit yet: measuring the
+        // rest again would give them a second one.
+        let mut subjects: Vec<Subject> = subjects
+            .iter()
+            .filter(|s| wanted.contains(&s.name))
+            .cloned()
+            .collect();
+        for s in &mut subjects {
+            s.anchor(&root);
+        }
+        let problem = match check_inputs(&subjects, &wt) {
+            Some(missing) => Some(missing),
+            None => match measure_bench(name, &subjects, *multi, seed, opts, settings) {
+                Err(e) => Some(format!("{e:#}")),
+                // The same rules `tak run --record` applies: a missing
+                // subject or a failed check would leave a set in history
+                // that looks complete and is not.
+                Ok((_, failed)) if !failed.is_empty() => {
+                    Some(format!("subject(s) failed: {}", failed.join(", ")))
+                }
+                Ok((measured, _)) => {
+                    let failing = failing_checks(&measured);
+                    if failing.is_empty() {
+                        records.extend(measured.into_iter().map(|m| m.record));
+                        None
+                    } else {
+                        Some(format!("check failed: {}", labels(&failing)))
+                    }
+                }
+            },
+        };
+        if let Some(problem) = problem {
+            // Nothing from this commit is written, including benchmarks that
+            // did measure: a commit with half its benchmarks looks, later,
+            // exactly like one where the rest were never declared.
+            println!("  not recorded — {name}: {problem}");
+            return Ok(Outcome::NotRecorded);
+        }
+    }
+    for r in &mut records {
+        r.ts = ts.clone();
+    }
+    notes::append(&p.sha, &records)?;
+    Ok(Outcome::Recorded(records.len()))
+}
+
+/// A `dir` or program path the current tak.toml names that this checkout
+/// does not have, described for the user.
+///
+/// Only for subjects without a `setup`, which may be what creates them.
+/// Without this, the failure surfaces as a spawn error that says nothing
+/// about the file having been read from a newer commit than the tree.
+///
+/// A `dir` or program inside the checkout must also stay inside it once
+/// symlinks are resolved, for the reason
+/// [`tak_cli::worktree::Worktree::check_contains`] gives: a committed
+/// symlink at the program's path would otherwise run a binary from outside
+/// the commit being measured. One named outside the checkout, such as an
+/// absolute path from a template, is the user's choice and is left alone.
+fn check_inputs(subjects: &[Subject], wt: &tak_cli::worktree::Worktree) -> Option<String> {
+    let shown = |p: &Path| p.strip_prefix(wt.path()).unwrap_or(p).display().to_string();
+    for s in subjects {
+        if let Some(d) = &s.dir
+            && d.starts_with(wt.path())
+            && d.exists()
+            && let Err(e) = wt.check_contains(d)
+        {
+            return Some(format!("{e:#}"));
+        }
+        let program = Path::new(&s.cmd[0]);
+        if program.is_absolute()
+            && program.starts_with(wt.path())
+            && let Some(found) = spawned_path(program)
+            && let Err(e) = wt.check_contains(&found)
+        {
+            return Some(format!("{e:#}"));
+        }
+        if s.setup.is_some() {
+            continue;
+        }
+        if let Some(d) = &s.dir
+            && !d.is_dir()
+        {
+            return Some(format!(
+                "`dir` {} does not exist at this commit (tak.toml is read from the current checkout)",
+                shown(d)
+            ));
+        }
+        if program.is_absolute()
+            && program.starts_with(wt.path())
+            && spawned_path(program).is_none()
+        {
+            return Some(format!(
+                "{} does not exist at this commit after the build",
+                shown(program)
+            ));
+        }
+    }
+    None
+}
+
+/// The file spawning `program` would run, if there is one. On Windows that
+/// includes the executable suffix: `./target/release/mycli` runs `mycli.exe`,
+/// and a check for the bare name would call every Windows build missing.
+fn spawned_path(program: &Path) -> Option<std::path::PathBuf> {
+    if program.exists() {
+        return Some(program.to_path_buf());
+    }
+    let suffix = std::env::consts::EXE_SUFFIX;
+    if suffix.is_empty() || program.extension().is_some() {
+        return None;
+    }
+    let mut with = program.as_os_str().to_owned();
+    with.push(suffix);
+    let with = std::path::PathBuf::from(with);
+    with.exists().then_some(with)
+}
+
 /// Resolve settings from the CLI layer, the environment, and `tak.toml`.
 ///
 /// Called only by the commands that measure something or report settings.
@@ -2361,6 +2999,8 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Backfill {
+            commits,
+            force,
             repo,
             bin,
             args,
@@ -2368,16 +3008,49 @@ fn main() -> Result<()> {
             limit,
             runs,
             dry_run,
-        } => cmd_backfill(
-            repo,
-            bin,
-            args,
-            bench,
-            limit,
-            runs,
-            dry_run,
-            &resolve_settings(&overrides)?,
-        ),
+        } => {
+            let settings = resolve_settings(&overrides)?;
+            match commits {
+                Some(range) => {
+                    // Refused rather than ignored: each names something a
+                    // release backfill downloads, and a commit backfill
+                    // silently measuring tak.toml's benchmarks instead would
+                    // record a different series from the one asked for.
+                    if repo.is_some() || bin.is_some() || !args.is_empty() {
+                        bail!(
+                            "--repo, --bin and arguments after `--` select release binaries; \
+                             --commits measures the benchmarks tak.toml declares"
+                        );
+                    }
+                    cmd_backfill_commits(
+                        CommitBackfill {
+                            range,
+                            bench,
+                            limit,
+                            runs,
+                            force,
+                            dry_run,
+                        },
+                        &settings,
+                    )
+                }
+                None => {
+                    if force {
+                        bail!("--force only applies with --commits");
+                    }
+                    cmd_backfill(
+                        repo,
+                        bin,
+                        args,
+                        bench.unwrap_or_else(|| "release".to_string()),
+                        limit,
+                        runs.unwrap_or(10),
+                        dry_run,
+                        &settings,
+                    )
+                }
+            }
+        }
         Cmd::Compare {
             base,
             rev,
@@ -2451,6 +3124,16 @@ mod tests {
         assert_eq!(&ts[10..11], "T");
     }
 
+    /// A backfilled commit can be dated before 1970, and must land on the
+    /// right day rather than failing the backfill.
+    #[test]
+    fn timestamps_before_the_epoch_are_formatted() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339(-1), "1969-12-31T23:59:59Z");
+        assert_eq!(rfc3339(-86_400 * 365), "1969-01-01T00:00:00Z");
+        assert_eq!(rfc3339(1_700_000_000), "2023-11-14T22:13:20Z");
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_backfill_workdir_is_owner_only() {
@@ -2459,6 +3142,18 @@ mod tests {
         let workdir = backfill_workdir().unwrap();
         let mode = workdir.path().metadata().unwrap().permissions().mode();
         assert_eq!(mode & 0o077, 0, "workdir mode was {:o}", mode & 0o777);
+    }
+
+    /// A program is found as spawning would find it, which on Windows
+    /// includes the `.exe` a bare `./target/release/mycli` resolves to.
+    #[test]
+    fn a_built_program_is_found_with_the_platform_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("mycli");
+        assert_eq!(spawned_path(&bin), None);
+        let file = format!("{}{}", bin.display(), std::env::consts::EXE_SUFFIX);
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(spawned_path(&bin), Some(std::path::PathBuf::from(file)));
     }
 
     /// An explicit class wins over the derived one. This is how a project

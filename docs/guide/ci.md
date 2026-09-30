@@ -340,10 +340,10 @@ tak log HEAD~10 -n 5 --bench startup
 ```
 
 On a scratch repository with synthetic measurements recorded on most commits, with the footer
-lines omitted:
+lines and the count of commits walked omitted:
 
 ```
-5 recorded commit(s) on the first-parent history of `HEAD~10`, 2026-08-09 to 2026-08-14 (14 commit(s) walked). 6 older recorded commit(s) are not shown; `-n` shows more.
+5 recorded commit(s) on the first-parent history of `HEAD~10`, 2026-08-09 to 2026-08-14. Older recorded commits are not shown; `-n` shows more.
 
 ### `startup` on `gha-linux-x64`
 
@@ -357,8 +357,12 @@ lines omitted:
 ```
 
 Δ is the change in instruction count from the series' previous measurement, which may be
-several commits earlier. `-n` counts recorded commits, not commits walked. The output is
-Markdown, so it can be appended to `$GITHUB_STEP_SUMMARY`.
+several commits earlier. `-n` counts recorded commits, not commits walked. The walk stops at
+the first recorded commit past the limit, so a short report does not read the whole recorded
+history. With `--bench`, it stops there only once every named benchmark has also been seen,
+which can be much further back, or at the start of history if one never was. It says that
+older recorded commits exist, not how many. The output is Markdown, so it
+can be appended to `$GITHUB_STEP_SUMMARY`.
 
 A series never crosses runner classes: moving to a new runner class starts a new table rather
 than a jump in an existing one. A clone made with `--depth` only has part of the history. When

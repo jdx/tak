@@ -37,7 +37,7 @@ pub fn env() -> BTreeMap<String, String> {
 
 /// Whether `s` contains template syntax at all. Plain values skip tera
 /// entirely, so a file with no templates costs nothing.
-fn is_template(s: &str) -> bool {
+pub fn is_template(s: &str) -> bool {
     s.contains("{{") || s.contains("{%") || s.contains("{#")
 }
 
