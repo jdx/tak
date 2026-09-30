@@ -456,6 +456,50 @@ fn a_subject_cannot_reach_valgrinds_log() {
     );
 }
 
+/// `vet` is asked before every DHAT run, after that run's `prepare`, as it
+/// is before every counted cachegrind run: `backfill --commits` re-checks
+/// that a subject still runs from inside its checkout there. A refusal stops
+/// the measurement before valgrind starts the subject.
+#[cfg(unix)]
+#[test]
+fn allocation_runs_are_vetted_after_each_prepare() {
+    if !valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = allocating(&["/bin/sh", "-c", "echo run >> log"]);
+    s.prepare = Some(
+        ["/bin/sh", "-c", "echo prep >> log"]
+            .map(String::from)
+            .to_vec(),
+    );
+    s.dir = Some(dir.path().to_path_buf());
+    let log = dir.path().join("log");
+    let vetted = std::cell::RefCell::new(Vec::new());
+    let vet = || {
+        let seen = std::fs::read_to_string(&log).unwrap_or_default();
+        vetted.borrow_mut().push(seen.lines().count());
+        Ok(())
+    };
+    let a = measure::subject_allocations_vetted(&s, &Settings::default(), &vet)
+        .expect("DHAT invocation failed")
+        .expect("no DHAT summary parsed");
+    // Each vet sees its run's prepare and none of its run: 1, 3, 5 lines.
+    let expected: Vec<usize> = (0..a.runs as usize).map(|i| 2 * i + 1).collect();
+    assert_eq!(*vetted.borrow(), expected);
+
+    std::fs::remove_file(&log).unwrap();
+    let refuse = || anyhow::bail!("dir leads out of the checkout");
+    let err = measure::subject_allocations_vetted(&s, &Settings::default(), &refuse).unwrap_err();
+    assert!(format!("{err:#}").contains("leads out"), "{err:#}");
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        "prep\n",
+        "never run"
+    );
+}
+
 /// End to end: `--allocations` on an ad-hoc command prints the counts and
 /// exports them. Without valgrind it says why they are missing, and the
 /// export carries no `allocations` key rather than zeros.

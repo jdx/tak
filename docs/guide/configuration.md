@@ -318,6 +318,11 @@ after `--`.
   `prepare`, and records each metric's minimum. `check` doesn't run after them. `--no-counters`
   doesn't turn it off.
 - It needs valgrind 3.15 or newer. Without valgrind, tak prints a note and records timing only.
+- If counting allocations fails, tak warns and records the rest of the measurement without
+  them. `tak backfill --commits` follows the same rule, so a DHAT failure doesn't stop a commit
+  from being recorded, unlike a failed instruction count. The containment check that
+  `--commits` runs before each valgrind run applies to DHAT runs too, and a subject it refuses
+  is dropped.
 - DHAT counts only allocations it can intercept. A statically linked binary, or one with its
   own allocator built in (jemalloc, mimalloc), reports zero. tak records the zero, and warns
   that it's probably wrong.
@@ -614,6 +619,12 @@ with nothing to build can declare `cmd = ["true"]`.
 
 `env_deny` does not apply to the build. It exists to keep a token from changing what a measured
 command does, and a build that fetches a private dependency may need exactly that token.
+
+A commit whose build failed, or a benchmark whose measurement failed at a commit, is remembered,
+and later backfills pass over it; see
+[how failures are remembered](/guide/adopting#backfill-commits-by-building-them). Changing
+`[build]` retries every failure remembered under the old one. Any other edit to `tak.toml`
+retries the failed measurements, but not the failed builds.
 
 ## Environment and runner settings
 

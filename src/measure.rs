@@ -89,7 +89,136 @@ fn command(argv: &[String], site: &Site) -> Result<Command> {
     if let Some(d) = site.dir {
         c.current_dir(d);
     }
+    #[cfg(unix)]
+    if tracked::OWN_GROUPS.load(std::sync::atomic::Ordering::SeqCst) {
+        std::os::unix::process::CommandExt::process_group(&mut c, 0);
+    }
     Ok(c)
+}
+
+/// Spawn `c`, wait for it, and keep its process group known to
+/// [`stop_running`] meanwhile. `Command::status` split in two: the same
+/// stdio defaults, and only an atomic store between the spawn and the wait.
+fn run_tracked(c: &mut Command) -> std::io::Result<std::process::ExitStatus> {
+    let mut child = c.spawn()?;
+    tracked::started(child.id());
+    let status = child.wait();
+    tracked::finished();
+    status
+}
+
+/// Put every measured command in a process group of its own, so that
+/// [`stop_running`] can stop it and whatever it started, and nothing else.
+///
+/// For `tak backfill --commits`, whose interrupt handler has to stop the
+/// command before deleting the checkout it runs in. A SIGTERM sent to tak
+/// alone, as when CI cancels a job, never reaches a command in tak's own
+/// group, and signalling that group instead would also stop whatever shares
+/// it with tak, such as `tee` at the other end of a pipeline. `tak run`
+/// leaves commands in its group, where a terminal's Ctrl-C reaches them.
+///
+/// The group is set in the child before it runs the program, so it is inside
+/// the timed window, as one `setpgid` against a fork and exec that already
+/// cost hundreds of microseconds; and the program's own instructions, which
+/// cachegrind counts from exec, do not include it. Wall time is not gated.
+#[cfg(unix)]
+pub fn use_own_groups() {
+    tracked::OWN_GROUPS.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Kill the measured command running now, any started after this, and
+/// whatever earlier ones left running, each with its whole process group.
+/// Only effective after [`use_own_groups`]: a command in tak's own group is
+/// left alone.
+#[cfg(unix)]
+pub fn stop_running() {
+    use std::sync::atomic::Ordering::SeqCst;
+    tracked::STOPPED.store(true, SeqCst);
+    tracked::kill_all();
+}
+
+/// The one measured command running at a time — samples, setup, prepare,
+/// check and valgrind all run one after another — as its process group.
+mod tracked {
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering::SeqCst};
+
+    pub(super) static OWN_GROUPS: AtomicBool = AtomicBool::new(false);
+    pub(super) static RUNNING: AtomicI32 = AtomicI32::new(0);
+    pub(super) static STOPPED: AtomicBool = AtomicBool::new(false);
+
+    /// `pid` leads its own group. If [`super::stop_running`] already ran it
+    /// may have looked before this was stored, so the group is killed here:
+    /// each side stores before it loads, all `SeqCst`, so one of them acts.
+    pub(super) fn started(pid: u32) {
+        if !OWN_GROUPS.load(SeqCst) {
+            return;
+        }
+        RUNNING.store(pid as i32, SeqCst);
+        if STOPPED.load(SeqCst) {
+            kill(pid as i32);
+        }
+    }
+
+    /// Groups whose leader has exited but where something it started is
+    /// still running: a server a `setup` started on purpose, a daemon a tool
+    /// leaves behind. Left alone while the backfill runs, as `tak run` leaves
+    /// them, and killed with the running command on interrupt, since the
+    /// checkout they run in is about to be deleted.
+    static LEFT: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+
+    /// The running command has been reaped. Called after the clock stops,
+    /// since checking its group costs a syscall per remembered group.
+    ///
+    /// A group id is only kept while the group has a member, since a group
+    /// id cannot be reused until then, and each call drops the ones that
+    /// have emptied. A group that empties between the last call and an
+    /// interrupt leaves a window in which its id could be reused, which
+    /// would take the kernel handing out that exact pid again first.
+    pub(super) fn finished() {
+        let pgid = RUNNING.swap(0, SeqCst);
+        if !OWN_GROUPS.load(SeqCst) {
+            return;
+        }
+        let mut left = LEFT.lock().unwrap_or_else(|e| e.into_inner());
+        left.retain(|g| alive(*g));
+        if pgid > 0 && alive(pgid) {
+            left.push(pgid);
+        }
+    }
+
+    /// Kill the running command's group and every group left behind.
+    pub(super) fn kill_all() {
+        kill(RUNNING.load(SeqCst));
+        // A poisoned lock still holds the list; the interrupt must not skip it.
+        let left = LEFT.lock().unwrap_or_else(|e| e.into_inner());
+        for g in left.iter() {
+            kill(*g);
+        }
+    }
+
+    #[cfg(unix)]
+    fn alive(pgid: i32) -> bool {
+        // SAFETY: signal 0 only checks that the group exists.
+        unsafe { libc::killpg(pgid, 0) == 0 }
+    }
+
+    #[cfg(not(unix))]
+    fn alive(_pgid: i32) -> bool {
+        false
+    }
+
+    #[cfg(unix)]
+    pub(super) fn kill(pgid: i32) {
+        if pgid > 0 {
+            // SAFETY: killpg has no memory-safety preconditions.
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub(super) fn kill(_pgid: i32) {}
 }
 
 /// One successful run of a subject's timed command.
@@ -134,10 +263,15 @@ fn time_once(cmd: &[String], site: &Site, ok: &[i32]) -> Result<Sample> {
     c.stdout(Stdio::null()).stderr(Stdio::null());
     let bin = &cmd[0];
     let start = Instant::now();
-    let status = c
-        .status()
+    let mut child = c
+        .spawn()
         .with_context(|| format!("failed to spawn `{bin}`"))?;
+    // One atomic store inside the timed window; see `use_own_groups`.
+    tracked::started(child.id());
+    let status = child.wait();
     let ms = start.elapsed().as_secs_f64() * 1000.0;
+    tracked::finished();
+    let status = status.with_context(|| format!("failed to wait for `{bin}`"))?;
     let exit_code = accepted(bin, status, ok, "")?;
     Ok(Sample { ms, exit_code })
 }
@@ -208,12 +342,10 @@ fn untimed(step: &str, cmd: &[String], site: &Site) -> Result<Option<String>> {
     let reader = err
         .try_clone()
         .with_context(|| format!("failed to create a file for {step} `{bin}`'s stderr"))?;
-    let status = c
-        .stdin(Stdio::null())
+    c.stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::from(err))
-        .status()
-        .with_context(|| format!("failed to spawn {step} `{bin}`"))?;
+        .stderr(Stdio::from(err));
+    let status = run_tracked(&mut c).with_context(|| format!("failed to spawn {step} `{bin}`"))?;
     if status.success() {
         return Ok(None);
     }
@@ -330,6 +462,24 @@ pub trait Observer {
     /// `subject`'s setup step is starting. Untimed and not a sample, so it
     /// counts toward neither the samples taken nor their average.
     fn setting_up(&mut self, _subject: usize) {}
+    /// Every setup has run, and `subject`'s succeeded; nothing of it has run
+    /// yet, not its version, not a warmup. Asked after *all* setups rather
+    /// than after its own, since a later subject's setup can change the
+    /// paths an earlier one runs in. An error drops the subject as a failed
+    /// setup would. `tak backfill --commits` checks here that the old tree's
+    /// code has not left a path leading out of the checkout.
+    fn set_up(&mut self, _subject: usize) -> Result<()> {
+        Ok(())
+    }
+    /// A sample of `subject` is about to be timed: its `prepare`, if any, has
+    /// run, and the clock that times the command has not started. Asked
+    /// before every sample, warmups included, and again before its `check`,
+    /// since any subject's `prepare` or the command itself can change the
+    /// paths the next step runs with. Never inside the timed window. An
+    /// error drops the subject.
+    fn before_run(&mut self, _subject: usize) -> Result<()> {
+        Ok(())
+    }
     /// A sample of `subject` is starting.
     fn started(&mut self, _subject: usize) {}
     /// A sample of `subject` finished; `elapsed` covers its prepare step too.
@@ -463,6 +613,14 @@ pub fn interleaved_with_versions(
             observer.dropped(i);
         }
     }
+    for (i, result) in results.iter_mut().enumerate() {
+        if result.is_ok()
+            && let Err(e) = observer.set_up(i)
+        {
+            *result = Err(e);
+            observer.dropped(i);
+        }
+    }
 
     let versions: Vec<Version> = subjects
         .iter()
@@ -542,12 +700,18 @@ fn run_slots(
             .prepare
             .as_deref()
             .map_or(Ok(()), |p| prepare_once(p, &site))
+            .and_then(|()| observer.before_run(slot.subject))
             .and_then(|()| time_once(&s.cmd, &site, &s.ok_exit_codes));
         let elapsed = began.elapsed();
         // Only after the clock has stopped: the check is outside the
         // measurement, however long it takes.
         let checked = match (&taken, &s.check) {
-            (Ok(_), Some(check)) if slot.timed => check_once(check, &site).map(Some),
+            // Asked again first: the sample just run can have changed the
+            // paths the check runs with.
+            (Ok(_), Some(check)) if slot.timed => observer
+                .before_run(slot.subject)
+                .and_then(|()| check_once(check, &site))
+                .map(Some),
             _ => Ok(None),
         };
         match taken.and_then(|sample| checked.map(|c| (sample, c))) {
@@ -795,6 +959,7 @@ pub fn instructions(
         },
         &DEFAULT_OK_EXIT_CODES,
         false,
+        &|| Ok(()),
     )
     .map(|c| c.map(|(c, _)| c))
 }
@@ -803,7 +968,17 @@ pub fn instructions(
 /// `ok_exit_codes`, and its prepare step before every cachegrind run, since
 /// each run has to start from the same state the timed samples did.
 pub fn subject_instructions(s: &Subject, settings: &Settings) -> Result<Option<Counted>> {
-    subject_count(s, settings, false).map(|c| c.map(|(c, _)| c))
+    subject_count(s, settings, false, &|| Ok(())).map(|c| c.map(|(c, _)| c))
+}
+
+/// [`subject_instructions`], asking `vet` before each counted run, after its
+/// `prepare`, as [`Observer::before_run`] is asked before each sample.
+pub fn subject_instructions_vetted(
+    s: &Subject,
+    settings: &Settings,
+    vet: &dyn Fn() -> Result<()>,
+) -> Result<Option<Counted>> {
+    subject_count(s, settings, false, vet).map(|c| c.map(|(c, _)| c))
 }
 
 /// [`subject_instructions`], also returning the cachegrind profile of the run
@@ -814,7 +989,17 @@ pub fn subject_instructions(s: &Subject, settings: &Settings) -> Result<Option<C
 /// The profile is a separate result: failing to keep it must not cost the
 /// count, which is the one metric that gates.
 pub fn subject_profile(s: &Subject, settings: &Settings) -> Result<Option<(Counted, Profiled)>> {
-    Ok(subject_count(s, settings, true)?.map(|(c, p)| (c, p.expect("a profile was asked for"))))
+    subject_profile_vetted(s, settings, &|| Ok(()))
+}
+
+/// [`subject_profile`], asking `vet` as [`subject_instructions_vetted`] does.
+pub fn subject_profile_vetted(
+    s: &Subject,
+    settings: &Settings,
+    vet: &dyn Fn() -> Result<()>,
+) -> Result<Option<(Counted, Profiled)>> {
+    Ok(subject_count(s, settings, true, vet)?
+        .map(|(c, p)| (c, p.expect("a profile was asked for"))))
 }
 
 /// The raw cachegrind profile behind a count, or why it could not be kept.
@@ -824,6 +1009,7 @@ fn subject_count(
     s: &Subject,
     settings: &Settings,
     profile: bool,
+    vet: &dyn Fn() -> Result<()>,
 ) -> Result<Option<(Counted, Option<Profiled>)>> {
     count(
         &s.cmd,
@@ -835,6 +1021,7 @@ fn subject_count(
         },
         &s.ok_exit_codes,
         profile,
+        vet,
     )
 }
 
@@ -1358,9 +1545,16 @@ fn under_valgrind(
             Ok(())
         });
     }
+    // Spawned and waited for as `run_tracked` does, so under `tak backfill
+    // --commits` the run is in its own process group (set by `command`) and
+    // an interrupt stops it with everything it started. The group is set by
+    // std, not by the hook above, which is the only `pre_exec` here.
     let mut child = c.spawn().context("failed to run valgrind")?;
     let pid = child.id();
-    let status = child.wait().context("failed to run valgrind")?;
+    tracked::started(pid);
+    let status = child.wait();
+    tracked::finished();
+    let status = status.context("failed to run valgrind")?;
     // An empty log is what a valgrind that could not start the subject
     // leaves: its launcher reports that on stderr, before the log is used.
     // The caller's "no summary" error says so rather than this one guessing.
@@ -1416,6 +1610,7 @@ fn count(
     site: &Site,
     ok: &[i32],
     profile: bool,
+    vet: &dyn Fn() -> Result<()>,
 ) -> Result<Option<(Counted, Option<Profiled>)>> {
     if !valgrind_available() {
         return Ok(None);
@@ -1440,6 +1635,7 @@ fn count(
         if let Some(p) = prepare {
             prepare_once(p, site)?;
         }
+        vet()?;
         let out_file = match &scratch {
             // valgrind expands `%p` and `%q{VAR}` in this path and reads `%%`
             // as a literal one. A temporary directory seldom holds a `%`, but
@@ -1640,12 +1836,23 @@ impl Allocated {
 ///
 /// `Ok(None)` when valgrind is unavailable, like [`instructions`].
 pub fn subject_allocations(s: &Subject, settings: &Settings) -> Result<Option<Allocated>> {
+    subject_allocations_vetted(s, settings, &|| Ok(()))
+}
+
+/// [`subject_allocations`], asking `vet` before each DHAT run, after its
+/// `prepare`, as [`subject_instructions_vetted`] does before each counted
+/// run.
+pub fn subject_allocations_vetted(
+    s: &Subject,
+    settings: &Settings,
+    vet: &dyn Fn() -> Result<()>,
+) -> Result<Option<Allocated>> {
     let site = Site {
         dir: s.dir.as_deref(),
         env: &s.env,
         settings,
     };
-    allocations(&s.cmd, s.prepare.as_deref(), &site, &s.ok_exit_codes)
+    allocations(&s.cmd, s.prepare.as_deref(), &site, &s.ok_exit_codes, vet)
 }
 
 /// `ok` applies to the subject under valgrind: DHAT, like cachegrind, exits
@@ -1655,6 +1862,7 @@ fn allocations(
     prepare: Option<&[String]>,
     site: &Site,
     ok: &[i32],
+    vet: &dyn Fn() -> Result<()>,
 ) -> Result<Option<Allocated>> {
     if !valgrind_available() {
         return Ok(None);
@@ -1665,6 +1873,7 @@ fn allocations(
         if let Some(p) = prepare {
             prepare_once(p, site)?;
         }
+        vet()?;
         // The profile DHAT would write is for its viewer, and tak reads only
         // the summary; without this every run leaves a `dhat.out.PID` in the
         // subject's directory.
