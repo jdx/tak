@@ -13,6 +13,7 @@ pub mod baseline;
 pub mod compare;
 pub mod condition;
 pub mod config;
+pub mod detect;
 pub mod export;
 pub mod machine;
 pub mod measure;

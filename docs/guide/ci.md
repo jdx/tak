@@ -104,6 +104,90 @@ To see which functions a change came from, keep cachegrind's profiles on both si
 Always keep measurements partitioned by runner class. Comparing numbers across runner classes
 turns an infrastructure change into an apparent code regression.
 
+## Detect regressions that landed
+
+`tak compare` only runs where a workflow runs it, usually on pull requests. A regression can
+still reach the main branch: the check was not required, someone merged over it, a commit was
+pushed directly, or several changes each stayed under the gate. `tak detect` looks at what
+landed. Run it in the main-branch workflow after recording and pushing:
+
+```sh
+tak run --record
+tak push
+tak detect
+```
+
+It walks the first-parent history of `HEAD` (or the revision given) back to the 20th commit
+with measurements (`--window` changes the count) and compares each series' consecutive
+recorded points. A series is a benchmark, tool, and runner class; different runner classes
+are never compared.
+
+- **A step onto the newest commit** above the gate fails the command. No older step can: the
+  run for the next commit passes, so a main workflow fails once, on the push that introduced
+  the step, instead of on every push after it.
+- **A step across unrecorded commits** is reported as a range, such as `a1b2c3d4e5f6..0f9e8d7c6b5a
+  (3 commits)`. tak cannot tell which commit in the range caused it. A push of several commits
+  records only its tip, so this is common.
+- **Earlier steps** above the gate within the window are listed without failing.
+- **Sustained drift** is listed without failing: the series rose above the gate across the
+  window, counted from its last above-gate step, while every individual step stayed under it.
+
+Only instruction counts are examined. Wall-clock time is shown beside each step and never
+gates. Each series is held to the same gate `tak compare` would use:
+[per-benchmark gates](/guide/configuration#per-benchmark-gates) from the working tree's
+`tak.toml`, otherwise `[gate]`. That applies to steps and drift alike, `min_delta` floor
+included. A report-only benchmark (`enabled = false`) is still examined, and a step past its
+threshold is marked `(not gated)`, but it never fails the command. When every benchmark is
+report-only, `tak detect` can fail only when nothing could be compared.
+
+When the newest commit has no instruction counts, or no series on it has an earlier point in
+the window, the report says **Nothing was compared** and the command fails, because a check
+that examined nothing would otherwise look like a pass. `--allow-empty` waives this case
+only, so a step onto the newest commit still fails. `--no-gate` makes the command report
+without ever failing, covering both, as it does for `tak compare`.
+
+On the first recording, or the first on a new runner class, there is nothing earlier to
+compare with. Pass `--allow-empty` for that run, or seed the history first by recording an
+earlier commit on the same runner class. Other causes are configuration problems:
+
+- The checkout has no history. The walk needs the commits between recorded points, and the
+  default `actions/checkout` fetch of one commit leaves nothing to walk. The report notes when
+  a shallow clone cut the walk short.
+- The previous recording is more than 10,000 first-parent commits back. The walk stops at
+  that limit, and the report says when the limit stopped it before the window filled.
+- The recording step ran without Valgrind, so it stored timing but no instruction counts.
+- The commit was never recorded. Run `tak detect` after `tak run --record`.
+
+This is a simple step detector for near-deterministic counts, not statistical change-point
+detection. It does not model noise and does not look at timing metrics.
+
+### Accepted steps on main
+
+`tak detect` understands [acceptances](#accept-an-intentional-regression) the same way
+`tak compare` does. `--accept BENCH` is repeatable and takes exact names, and `Tak-Accept:`
+trailers are honoured only when `accept_trailers` is on. An accepted step onto the newest
+commit is marked `(accepted)`, listed with where the acceptance came from, and does not fail
+the command. Acceptances that waived nothing are listed too.
+
+Trailers are read from the step's own range: the first-parent commits after the series'
+previous recorded point, up to and including the newest commit. These are the commits that
+landed on the branch. A trailer on a pull-request branch commit behind a merge commit's second
+parent is not in that range. Under squash or rebase merging, the trailer has to survive into
+the commit that lands. Under merge commits, it has to be in the merge commit's message.
+
+The two tools do not share their acceptances. An acceptance given on a pull request through a
+label is an `--accept` flag on that job, not part of git history. On main, `tak detect` does
+not see it and fails once, on the commit that introduced the step. There are two ways around
+that:
+
+- **A trailer.** Put `Tak-Accept: BENCH` in the commit message that lands on main, and enable
+  `accept_trailers` in the main-branch workflow, for example `TAK_ACCEPT_TRAILERS=1 tak detect`.
+  On main, trailers are part of merged, reviewed history. That is why enabling them there is
+  reasonable, unlike on pull requests, where the commits are the change being gated.
+- **A manual rerun.** Re-run the main-branch check with `tak detect --accept BENCH` for that
+  commit. The next push passes without it, because only the step onto the newest commit can
+  fail.
+
 ## Accept an intentional regression
 
 Some changes make a benchmark more expensive on purpose. Rather than raising the gate for

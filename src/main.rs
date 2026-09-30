@@ -15,6 +15,7 @@ use tak_cli::config::{
     self, AutoRuns, Config, DEFAULT_BUDGET, DEFAULT_MAX_RUNS, DEFAULT_MIN_RUNS, DEFAULT_RUNS,
     DEFAULT_WARMUP, Runs, SELF_TOOL, Subject,
 };
+use tak_cli::detect;
 use tak_cli::export::{self, ExportResult};
 use tak_cli::measure::{self, Plan};
 use tak_cli::notes;
@@ -257,6 +258,45 @@ enum Cmd {
         /// Functions to list for each benchmark.
         #[usage(long, default = "10", value_name = "N")]
         top: usize,
+    },
+    /// Find instruction-count steps that already landed on a branch.
+    ///
+    /// Meant for the main-branch workflow, after recording. Walks REV's
+    /// first-parent history and compares each series' consecutive recorded
+    /// points. Fails when the step onto REV itself is beyond that series' gate
+    /// (the same per-benchmark gates as `compare`), so a regression fails the
+    /// run for the commit that introduced it rather than every run after, and
+    /// when nothing could be compared. Older steps and slow drift are reported
+    /// without failing. Wall clock is shown and never gated. A step in a
+    /// benchmark named by `--accept` is reported as accepted and does not fail.
+    /// So is one named by a `Tak-Accept:` trailer on a first-parent commit in
+    /// the step's range, but only when the `accept_trailers` setting is on.
+    Detect {
+        /// Newest commit to examine. Defaults to HEAD.
+        #[usage(arg, default = "HEAD")]
+        rev: String,
+        /// Recorded commits to examine, counting REV when it is recorded.
+        #[usage(long, default = "20", value_name = "N")]
+        window: usize,
+        /// Remote to refresh notes from.
+        #[usage(long, default = "origin")]
+        remote: String,
+        /// Report without ever failing: neither a step nor an empty comparison
+        /// fails the command.
+        #[usage(long)]
+        no_gate: bool,
+        /// Accept a step onto REV in this benchmark: report it, but do not fail
+        /// on it. Repeatable; each value is one exact benchmark name. Honoured
+        /// whatever `accept_trailers` says.
+        #[usage(long, value_name = "BENCH")]
+        accept: Vec<String>,
+        /// Succeed when nothing could be compared: REV has no instruction
+        /// counts, or none of its series has an earlier point in the window.
+        /// Without it that fails, because a check that examined nothing
+        /// otherwise looks like a pass. Needed on a first recording or the
+        /// first on a new runner class. A step onto REV still fails.
+        #[usage(long)]
+        allow_empty: bool,
     },
     /// Diagnose the git-notes plumbing.
     Doctor,
@@ -1591,7 +1631,7 @@ fn cmd_log(opts: LogOpts, settings: &Settings) -> Result<()> {
     // Never fatal, as in `notes::read`: offline, or a remote with no notes
     // yet, falls back to the local ref.
     let _ = notes::fetch(&opts.remote);
-    let walked = notes::log(&opts.rev)?;
+    let walked = notes::log(&opts.rev, None)?;
     // Whether the walk stopped at a graft, not whether anything in the clone
     // is shallow: the notes fetch above is shallow by design.
     let shallow = walked
@@ -1646,6 +1686,18 @@ fn gather_trend(base: &str, head_sha: &str, head_records: &[Record]) -> Result<c
     Ok(compare::build_trend(&walked, head_sha, head_records))
 }
 
+/// The floor, for the one-line error `compare` and `detect` fail with when
+/// every series is at the global gate: ` and N instructions`, or nothing.
+///
+/// Shared so the two commands word the same gate the same way; a script that
+/// learns one error learns the other.
+fn floor_suffix(gate: &compare::Gate) -> String {
+    match gate.min_delta {
+        0 => String::new(),
+        n => format!(" and {n} instructions"),
+    }
+}
+
 /// Compare `rev` against `base`, print the report, and gate on it.
 fn cmd_compare(
     base: String,
@@ -1668,7 +1720,7 @@ fn cmd_compare(
     // under comparison are the change being gated, so by default their own
     // trailers must not be able to waive the gate — but an author whose
     // trailer was ignored should be told, not left guessing.
-    let log = notes::trailers(&base_sha, &head_sha, accept::TRAILER);
+    let log = notes::trailers(&base_sha, &head_sha, accept::TRAILER, false);
     let mut ignored = Acceptances::default();
     if settings.accept_trailers {
         // Fatal when honoured, unlike the trend below. Carrying on would still
@@ -1727,10 +1779,7 @@ fn cmd_compare(
     // A non-zero exit is the gate. The table above already says which and by
     // how much, so this only has to be unambiguous about why the job failed.
     if comparison.gated_uniformly(&gates) {
-        let floor = match gates.global.min_delta {
-            0 => String::new(),
-            n => format!(" and {n} instructions"),
-        };
+        let floor = floor_suffix(&gates.global);
         bail!(
             "{} benchmark(s) regressed by more than {}%{floor}",
             regressions.len(),
@@ -1769,6 +1818,102 @@ fn cmd_explain(base: &Path, head: &Path, top: usize) -> Result<()> {
         tak_cli::profile::markdown(&pairs, &unpaired, top, &recorded)
     );
     Ok(())
+}
+
+/// Walk `rev`'s recorded history, print the steps, and gate on the newest.
+fn cmd_detect(
+    rev: String,
+    window: usize,
+    remote: String,
+    no_gate: bool,
+    accept_flags: Vec<String>,
+    allow_empty: bool,
+    settings: &Settings,
+) -> Result<()> {
+    // Up front, before any git work: one recorded commit has no step to find,
+    // and a run that quietly compared nothing would read as a pass.
+    if window < 2 {
+        bail!("--window must be at least 2: a step needs two recorded commits");
+    }
+    // The same per-series gates as `tak compare`, loaded before any git work
+    // for the same reason: a bad gate should fail before anything is fetched.
+    let gates = compare_gates(settings, None)?;
+    // Checked before any git work too: an empty `--accept` is an unset CI
+    // variable, and finding out after the walk wastes it.
+    let mut flags = Acceptances::default();
+    for name in &accept_flags {
+        flags.add_name(name, accept::Source::Flag)?;
+    }
+    let head = notes::rev_parse(&rev).with_context(|| format!("cannot resolve {rev}"))?;
+    // Never fatal, as for every read path: offline, or no notes pushed yet,
+    // falls back to what is recorded locally.
+    let _ = notes::fetch(&remote);
+
+    let (walked, cutoff) = detect::gather(&head, window)?;
+    let mut found = detect::analyze(&walked, &gates);
+    found.cutoff = cutoff;
+    found.allow_empty = allow_empty;
+    found.no_gate = no_gate;
+
+    // Trailers from each step's own range, `from..head` along the first
+    // parent: the commits that landed on this branch between the step's two
+    // points. Read either way, honoured only when the setting says so — the
+    // same rule as `tak compare`, so an ignored trailer is reported rather
+    // than silently doing nothing.
+    let froms: BTreeSet<&str> = found.latest.iter().map(|s| s.from.as_str()).collect();
+    let mut logs = BTreeMap::new();
+    let mut ignored = Acceptances::default();
+    for from in froms {
+        let log = notes::trailers(from, &head, accept::TRAILER, true);
+        if settings.accept_trailers {
+            // Fatal when honoured, as in compare: carrying on would fail a
+            // step its trailer accepted, with nothing saying why.
+            let log = log.with_context(|| {
+                format!(
+                    "cannot read {} trailers from {}..{}",
+                    accept::TRAILER,
+                    detect::short(from),
+                    detect::short(&head)
+                )
+            })?;
+            logs.insert(from.to_string(), log);
+        } else if let Ok(log) = log {
+            ignored.add_trailer_log(&log);
+        }
+    }
+    found.accept(&flags, &logs);
+    found.ignored_trailers = ignored;
+    print!("{}", detect::markdown(&found, settings.credit));
+
+    // Passing here would claim a check that never ran, so it takes an explicit
+    // waiver: --allow-empty for this case alone, or --no-gate for everything.
+    if found.empty_fails() {
+        bail!(
+            "nothing was compared at {}; pass --allow-empty if that is expected",
+            detect::short(&head)
+        );
+    }
+    let failures = found.failures();
+    if failures.is_empty() || no_gate {
+        return Ok(());
+    }
+    // As with compare: the report already names which and by how much, so this
+    // only has to be unambiguous about why the job failed — and reads as it did
+    // before per-benchmark gates when every series is at the global one.
+    if found.uniform() {
+        let floor = floor_suffix(&gates.global);
+        bail!(
+            "{} benchmark(s) stepped up by more than {}%{floor} at {}",
+            failures.len(),
+            gates.global.pct,
+            detect::short(&head)
+        )
+    }
+    bail!(
+        "{} benchmark(s) stepped beyond their gate at {}",
+        failures.len(),
+        detect::short(&head)
+    )
 }
 
 /// The gate for every series: `[gate]` and its flags, overridden per benchmark
@@ -2291,6 +2436,22 @@ fn main() -> Result<()> {
             &resolve_settings(&overrides)?,
         ),
         Cmd::Explain { base, head, top } => cmd_explain(&base, &head, top),
+        Cmd::Detect {
+            rev,
+            window,
+            remote,
+            no_gate,
+            accept,
+            allow_empty,
+        } => cmd_detect(
+            rev,
+            window,
+            remote,
+            no_gate,
+            accept,
+            allow_empty,
+            &resolve_settings(&overrides)?,
+        ),
         // Tolerant on purpose: doctor diagnoses a broken setup, so a tak.toml
         // it cannot read must not stop it from running.
         Cmd::Doctor => cmd_doctor(&tolerant_settings(&overrides, "showing settings")),

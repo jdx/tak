@@ -1269,6 +1269,144 @@
         "examples": [],
         "headings": []
       },
+      "detect": {
+        "full_cmd": [
+          "detect"
+        ],
+        "usage": "detect [FLAGS] [REV]",
+        "subcommands": {},
+        "args": [
+          {
+            "name": "REV",
+            "usage": "[REV]",
+            "help": "Newest commit to examine. Defaults to HEAD.",
+            "help_first_line": "Newest commit to examine. Defaults to HEAD.",
+            "required": false,
+            "double_dash": "Optional",
+            "hide": false,
+            "default": [
+              "HEAD"
+            ]
+          }
+        ],
+        "flags": [
+          {
+            "name": "window",
+            "usage": "--window <N>",
+            "help": "Recorded commits to examine, counting REV when it is recorded.",
+            "help_first_line": "Recorded commits to examine, counting REV when it is recorded.",
+            "short": [],
+            "long": [
+              "window"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "N",
+              "usage": "<N>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            },
+            "default": [
+              "20"
+            ]
+          },
+          {
+            "name": "remote",
+            "usage": "--remote <REMOTE>",
+            "help": "Remote to refresh notes from.",
+            "help_first_line": "Remote to refresh notes from.",
+            "short": [],
+            "long": [
+              "remote"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "REMOTE",
+              "usage": "<REMOTE>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            },
+            "default": [
+              "origin"
+            ]
+          },
+          {
+            "name": "no-gate",
+            "usage": "--no-gate",
+            "help": "Report without ever failing: neither a step nor an empty comparison fails the command.",
+            "help_first_line": "Report without ever failing: neither a step nor an empty comparison fails the command.",
+            "short": [],
+            "long": [
+              "no-gate"
+            ],
+            "hide": false,
+            "global": false
+          },
+          {
+            "name": "accept",
+            "usage": "--accept <BENCH>",
+            "help": "Accept a step onto REV in this benchmark: report it, but do not fail on it. Repeatable; each value is one exact benchmark name. Honoured whatever `accept_trailers` says.",
+            "help_first_line": "Accept a step onto REV in this benchmark: report it, but do not fail on it. Repeatable; each value is one exact benchmark name. Honoured whatever `accept_trailers` says.",
+            "short": [],
+            "long": [
+              "accept"
+            ],
+            "var": true,
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "BENCH",
+              "usage": "<BENCH>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "allow-empty",
+            "usage": "--allow-empty",
+            "help": "Succeed when nothing could be compared: REV has no instruction counts, or none of its series has an earlier point in the window. Without it that fails, because a check that examined nothing otherwise looks like a pass. Needed on a first recording or the first on a new runner class. A step onto REV still fails.",
+            "help_first_line": "Succeed when nothing could be compared: REV has no instruction counts, or none of its series has an earlier point in the window. Without it that fails, because a check that examined nothing otherwise looks like a pass. Needed on a first recording or the first on a new runner class. A step onto REV still fails.",
+            "short": [],
+            "long": [
+              "allow-empty"
+            ],
+            "hide": false,
+            "global": false
+          },
+          {
+            "name": "help",
+            "usage": "-h --help",
+            "help": "Print help",
+            "help_first_line": "Print help",
+            "short": [
+              "h"
+            ],
+            "long": [
+              "help"
+            ],
+            "hide": false,
+            "global": false,
+            "action": "help",
+            "builtin": true
+          }
+        ],
+        "mounts": [],
+        "unknown_flags": null,
+        "hide": false,
+        "args_override_self": true,
+        "help": "Find instruction-count steps that already landed on a branch.",
+        "help_long": "Find instruction-count steps that already landed on a branch.\n\nMeant for the main-branch workflow, after recording. Walks REV's first-parent history and compares each series' consecutive recorded points. Fails when the step onto REV itself is beyond that series' gate (the same per-benchmark gates as `compare`), so a regression fails the run for the commit that introduced it rather than every run after, and when nothing could be compared. Older steps and slow drift are reported without failing. Wall clock is shown and never gated. A step in a benchmark named by `--accept` is reported as accepted and does not fail. So is one named by a `Tak-Accept:` trailer on a first-parent commit in the step's range, but only when the `accept_trailers` setting is on.",
+        "name": "detect",
+        "aliases": [],
+        "hidden_aliases": [],
+        "examples": [],
+        "headings": []
+      },
       "doctor": {
         "full_cmd": [
           "doctor"
@@ -1567,8 +1705,8 @@
             "gate.accept_trailers"
           ]
         },
-        "help": "Whether `tak compare` honours `Tak-Accept:` trailers on the commits it compares.",
-        "long_help": "Whether `tak compare` honours `Tak-Accept:` trailers on the commits it compares.\n\nOff by default, because of who writes those trailers. A trailer is part of a commit message, and the commits `tak compare` reads are the change being gated — on a pull request, the author's own. Honouring them by default would let any change waive its own gate by adding one line, which makes the gate advisory for exactly the changes it exists to stop. The acceptance would be visible in the report, but visible is not the same as approved.\n\nWith this off, trailers are ignored entirely; if the compared range carries any, the report says so in one line, so an author is not left wondering why theirs did nothing. `tak compare --accept BENCH` works either way, and is the recommended route in CI: pass it from a workflow step driven by something only maintainers can do, such as applying a pull-request label.\n\nTurn it on where every commit in the compared range has already been reviewed by the time the result matters, or where everyone who can push is trusted to waive the gate — a solo project, or comparisons along an already-reviewed main branch.\n\n`tak.toml` is read from the checkout being measured, so a pull request can change this key just as it can change `gate.pct`. Where the gate is enforced against changes you do not trust, set `TAK_ACCEPT_TRAILERS=0` in the workflow: the environment takes precedence over the file.",
+        "help": "Whether `tak compare` and `tak detect` honour `Tak-Accept:` trailers on the commits they compare.",
+        "long_help": "Whether `tak compare` and `tak detect` honour `Tak-Accept:` trailers on the commits they compare.\n\nOff by default, because of who writes those trailers. A trailer is part of a commit message, and the commits `tak compare` reads are the change being gated — on a pull request, the author's own. Honouring them by default would let any change waive its own gate by adding one line, which makes the gate advisory for exactly the changes it exists to stop. The acceptance would be visible in the report, but visible is not the same as approved.\n\nWith this off, trailers are ignored entirely; if the compared range carries any, the report says so in one line, so an author is not left wondering why theirs did nothing. `tak compare --accept BENCH` works either way, and is the recommended route in CI: pass it from a workflow step driven by something only maintainers can do, such as applying a pull-request label.\n\nTurn it on where every commit in the compared range has already been reviewed by the time the result matters, or where everyone who can push is trusted to waive the gate — a solo project, or comparisons along an already-reviewed main branch.\n\n`tak.toml` is read from the checkout being measured, so a pull request can change this key just as it can change `gate.pct`. Where the gate is enforced against changes you do not trust, set `TAK_ACCEPT_TRAILERS=0` in the workflow: the environment takes precedence over the file.",
         "help_heading": null,
         "choices": [],
         "merge": "replace",
@@ -1738,8 +1876,8 @@
             "gate.min_delta"
           ]
         },
-        "help": "How many instructions a count may rise by before `tak compare` fails, whatever the percentage.",
-        "long_help": "How many instructions a count may rise by before `tak compare` fails, whatever the percentage.\n\nA regression has to exceed both this and `gate_pct`. A percentage alone serves small benchmarks badly: on a 450k-instruction startup check, 1% is 4,500 instructions, which one new dependency's relocations in the dynamic loader can account for before `main` runs. A floor lets such a benchmark keep a tight percentage without failing on a handful of instructions.\n\nThe default of 0 means no floor: any rise beyond `gate_pct` fails. A benchmark or subject can set its own with `gate = { min_delta = N }` in `tak.toml`.",
+        "help": "How many instructions a count may rise by before `tak compare` or `tak detect` fails, whatever the percentage.",
+        "long_help": "How many instructions a count may rise by before `tak compare` or `tak detect` fails, whatever the percentage.\n\nA regression has to exceed both this and `gate_pct`. A percentage alone serves small benchmarks badly: on a 450k-instruction startup check, 1% is 4,500 instructions, which one new dependency's relocations in the dynamic loader can account for before `main` runs. A floor lets such a benchmark keep a tight percentage without failing on a handful of instructions.\n\nThe default of 0 means no floor: any rise beyond `gate_pct` fails. A benchmark or subject can set its own with `gate = { min_delta = N }` in `tak.toml`.",
         "help_heading": null,
         "choices": [],
         "merge": "replace",
@@ -1778,8 +1916,8 @@
             "gate.pct"
           ]
         },
-        "help": "How much an instruction count may rise before `tak compare` fails.",
-        "long_help": "How much an instruction count may rise before `tak compare` fails.\n\nA percentage of the base measurement. Only instruction counts are gated. Wall clock is reported and never gated: on the same hardware it moves 4-20% run to run, so a threshold tight enough to catch a real regression would fire constantly, and one loose enough to stay quiet would catch nothing.\n\nThe default of 1% is about fifty times the ~0.02% instruction counting reproduces to, leaving room for the small differences a compiler or dependency bump can produce without turning the gate into noise.\n\nRaise it to report without effectively failing. Setting it to zero fails on any increase at all, which sounds appealing and is not: one extra instruction on a startup path is not worth blocking a pull request over.\n\nThis is the gate for every series without its own. A benchmark or subject can set one with `gate = { pct = N }` in `tak.toml`, and that wins over this setting from any source, `--gate-pct` included: the flag moves the default, not the benchmarks a project has singled out.",
+        "help": "How much an instruction count may rise before `tak compare` or `tak detect` fails.",
+        "long_help": "How much an instruction count may rise before `tak compare` or `tak detect` fails.\n\nA percentage of the base measurement. Only instruction counts are gated. Wall clock is reported and never gated: on the same hardware it moves 4-20% run to run, so a threshold tight enough to catch a real regression would fire constantly, and one loose enough to stay quiet would catch nothing.\n\nThe default of 1% is about fifty times the ~0.02% instruction counting reproduces to, leaving room for the small differences a compiler or dependency bump can produce without turning the gate into noise.\n\nRaise it to report without effectively failing. Setting it to zero fails on any increase at all, which sounds appealing and is not: one extra instruction on a startup path is not worth blocking a pull request over.\n\nThis is the gate for every series without its own. A benchmark or subject can set one with `gate = { pct = N }` in `tak.toml`, and that wins over this setting from any source, `--gate-pct` included: the flag moves the default, not the benchmarks a project has singled out.",
         "help_heading": null,
         "choices": [],
         "merge": "replace",

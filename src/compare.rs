@@ -115,7 +115,7 @@ impl Gate {
     }
 
     /// The threshold, short enough for a table cell: `5%`, `5%, floor 20,000`.
-    fn threshold(&self) -> String {
+    pub(crate) fn threshold(&self) -> String {
         if self.min_delta == 0 {
             format!("{}%", self.pct)
         } else {
@@ -124,7 +124,7 @@ impl Gate {
     }
 
     /// The threshold, and whether crossing it fails.
-    fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         if self.enabled {
             self.threshold()
         } else {
@@ -776,7 +776,7 @@ fn accepted_line(
 /// read as one in the report. The padding is what gets stripped, leaving the
 /// name as written. A span of only spaces is never stripped, so it is left
 /// unpadded.
-fn code(text: &str) -> String {
+pub(crate) fn code(text: &str) -> String {
     let mut longest = 0;
     let mut run = 0;
     for ch in text.chars() {
