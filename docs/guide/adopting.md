@@ -373,7 +373,8 @@ every base series is on the old class. Pass `--allow-empty` for those pull reque
 the report check while it is passed, or the check still fails the job. Restore both once main has
 measurements on the current class. Left in place, `--allow-empty` lets a workflow that has
 stopped recording pass without comparing anything. A regression still fails under
-`--allow-empty`; only `--no-gate` reports without ever failing.
+`--allow-empty`; only `--no-gate` reports without failing on the comparison, and errors still
+fail under it.
 
 If the workflow also posts a sticky pull-request comment, keep the write token in a separate
 reporting job that checks out no code and executes nothing from the pull request. Pass the

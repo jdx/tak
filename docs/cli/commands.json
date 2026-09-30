@@ -1102,8 +1102,8 @@
           {
             "name": "no-gate",
             "usage": "--no-gate",
-            "help": "Report without failing, whatever the numbers say. Takes precedence over `--allow-empty`: an empty comparison passes too.",
-            "help_first_line": "Report without failing, whatever the numbers say. Takes precedence over `--allow-empty`: an empty comparison passes too.",
+            "help": "Report without failing, whatever the numbers say. Takes precedence over `--allow-empty`: an empty comparison passes too. Errors, such as an invalid `tak.toml`, still fail.",
+            "help_first_line": "Report without failing, whatever the numbers say. Takes precedence over `--allow-empty`: an empty comparison passes too. Errors, such as an invalid `tak.toml`, still fail.",
             "short": [],
             "long": [
               "no-gate"
@@ -1240,8 +1240,8 @@
           {
             "name": "no-gate",
             "usage": "--no-gate",
-            "help": "Report without ever failing: neither a step nor an empty comparison fails the command.",
-            "help_first_line": "Report without ever failing: neither a step nor an empty comparison fails the command.",
+            "help": "Report without failing on the result: neither a step nor an empty comparison fails the command. Errors, such as an invalid `tak.toml`, still fail.",
+            "help_first_line": "Report without failing on the result: neither a step nor an empty comparison fails the command. Errors, such as an invalid `tak.toml`, still fail.",
             "short": [],
             "long": [
               "no-gate"
