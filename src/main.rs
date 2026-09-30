@@ -2844,7 +2844,7 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
     for p in &todo {
         let short = &p.sha[..12];
         println!("\n{short}  {}", p.subject);
-        match backfill_commit(
+        let outcome = backfill_commit(
             p,
             &build,
             &plans,
@@ -2854,38 +2854,41 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
             seed,
             &opts,
             settings,
-        )? {
+        );
+        // A build or measurement the interrupt handler killed comes back as
+        // a failure; the handler exits the process, with the signal's
+        // status, and nothing here may write or return first.
+        tak_cli::worktree::wait_if_interrupted();
+        match outcome? {
             Outcome::Recorded(n) => {
                 println!("  recorded {n} measurement(s)");
                 recorded += 1;
                 let benches: Vec<String> = p.needs.keys().cloned().collect();
                 failures.recorded(&p.sha, &benches)?;
             }
-            // The interrupt handler kills the build and the measured
-            // commands before it removes anything, so a failure while it
-            // runs says nothing about the commit. Remembering it would leave
-            // a cancelled job's commit out of every later run. The flag is
-            // set before the kills, so it is always seen here.
+            // Never an interrupted one: a failure the handler caused by
+            // killing the build or the measured command says nothing about
+            // the commit, and `wait_if_interrupted` above stops here before
+            // one could be remembered and leave a cancelled job's commit out
+            // of every later run.
             Outcome::BuildFailed => {
                 build_failed.push(short);
-                if !tak_cli::worktree::stopping() {
-                    failures.add(&p.sha, tak_cli::worktree::Failure::Build)?;
-                }
+                failures.add(&p.sha, tak_cli::worktree::Failure::Build)?;
             }
             Outcome::MeasureFailed(bench) => {
                 measure_failed.push(short);
                 // It built, so a build failure remembered from before — which
                 // `--force` retried — no longer holds. Kept, it would pass
-                // over every other benchmark of the commit from now on. Even
-                // under an interrupt: the build did finish.
+                // over every other benchmark of the commit from now on.
                 failures.recorded(&p.sha, &[])?;
-                if !tak_cli::worktree::stopping() {
-                    failures.add(&p.sha, tak_cli::worktree::Failure::Measure(bench))?;
-                }
+                failures.add(&p.sha, tak_cli::worktree::Failure::Measure(bench))?;
             }
             Outcome::NotRecorded => not_recorded.push(short),
         }
     }
+    // A signal after the last commit still ends with its own status, and no
+    // summary that reads as if the run had finished.
+    tak_cli::worktree::wait_if_interrupted();
 
     println!(
         "\n  recorded {recorded} commit(s) → {}; {recorded_before} already recorded",

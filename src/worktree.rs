@@ -132,7 +132,27 @@ pub fn build_started(pid: u32) {
 /// Whether an interrupt is being handled. A build that fails from here on
 /// was killed by tak, not broken by its commit.
 pub fn stopping() -> bool {
-    STOPPING.load(Ordering::SeqCst)
+    STOPPING.load(Ordering::SeqCst) || SIGNALED.load(Ordering::SeqCst)
+}
+
+/// Set by the signal handler itself, before the cleanup thread wakes.
+static SIGNALED: AtomicBool = AtomicBool::new(false);
+
+/// Never return once an interrupt has arrived: wait for the cleanup thread
+/// to exit the process.
+///
+/// The thread kills the build or the measured command, and the main thread,
+/// seeing it fail, would otherwise finish the loop and exit with its own
+/// status first — 1 for a range with nothing recorded, where the signal's
+/// 130 or 143 was due — and possibly before the checkout was removed. The
+/// main thread calls this after every commit and before it returns, so the
+/// exit is always the handler's.
+pub fn wait_if_interrupted() {
+    if stopping() {
+        loop {
+            std::thread::park();
+        }
+    }
 }
 
 /// The build has been reaped; its group id may be reused from here on.
@@ -483,6 +503,9 @@ pub fn clean_up_on_interrupt(scratch: &Path) -> Result<()> {
     static WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 
     extern "C" fn on_signal(sig: libc::c_int) {
+        // An atomic store is async-signal-safe, and set here rather than by
+        // the thread so the main thread sees it the moment the signal lands.
+        SIGNALED.store(true, Ordering::SeqCst);
         let fd = WRITE_FD.load(Ordering::SeqCst);
         if fd >= 0 {
             let byte = sig as u8;
