@@ -146,7 +146,10 @@ fn the_limit_and_bench_filter_apply() {
         &["log", "-n", "2", "--bench", "startup", "--no-credit"],
     ));
     assert!(out.contains("2 recorded commit(s)"), "{out}");
-    assert!(out.contains("1 older recorded commit(s)"), "{out}");
+    assert!(
+        out.contains("Older recorded commits are not shown"),
+        "{out}"
+    );
     assert!(!out.contains("resolve"), "{out}");
     assert!(!out.contains("1,000,000"), "{out}");
 
@@ -154,6 +157,89 @@ fn the_limit_and_bench_filter_apply() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("`nope`") && err.contains("startup"), "{err}");
+}
+
+/// The walk ends one recorded commit past the limit, however long the trunk
+/// behind it — and git, cut off mid-write, is not reported as a failure.
+///
+/// Built with `fast-import` so the history is long enough for git to still be
+/// writing when tak stops reading: 2,000 notes of about 2 KiB each is far past
+/// any pipe buffer.
+#[test]
+fn the_walk_stops_once_the_limit_is_reached() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    git(d, &["init", "--quiet", "-b", "main"]);
+    // Each commit to a branch in one stream continues from the last, so
+    // neither needs a `from`.
+    let n = 2_000;
+    let mut stream = String::new();
+    for i in 1..=n {
+        let msg = format!("commit {i}");
+        stream += &format!(
+            "commit refs/heads/main\nmark :{i}\ncommitter T <t@example.com> {} +0000\ndata {}\n{msg}\n",
+            1_700_000_000 + i,
+            msg.len()
+        );
+    }
+    for i in 1..=n {
+        let note: Vec<String> = (0..16)
+            .map(|b| line(&format!("bench{b:02}"), "gha", 1_000_000 + i))
+            .collect();
+        let note = note.join("\n");
+        stream += &format!(
+            "commit refs/notes/tak\ncommitter T <t@example.com> 1700000000 +0000\ndata 0\nN inline :{i}\ndata {}\n{note}\n",
+            note.len()
+        );
+    }
+    let mut import = Command::new("git")
+        .args(["fast-import", "--quiet"])
+        .current_dir(d)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write as _;
+    import
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stream.as_bytes())
+        .unwrap();
+    assert!(import.wait().unwrap().success());
+
+    let out = stdout(&tak(d, &["log", "-n", "3", "--bench", "bench00"]));
+    assert!(out.contains("3 recorded commit(s)"), "{out}");
+    assert!(out.contains("(4 commit(s) walked)"), "{out}");
+    assert!(
+        out.contains("Older recorded commits are not shown"),
+        "{out}"
+    );
+    assert!(out.contains("1,002,000"), "{out}");
+}
+
+/// A benchmark named with `--bench` keeps the walk going until it has been
+/// seen, even once the others have met the limit — or a benchmark recorded
+/// only further back would fail as though it had never been recorded.
+#[test]
+fn the_walk_goes_on_until_every_selected_bench_is_found() {
+    let dir = trunk("late-bench");
+    let d = dir.path();
+    // `resolve` is only on the old tip, behind two newer `startup` points,
+    // either of which would otherwise have been enough for `-n 1`.
+    for (subject, ins) in [("newer", 1_020_000), ("newest", 1_030_000)] {
+        let c = commit(d, subject);
+        note(d, &c, &[line("startup", "gha", ins)]);
+    }
+    let out = stdout(&tak(
+        d,
+        &["log", "-n", "1", "--bench", "startup", "--bench", "resolve"],
+    ));
+    assert!(out.contains("1,030,000"), "{out}");
+    assert!(out.contains("(3 commit(s) walked)"), "{out}");
+    assert!(
+        out.contains("Older recorded commits are not shown"),
+        "{out}"
+    );
 }
 
 /// A user's `notes.displayRef` would add another ref's notes to `%N`. Records

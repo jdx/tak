@@ -890,6 +890,37 @@
         ],
         "flags": [
           {
+            "name": "commits",
+            "usage": "--commits <RANGE>",
+            "help": "Build and measure the first-parent commits in RANGE, such as `main~20..main`, instead of downloading releases.",
+            "help_first_line": "Build and measure the first-parent commits in RANGE, such as `main~20..main`, instead of downloading releases.",
+            "short": [],
+            "long": [
+              "commits"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "RANGE",
+              "usage": "<RANGE>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "force",
+            "usage": "--force",
+            "help": "With --commits, measure every subject again even where this runner class already has a record, and retry commits whose build failed in an earlier run.",
+            "help_first_line": "With --commits, measure every subject again even where this runner class already has a record, and retry commits whose build failed in an earlier run.",
+            "short": [],
+            "long": [
+              "force"
+            ],
+            "hide": false,
+            "global": false
+          },
+          {
             "name": "repo",
             "usage": "--repo <REPO>",
             "help": "Repository to pull releases from, as \"owner/name\". Defaults to the `origin` remote of the current repository.",
@@ -930,8 +961,8 @@
           {
             "name": "bench",
             "usage": "--bench <BENCH>",
-            "help": "Name to record measurements under.",
-            "help_first_line": "Name to record measurements under.",
+            "help": "Name to record release measurements under; `release` if omitted. With --commits, the one benchmark from tak.toml to measure.",
+            "help_first_line": "Name to record release measurements under; `release` if omitted. With --commits, the one benchmark from tak.toml to measure.",
             "short": [],
             "long": [
               "bench"
@@ -944,16 +975,13 @@
               "required": true,
               "double_dash": "Optional",
               "hide": false
-            },
-            "default": [
-              "release"
-            ]
+            }
           },
           {
             "name": "limit",
             "usage": "--limit <LIMIT>",
-            "help": "Most recent releases to measure.",
-            "help_first_line": "Most recent releases to measure.",
+            "help": "Most recent releases to measure. With --commits, most commits to build, newest first, among those not already recorded.",
+            "help_first_line": "Most recent releases to measure. With --commits, most commits to build, newest first, among those not already recorded.",
             "short": [],
             "long": [
               "limit"
@@ -974,8 +1002,8 @@
           {
             "name": "runs",
             "usage": "--runs <RUNS>",
-            "help": "Timed runs per release.",
-            "help_first_line": "Timed runs per release.",
+            "help": "Timed runs per release; 10 if omitted. With --commits, overrides tak.toml's `runs` for every benchmark.",
+            "help_first_line": "Timed runs per release; 10 if omitted. With --commits, overrides tak.toml's `runs` for every benchmark.",
             "short": [],
             "long": [
               "runs"
@@ -988,16 +1016,13 @@
               "required": true,
               "double_dash": "Optional",
               "hide": false
-            },
-            "default": [
-              "10"
-            ]
+            }
           },
           {
             "name": "dry-run",
             "usage": "--dry-run",
-            "help": "Measure but do not write to refs/notes/tak.",
-            "help_first_line": "Measure but do not write to refs/notes/tak.",
+            "help": "Measure releases but do not write to refs/notes/tak. With --commits, list what would be built, and build nothing.",
+            "help_first_line": "Measure releases but do not write to refs/notes/tak. With --commits, list what would be built, and build nothing.",
             "short": [],
             "long": [
               "dry-run"
@@ -1026,8 +1051,8 @@
         "unknown_flags": null,
         "hide": false,
         "args_override_self": true,
-        "help": "Benchmark published release binaries to bootstrap history.",
-        "help_long": "Benchmark published release binaries to bootstrap history.\n\nA new adopter's first chart is empty. Rather than rebuilding a project at a hundred historical commits, download what it already published.",
+        "help": "Benchmark published release binaries, or build and benchmark past commits, to bootstrap history.",
+        "help_long": "Benchmark published release binaries, or build and benchmark past commits, to bootstrap history.\n\nBy default, downloads the release binaries a project already published and measures one command against each. With `--commits`, checks out each first-parent commit in a range, runs tak.toml's `[build]` there, and measures the benchmarks tak.toml declares.",
         "name": "backfill",
         "aliases": [],
         "hidden_aliases": [],

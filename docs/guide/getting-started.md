@@ -113,7 +113,8 @@ is never gated.
   to the same gate `tak compare` would use, from `[gate]` and the benchmark's own `gate`
   table (see [regression gate](/guide/configuration#regression-gate)). That includes the
   `min_delta` floor. A report-only benchmark (`gate = { enabled = false }`) is flagged but
-  never fails `--gate`.
+  never fails `--gate`. When every benchmark measured or compared is report-only, `--gate`
+  passes and prints a note that nothing was gated.
 - An ad-hoc run (`tak run --baseline NAME -- CMD`) doesn't depend on the benchmarks
   `tak.toml` declares, so an invalid benchmark in the file can't block the report. With
   `--gate` it reads the benchmark's own gate, so `--gate` needs a `tak.toml` that loads. If it
@@ -123,12 +124,17 @@ is never gated.
   - no instruction count appears on both sides;
   - a benchmark measured in this run cannot be compared on this runner class: its count
     failed or counters were off, it is new since the baseline was saved, or the baseline
-    holds it only for other runner classes;
+    holds it only for other runner classes. A count that was requested and failed while
+    Valgrind was present always counts here, even for a benchmark new since the baseline;
   - a check failed.
 
   A gate that passed in those cases would pass changes it never measured.
 - Saves to one baseline from several worktrees at once are serialised with a lock file in the
   same directory, so each run's benchmarks are kept.
+- An older tak refuses, before measuring, to save over a baseline that holds records written
+  by a newer tak. It can't tell which benchmark those records belong to, and writing beside
+  them could leave a stale value that the newer tak would later compare against. Save under
+  another name or upgrade.
 - A mistyped `--baseline` name fails before anything is measured, and the error lists the saved
   baselines. To delete a baseline, remove its file.
 
