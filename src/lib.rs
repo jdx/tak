@@ -24,3 +24,4 @@ pub mod record;
 pub mod report;
 pub mod settings;
 pub mod template;
+pub mod worktree;

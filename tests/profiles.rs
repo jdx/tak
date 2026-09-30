@@ -171,10 +171,14 @@ fn profiles_need_counters() {
 
 /// A benchmark name that is not a plain file name fails before anything runs,
 /// rather than writing outside the profile directory — or, with a newline,
-/// writing a heading of its own into the report.
+/// writing a heading of its own into the report. The newline is refused by
+/// the check every recorded name passes, the path by the one file names add.
 #[test]
 fn a_benchmark_name_that_is_not_a_file_name_is_refused_up_front() {
-    for bench in ["../escape", "a\n## All clear"] {
+    for (bench, why) in [
+        ("../escape", "not a plain file name"),
+        ("a\n## All clear", "control character"),
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let out = tak(
             dir.path(),
@@ -191,11 +195,7 @@ fn a_benchmark_name_that_is_not_a_file_name_is_refused_up_front() {
             ],
         );
         assert!(!out.status.success(), "{bench:?}");
-        assert!(
-            text(&out).contains("not a plain file name"),
-            "{}",
-            text(&out)
-        );
+        assert!(text(&out).contains(why), "{}", text(&out));
         assert!(!dir.path().join("ran").exists(), "nothing was measured");
     }
 }

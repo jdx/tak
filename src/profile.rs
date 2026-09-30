@@ -54,16 +54,16 @@ pub struct Origin {
 /// string. A name that is not a single, ordinary path component is refused
 /// rather than escaped: `[bench."../x"]` writing outside the directory is
 /// the failure being prevented, and an escaped name would no longer be the
-/// name a reader looks for. Control characters are refused too: a newline
-/// would split the `desc:` line the name is written into, and ends up in a
-/// report heading.
+/// name a reader looks for.
+///
+/// Control characters go through [`crate::record::check_name`], the one
+/// check every recorded name passes; `tak.toml`, `--bench` and `TAK_TOOL`
+/// have normally been through it already. What is added here is only what a
+/// file name needs beyond a recorded one.
 pub fn path_for(dir: &Path, bench: &str, subject: &str) -> Result<PathBuf> {
     for (what, name) in [("benchmark", bench), ("subject", subject)] {
-        let plain = !name.is_empty()
-            && name != "."
-            && name != ".."
-            && !name.contains(['/', '\\'])
-            && !name.chars().any(char::is_control);
+        crate::record::check_name(what, name)?;
+        let plain = !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\']);
         if !plain {
             bail!(
                 "--profile-dir cannot name a file after {what} {name:?}: it is not a plain file name"
@@ -438,16 +438,16 @@ fn label(rel: &str) -> String {
     }
 }
 
-/// Untrusted text as inert markdown: control characters, newlines among
-/// them, become spaces, and anything markdown could read as syntax is
-/// backslash-escaped.
+/// Untrusted text as inert markdown, for a heading: control characters as
+/// [`crate::compare::escape_control`] writes them for every report, and
+/// anything markdown could read as syntax backslash-escaped on top. The
+/// shared helpers stop at control characters because their names sit in
+/// table cells and code spans; a heading is neither, and a `[link](…)` or an
+/// `<img>` there would render as one.
 fn text(s: &str) -> String {
+    let s = crate::compare::escape_control(s);
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        if c.is_control() {
-            out.push(' ');
-            continue;
-        }
         if "\\`*_[]<>#|!~&".contains(c) {
             out.push('\\');
         }
@@ -505,16 +505,12 @@ pub fn load(base: &Path, head: &Path) -> Result<(Vec<Pair>, Unpaired)> {
 /// A name as a code span, fit for a table cell. Rust and C++ names carry `|`
 /// in closures and `<`…`>` in generics; the pipe would end the cell, a
 /// backtick would end the code span, and a newline would end the row.
+///
+/// The shared report helpers: [`crate::compare::code`] fences the span past
+/// any backticks and escapes control characters, and
+/// [`crate::compare::code_cell`] escapes the pipes.
 fn cell(name: &str) -> String {
-    let name: String = name
-        .chars()
-        .map(|c| match c {
-            '`' => '\'',
-            c if c.is_control() => ' ',
-            c => c,
-        })
-        .collect();
-    format!("`{}`", name.replace('|', "\\|"))
+    crate::compare::code_cell(&crate::compare::code(name))
 }
 
 /// A warning when a profile is not from the run whose count the notes hold.
@@ -860,11 +856,15 @@ fn=callee
     /// a heading, a link or an HTML tag in the step summary.
     #[test]
     fn a_label_cannot_add_markdown() {
+        // The newline is written as `\n`, as every report writes it, and its
+        // backslash escaped so it renders as written.
         assert_eq!(
             label("x\n## All clear/[ok](http:\\/e)<b>.cachegrind.out"),
-            "x \\#\\# All clear (\\[ok\\](http:\\\\/e)\\<b\\>)"
+            "x\\\\n\\#\\# All clear (\\[ok\\](http:\\\\/e)\\<b\\>)"
         );
-        assert_eq!(cell("a\nb`c"), "`a b'c`");
+        // Code spans are the shared helper's: fenced past the backtick, the
+        // newline escaped, the pipe kept inside the cell.
+        assert_eq!(cell("a\nb`c|d"), "`` a\\nb`c\\|d ``");
     }
 
     #[test]

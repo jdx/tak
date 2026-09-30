@@ -874,3 +874,115 @@ fn a_report_only_failed_check_is_flagged_not_failed() {
         stdout(&out)
     );
 }
+
+/// Report-only benchmarks never fail `--gate`, including when none of them
+/// has an instruction count to compare. The run passes and says nothing was
+/// gated, rather than failing for want of a count it was never going to gate.
+#[test]
+fn a_gate_over_only_report_only_benchmarks_passes_and_says_so() {
+    let repo = Repo::new();
+    std::fs::write(
+        repo.dir.join("tak.toml"),
+        "[bench.w]\ncmd = \"true\"\ngate = { enabled = false }\n",
+    )
+    .unwrap();
+    ok(&tak_run(&repo.dir, &[NC, "--save-baseline", "x"], &[]));
+    let out = tak_run(&repo.dir, &[NC, "--baseline", "x", "--gate"], &[]);
+    assert!(
+        stderr(ok(&out)).contains(
+            "nothing was gated against baseline `x`: every benchmark measured is report-only"
+        ),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// A baseline holding a newer tak's records is not saved over, and that is
+/// decided before anything is measured.
+#[test]
+fn saving_over_a_newer_schema_baseline_fails_before_measuring() {
+    let repo = Repo::new();
+    let newer = counted_line("s").replace(r#""v":1"#, r#""v":99"#);
+    write_baseline(&repo, "x", &[&newer]);
+    let before = std::fs::read_to_string(repo.baseline_file("x")).unwrap();
+    let marker = repo.dir.join("ran");
+    let err = fail(&tak_run(
+        &repo.dir,
+        &[NC, "--bench", "s", "--save-baseline", "x"],
+        &["touch", marker.to_str().unwrap()],
+    ));
+    assert!(
+        err.contains("holds records from a newer tak (schema 99"),
+        "{err}"
+    );
+    assert!(
+        !marker.exists(),
+        "the command ran before the file was checked"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.baseline_file("x")).unwrap(),
+        before
+    );
+}
+
+/// A command that exits 3 under valgrind and 0 otherwise: its timed samples
+/// pass, and its instruction count fails. Valgrind's tool is mapped into the
+/// shell's address space; the `grep` it spawns runs natively and sees it.
+const FAILS_UNDER_VALGRIND: &str =
+    r#"["sh", "-c", "grep -q -e cachegrind -e valgrind /proc/$$/maps && exit 3; exit 0"]"#;
+
+/// A benchmark added since the baseline, whose count was asked for and
+/// failed, is a gap: it used to be skipped as though counters were off by
+/// design, and `--gate` passed on the strength of the others.
+#[test]
+fn a_new_benchmark_whose_count_failed_fails_the_gate() {
+    if !tak_cli::measure::valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let repo = Repo::new();
+    std::fs::write(
+        repo.dir.join("tak.toml"),
+        format!(
+            "[bench.a]\ncmd = [\"sh\", \"-c\", \"exit 0\"]\n\n\
+             [bench.new]\ncmd = {FAILS_UNDER_VALGRIND}\n"
+        ),
+    )
+    .unwrap();
+    ok(&tak_run(
+        &repo.dir,
+        &["--bench", "a", "--save-baseline", "x"],
+        &[],
+    ));
+    let err = fail(&tak_run(&repo.dir, &["--baseline", "x", "--gate"], &[]));
+    assert!(err.contains("instruction counting failed:"), "{err}");
+    assert!(
+        err.contains("`new` on `test-runner` (instruction counting failed in this run)"),
+        "{err}"
+    );
+}
+
+/// Counts compared, but only for a report-only subject; the gated one is
+/// wall-clock only by design. That passes, and says nothing was gated.
+#[test]
+fn only_report_only_counts_compared_passes_and_says_so() {
+    if !tak_cli::measure::valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let repo = Repo::new();
+    std::fs::write(
+        repo.dir.join("tak.toml"),
+        "[bench.m.subject.a]\ncmd = [\"sh\", \"-c\", \"exit 0\"]\ncounters = true\n\
+         gate = { enabled = false }\n\n\
+         [bench.m.subject.b]\ncmd = [\"sh\", \"-c\", \"exit 0\"]\n",
+    )
+    .unwrap();
+    ok(&tak_run(&repo.dir, &["--save-baseline", "x"], &[]));
+    let out = tak_run(&repo.dir, &["--baseline", "x", "--gate"], &[]);
+    assert!(
+        stderr(ok(&out)).contains("every benchmark compared by instruction count is report-only"),
+        "{}",
+        stderr(&out)
+    );
+}

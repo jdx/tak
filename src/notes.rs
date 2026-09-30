@@ -16,7 +16,8 @@
 //! access can move to `gix` later without changing this boundary.
 
 use anyhow::{Context, Result, bail};
-use std::process::Command;
+use std::io::{BufRead, BufReader, Read};
+use std::process::{Command, Stdio};
 
 use crate::record::{Record, parse_note};
 
@@ -245,7 +246,7 @@ pub fn rev_list(rev: &str, n: usize) -> Result<Vec<String>> {
 }
 
 /// The values of trailer `key` on every commit in `base..head`, one line per
-/// commit: its SHA, a NUL, then the values joined by commas.
+/// commit: its SHA, then each value, every field NUL-separated.
 ///
 /// Every commit in the range, not first-parent only — the opposite choice to
 /// [`rev_list`], for a different question. A trend follows the trunk; this asks
@@ -254,10 +255,13 @@ pub fn rev_list(rev: &str, n: usize) -> Result<Vec<String>> {
 /// merge's second parent. Under squash-merge the range is the one squashed
 /// commit, and whatever trailers survived into its message.
 ///
-/// `unfold` joins a value git wrapped onto continuation lines, and the comma
+/// `unfold` joins a value git wrapped onto continuation lines, and the NUL
 /// separator keeps repeated trailers on one line, so a line is always exactly
-/// one commit. Commits with no such trailer still print their SHA; the parser
-/// skips the empty value.
+/// one commit. NUL rather than a comma because it is the one byte a trailer
+/// value cannot hold: joining with commas made `Tak-Accept: a,b` and two
+/// trailers `a` and `b` produce the same output, so a benchmark named `a,b`
+/// could only ever be read as two others. Commits with no such trailer still
+/// print their SHA; the parser skips the empty value.
 ///
 /// `--no-show-signature` for the same reason [`log`] passes it: a user's
 /// `log.showSignature` would otherwise put GPG output on stdout, between the
@@ -271,7 +275,7 @@ pub fn rev_list(rev: &str, n: usize) -> Result<Vec<String>> {
 /// branch commit behind a merge's second parent was only ever gated on its
 /// pull request.
 pub fn trailers(base: &str, head: &str, key: &str, first_parent: bool) -> Result<String> {
-    let format = format!("--format=%H%x00%(trailers:key={key},valueonly,unfold,separator=%x2C)");
+    let format = format!("--format=%H%x00%(trailers:key={key},valueonly,unfold,separator=%x00)");
     let range = format!("{base}..{head}");
     let mut args = vec!["log", "--no-show-signature"];
     if first_parent {
@@ -320,6 +324,21 @@ const LOG_FIELDS: usize = 4;
 /// stop somewhere on a trunk of hundreds of thousands of commits and needs to
 /// know whether it did.
 pub fn log(rev: &str, max: Option<usize>) -> Result<Vec<Logged>> {
+    walk(rev, max, |_| false)
+}
+
+/// [`log`], stopping as soon as `done` says the commit just read is the last
+/// one needed. That commit is kept.
+///
+/// For a limit that counts something `--max-count` cannot: `tak log -n 20`
+/// wants twenty *recorded* commits, and how far back they reach is only known
+/// by reading. Collecting the whole walk first read every note on the trunk,
+/// and held all of them at once, to print twenty.
+pub fn log_until(rev: &str, done: impl FnMut(&Logged) -> bool) -> Result<Vec<Logged>> {
+    walk(rev, None, done)
+}
+
+fn walk(rev: &str, max: Option<usize>, done: impl FnMut(&Logged) -> bool) -> Result<Vec<Logged>> {
     let notes = format!("--notes={NOTES_REF}");
     let limit = max.map(|n| format!("--max-count={n}"));
     let mut args = vec![
@@ -335,34 +354,104 @@ pub fn log(rev: &str, max: Option<usize>) -> Result<Vec<Logged>> {
         args.push(limit);
     }
     args.extend(["--end-of-options", rev, "--"]);
-    let out = git(&args)?;
-    Ok(parse_log(&out))
+    let what = || format!("`git {}`", args.join(" "));
+
+    let mut child = Command::new("git")
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to run {}", what()))?;
+    // Drained on a thread of its own, so git blocked writing a full stderr
+    // pipe can never be waiting on us blocked reading its stdout.
+    let mut stderr = child.stderr.take().expect("stderr is piped");
+    let errors = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
+    // `read_log` owns the pipe and drops it on return, so when it stops early
+    // git's next write fails before the kill below lands.
+    let read = read_log(
+        BufReader::new(child.stdout.take().expect("stdout is piped")),
+        done,
+    );
+
+    let stopped = matches!(read, Ok((_, true)));
+    if stopped || read.is_err() {
+        // Stopping early is the point, so how git ends afterwards — killed,
+        // or dead of a broken pipe mid-write — is not a failure to report.
+        let _ = child.kill();
+    }
+    // Reaped on every path, so no zombie outlives the walk.
+    let status = child
+        .wait()
+        .with_context(|| format!("failed to wait for {}", what()))?;
+    let (logged, _) = read.with_context(|| format!("failed to read {}", what()))?;
+    // Git's own stderr closes when it dies, killed or not, but anything it
+    // spawned can inherit the pipe and hold it open. Only a failure needs
+    // the text, so only a failure waits for it — as `Command::output` would
+    // — and an early stop leaves the thread to finish on its own.
+    if !stopped && !status.success() {
+        let errors = errors.join().unwrap_or_default();
+        bail!("{} failed: {}", what(), errors.trim());
+    }
+    Ok(logged)
 }
 
-fn parse_log(out: &str) -> Vec<Logged> {
-    let fields: Vec<&str> = out.split('\0').collect();
-    fields
-        .chunks(LOG_FIELDS)
-        .filter_map(|f| {
-            let [sha, date, subject, note] = f else {
-                // The empty piece after the final terminator.
-                return None;
-            };
-            // Nothing else here can come out of git misaligned, but a note is
-            // arbitrary bytes a person could have written by hand; refusing a
-            // group that does not start with a SHA stops one such note from
-            // inventing a commit.
-            if sha.is_empty() || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return None;
+/// Parse [`log`]'s output a commit at a time, until `done` accepts one or the
+/// output ends. The flag beside the commits says which.
+fn read_log(
+    mut out: impl BufRead,
+    mut done: impl FnMut(&Logged) -> bool,
+) -> std::io::Result<(Vec<Logged>, bool)> {
+    let mut logged = Vec::new();
+    let mut fields: Vec<String> = Vec::with_capacity(LOG_FIELDS);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        if out.read_until(0, &mut buf)? == 0 {
+            // Whatever is left in `fields` is the empty piece after the final
+            // terminator, or a group git never finished; neither is a commit.
+            return Ok((logged, false));
+        }
+        if buf.last() == Some(&0) {
+            buf.pop();
+        }
+        fields.push(String::from_utf8_lossy(&buf).into_owned());
+        if fields.len() < LOG_FIELDS {
+            continue;
+        }
+        let entry = parse_entry(&fields);
+        fields.clear();
+        if let Some(c) = entry {
+            let last = done(&c);
+            logged.push(c);
+            if last {
+                return Ok((logged, true));
             }
-            Some(Logged {
-                sha: sha.to_string(),
-                date: date.to_string(),
-                subject: subject.to_string(),
-                records: parse_note(note),
-            })
-        })
-        .collect()
+        }
+    }
+}
+
+fn parse_entry(fields: &[String]) -> Option<Logged> {
+    let [sha, date, subject, note] = fields else {
+        return None;
+    };
+    // Nothing else here can come out of git misaligned, but a note is
+    // arbitrary bytes a person could have written by hand; refusing a group
+    // that does not start with a SHA stops one such note from inventing a
+    // commit.
+    if sha.is_empty() || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(Logged {
+        sha: sha.clone(),
+        date: date.clone(),
+        subject: subject.clone(),
+        records: parse_note(note),
+    })
 }
 
 /// Whether `sha` is where this clone's history was cut off, so a walk that
@@ -414,7 +503,7 @@ mod tests {
             "aaa\u{0}2026-01-02T00:00:00+00:00\u{0}second\u{0}{LINE}\n\u{0}\
              bbb\u{0}2026-01-01T00:00:00+00:00\u{0}first\u{0}\u{0}"
         );
-        let log = parse_log(&out);
+        let log = read_log(out.as_bytes(), |_| false).unwrap().0;
         assert_eq!(log.len(), 2);
         assert_eq!(log[0].sha, "aaa");
         assert_eq!(log[0].subject, "second");
@@ -427,9 +516,35 @@ mod tests {
     #[test]
     fn a_control_character_in_a_subject_stays_in_the_subject() {
         let out = format!("aaa\u{0}2026-01-02T00:00:00+00:00\u{0}odd \u{1e} one\u{0}{LINE}\n\u{0}");
-        let log = parse_log(&out);
+        let log = read_log(out.as_bytes(), |_| false).unwrap().0;
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].subject, "odd \u{1e} one");
         assert_eq!(log[0].records.len(), 1);
+    }
+
+    /// Stopping is the whole saving, so nothing after the accepted commit may
+    /// be read: here the rest of the stream fails if it is touched.
+    #[test]
+    fn a_log_stops_reading_at_the_commit_that_satisfies_it() {
+        struct Poisoned;
+        impl Read for Poisoned {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("read past the stop"))
+            }
+        }
+        let head = format!(
+            "aaa\u{0}2026-01-02T00:00:00+00:00\u{0}second\u{0}\u{0}\
+             bbb\u{0}2026-01-01T00:00:00+00:00\u{0}first\u{0}{LINE}\n\u{0}"
+        );
+        // A one-byte buffer, so the reader cannot have prefetched the poison
+        // by accident and still pass.
+        let out = BufReader::with_capacity(1, head.as_bytes().chain(Poisoned));
+        let (log, stopped) = read_log(out, |c| !c.records.is_empty()).unwrap();
+        assert!(stopped);
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[1].sha, "bbb");
+
+        let out = BufReader::new(head.as_bytes().chain(Poisoned));
+        assert!(read_log(out, |_| false).is_err());
     }
 }
