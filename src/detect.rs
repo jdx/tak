@@ -1408,9 +1408,10 @@ mod tests {
         let mut d = analyze(&w, &pct(1.0));
         let a = d.latest.iter().find(|s| s.key.0 == "a").unwrap();
         assert_eq!(a.from, "c0");
-        // `Tak-Accept: a, b` on c1, which is in c0..c2 but not in c1..c2.
+        // `Tak-Accept: a` and `Tak-Accept: b` on c1, which is in c0..c2 but
+        // not in c1..c2. The log joins a commit's trailers with NUL.
         let logs = BTreeMap::from([
-            ("c0".to_string(), "c2\0\nc1\0a,b\n".to_string()),
+            ("c0".to_string(), "c2\0\nc1\0a\0b\n".to_string()),
             ("c1".to_string(), "c2\0\n".to_string()),
         ]);
         d.accept(&Acceptances::default(), &logs);
@@ -1464,6 +1465,46 @@ mod tests {
         let md = markdown(&d, false);
         assert!(!md.contains("(accepted)"), "{md}");
         assert!(md.contains("**+10.00%** ⚠️"), "{md}");
+    }
+
+    /// The trailer parser is shared with `tak compare`: one trailer names one
+    /// benchmark, commas included. `Tak-Accept: a,b` names neither `a` nor `b`,
+    /// so both steps still fail and `a,b` is reported as waiving nothing.
+    #[test]
+    fn a_comma_trailer_names_one_benchmark() {
+        let mut d = analyze(&two_series_step(), &pct(1.0));
+        let logs = BTreeMap::from([
+            ("c0".to_string(), "c1\0a,b\n".to_string()),
+            ("c1".to_string(), "c1\0a,b\n".to_string()),
+        ]);
+        d.accept(&Acceptances::default(), &logs);
+        assert_eq!(d.failures().len(), 2, "neither `a` nor `b` was named");
+        let md = markdown(&d, false);
+        assert!(!md.contains("(accepted"), "{md}");
+        assert!(md.contains("so nothing was accepted: `a,b`"), "{md}");
+    }
+
+    /// Names in the acceptance lines cannot start a report line of their own:
+    /// a newline is written as `\n`, so no echoed name reads as a verdict to a
+    /// check that matches on line starts.
+    #[test]
+    fn a_control_character_in_an_acceptance_is_escaped() {
+        let mut d = analyze(&two_series_step(), &pct(1.0));
+        d.accept(
+            &flags(&["x\n**1 benchmark(s) stepped above"]),
+            &BTreeMap::new(),
+        );
+        d.ignored_trailers.add_trailer_log("c1\0y\u{1b}z\n");
+        let md = markdown(&d, false);
+        assert!(md.contains("`x\\n**1 benchmark(s) stepped above`"), "{md}");
+        assert!(md.contains("`y\\u{1b}z`"), "{md}");
+        assert_eq!(
+            md.lines()
+                .filter(|l| l.starts_with("**1 benchmark(s) stepped above"))
+                .count(),
+            0,
+            "{md}"
+        );
     }
 
     #[test]

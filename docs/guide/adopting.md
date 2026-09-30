@@ -339,8 +339,11 @@ jobs:
           cat /tmp/tak-report.md
           cat /tmp/tak-report.md >> "$GITHUB_STEP_SUMMARY"
           # Older tak releases exit 0 when nothing was compared; this keeps the
-          # gate failing on them. Drop it when passing --allow-empty.
-          if grep -Fq '**Nothing was compared' /tmp/tak-report.md; then
+          # gate failing on them. Drop it when passing --allow-empty. Only the
+          # first line, which tak writes before any name: the rest of the
+          # report echoes text from the pull request, such as benchmark names
+          # and commit trailers, which must not be able to fail the check.
+          if head -n 1 /tmp/tak-report.md | grep -q '^\*\*Nothing was compared'; then
             echo "::error::no comparable baseline was found"
             status=1
           fi
@@ -364,8 +367,8 @@ repositories readable without exposing their token to pull-request-controlled co
 An empty comparison is not a passing gate. When no series was measured on both the merge base
 and the pull request, because the base was never recorded or the runner classes differ,
 `tak compare` prints the full report and then exits non-zero. Older releases print the same
-report and exit 0, which is why the example also checks the report for `**Nothing was compared`:
-the gate then fails whichever version the workflow pins.
+report and exit 0, which is why the example also checks whether the report's first line starts
+with `**Nothing was compared`. The gate then fails whichever version the workflow pins.
 
 Two situations produce an empty comparison legitimately: the first pull request after adopting
 tak, whose merge base predates any main-branch measurement, and a runner-class migration, where

@@ -517,11 +517,16 @@ pub fn markdown(c: &Comparison, trend: &Trend, gates: &Gates, credit: bool) -> S
 
 /// How a series is named in a table row or a verdict: the bench, plus the tool
 /// when it is not the project itself.
+///
+/// Control characters are escaped. `tak.toml` rejects them at load, but a
+/// note written by an older tak can still hold one, and a newline in a table
+/// cell or a verdict would start a report line of its own.
 fn name(bench: &str, tool: &str) -> String {
+    let bench = escape_control(bench);
     if tool == SELF_TOOL {
-        bench.to_string()
+        bench.into_owned()
     } else {
-        format!("{bench} ({tool})")
+        format!("{bench} ({})", escape_control(tool))
     }
 }
 
@@ -776,7 +781,14 @@ fn accepted_line(
 /// read as one in the report. The padding is what gets stripped, leaving the
 /// name as written. A span of only spaces is never stripped, so it is left
 /// unpadded.
+///
+/// Control characters are written as escapes (`\n`, `\u{1b}`). The report is
+/// read line by line — tak's own perf-pr workflow decides a check's outcome by
+/// what a line starts with — and a newline in an `--accept` value would let a
+/// name begin a line of its own that reads as a verdict.
 pub(crate) fn code(text: &str) -> String {
+    let text = escape_control(text);
+    let text = text.as_ref();
     let mut longest = 0;
     let mut run = 0;
     for ch in text.chars() {
@@ -865,14 +877,44 @@ fn unused_acceptances(c: &Comparison, gates: &Gates) -> String {
     out
 }
 
+/// `text` with every control character written as its escape (`\n`,
+/// `\u{1b}`), borrowed unchanged in the usual case of there being none.
+///
+/// A report is read line by line, and tak's own workflows decide a check by
+/// what a line starts with. A name holding a newline could begin a line of its
+/// own that reads as a verdict, so no name reaches the report with one.
+pub fn escape_control(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.chars().any(char::is_control) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect::<String>()
+        .into()
+}
+
 /// How a series is named in prose: bench, plus the tool when it is not the
 /// project itself, plus the runner.
 ///
 /// Dropping the tool made two series that differ only by tool render
 /// identically, so a report could say the same benchmark both started and
 /// stopped gating and mean two different programs.
-pub(crate) fn describe(key: &Key) -> String {
+///
+/// Control characters are escaped: `tak detect` names accepted steps through
+/// this, and a benchmark name comes from the `tak.toml` under test.
+pub fn describe(key: &Key) -> String {
     let (bench, tool, runner) = key;
+    let (bench, tool, runner) = (
+        escape_control(bench),
+        escape_control(tool),
+        escape_control(runner),
+    );
     if tool == "self" {
         format!("`{bench}` on `{runner}`")
     } else {
@@ -1494,10 +1536,36 @@ mod tests {
         assert!(md.contains('█'), "{md}");
     }
 
+    /// Acceptances for each comma-separated name. A test convenience only:
+    /// neither real source splits on commas.
     fn accepting(names: &str, source: Source) -> Acceptances {
         let mut a = Acceptances::default();
-        a.add(names, source);
+        for name in names.split(',') {
+            a.add_name(name.trim(), source.clone()).unwrap();
+        }
         a
+    }
+
+    /// A name cannot start a line of its own, so it can never read as a
+    /// verdict to something that matches on line starts.
+    #[test]
+    fn a_control_character_in_a_name_is_escaped() {
+        assert_eq!(code("a\nb"), "`a\\nb`");
+        assert_eq!(
+            describe(&("a\nb".into(), "self".into(), "r\r".into())),
+            "`a\\nb` on `r\\r`"
+        );
+        // The usual case is untouched.
+        assert_eq!(describe(&key("a")), "`a` on `gha`");
+        let c = compare(&[], &[]).with_accepted(accepting(
+            "x\n**1 benchmark(s) above the 1% gate:** `x`",
+            Source::Flag,
+        ));
+        let md = markdown(&c, &Trend::new(), &g(1.0), false);
+        assert!(
+            md.lines().all(|l| !l.starts_with("**1 benchmark(s)")),
+            "{md}"
+        );
     }
 
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -1724,9 +1792,7 @@ mod tests {
     fn an_acceptance_is_judged_against_the_series_own_gate() {
         let mut gates = g(1.0);
         gates.set_series("startup", SELF_TOOL, gate(5.0, 20_000, true));
-        let mut accepted = Acceptances::default();
-        accepted.add("startup, install", Source::Flag);
-        let c = startup_and_install().with_accepted(accepted);
+        let c = startup_and_install().with_accepted(accepting("startup, install", Source::Flag));
         assert!(c.failures(&gates).is_empty());
         assert_eq!(benches(&c.accepted_regressions(&gates)), ["install"]);
         let md = markdown(&c, &Trend::new(), &gates, false);
@@ -1749,9 +1815,7 @@ mod tests {
     #[test]
     fn an_acceptance_does_not_count_a_rise_under_the_floor() {
         let gates = Gates::uniform(Gate::new(1.0, 10_000).unwrap());
-        let mut accepted = Acceptances::default();
-        accepted.add("startup, install", Source::Flag);
-        let c = startup_and_install().with_accepted(accepted);
+        let c = startup_and_install().with_accepted(accepting("startup, install", Source::Flag));
         assert!(c.failures(&gates).is_empty());
         assert_eq!(benches(&c.accepted_regressions(&gates)), ["install"]);
         let md = markdown(&c, &Trend::new(), &gates, false);
