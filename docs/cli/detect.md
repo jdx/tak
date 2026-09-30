@@ -5,7 +5,7 @@
 
 Find instruction-count steps that already landed on a branch.
 
-Meant for the main-branch workflow, after recording. Walks REV's first-parent history and compares each series' consecutive recorded points. Fails when the step onto REV itself is beyond that series' gate (the same per-benchmark gates as `compare`), so a regression fails the run for the commit that introduced it rather than every run after, and when nothing could be compared. Older steps and slow drift are reported without failing. Wall clock is shown and never gated. A step in a benchmark named by `--accept` is reported as accepted and does not fail. So is one named by a `Tak-Accept:` trailer on a first-parent commit in the step's range, but only when the `accept_trailers` setting is on.
+Meant for the main-branch workflow, after recording. Walks REV's first-parent history and compares each series' consecutive recorded points. Fails when the step onto REV itself is beyond that series' gate (the same per-benchmark gates as `compare`), so a regression fails the run for the commit that introduced it rather than every run after, and when nothing could be compared: REV has no instruction counts, or none of its series has an earlier point in the window. `allow_empty` (`--allow-empty`) passes that case with a warning, for a first recording or the first on a new runner class. Older steps and slow drift are reported without failing. Wall clock is shown and never gated. A step in a benchmark named by `--accept` is reported as accepted and does not fail. So is one named by a `Tak-Accept:` trailer on a first-parent commit in the step's range, but only when the `accept_trailers` setting is on.
 
 ## Arguments
 - **`[REV]`** — Newest commit to examine. Defaults to HEAD.
@@ -21,5 +21,4 @@ Meant for the main-branch workflow, after recording. Walks REV's first-parent hi
   **Default:** `origin`
 - **`--no-gate`** — Report without failing on the result: neither a step nor an empty comparison fails the command. Errors, such as an invalid `tak.toml`, still fail.
 - **`--accept <BENCH>`** — Accept a step onto REV in this benchmark: report it, but do not fail on it. Repeatable; each value is one exact benchmark name. Honoured whatever `accept_trailers` says.
-- **`--allow-empty`** — Succeed when nothing could be compared: REV has no instruction counts, or none of its series has an earlier point in the window. Without it that fails, because a check that examined nothing otherwise looks like a pass. Needed on a first recording or the first on a new runner class. A step onto REV still fails.
 - **`-h --help`** — Print help

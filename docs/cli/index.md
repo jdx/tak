@@ -8,6 +8,7 @@
 - **`--env-allow <VAR>`** — Keep a variable that --env-deny would remove. Repeatable.
 - **`--gate-pct <PCT>`** — Percentage an instruction count may rise before `compare` fails.
 - **`--gate-min-delta <N>`** — Instructions a count may rise by before `compare` fails, whatever the percentage.
+- **`--allow-empty`** — Pass, with a warning, when nothing was compared, instead of failing. For `compare`, `detect` and `run --baseline --gate`. A regression still fails.
 - **`--no-credit`** — Leave the line naming tak off the end of generated reports.
 
   **Default:** `true`

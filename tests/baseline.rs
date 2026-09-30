@@ -54,6 +54,13 @@ impl Repo {
 /// and a laptop produce the same series names. An empty `cmd` runs what the
 /// directory's tak.toml declares.
 fn tak_run(dir: &Path, flags: &[&str], cmd: &[&str]) -> Output {
+    tak_run_env(dir, flags, cmd, &[])
+}
+
+/// As [`tak_run`], with variables set for the run. `allow_empty` and
+/// `GITHUB_ACTIONS` are cleared first, so neither the caller's environment
+/// nor CI's decides whether comparing nothing fails or how that is worded.
+fn tak_run_env(dir: &Path, flags: &[&str], cmd: &[&str], env: &[(&str, &str)]) -> Output {
     let mut c = Command::new(env!("CARGO_BIN_EXE_tak"));
     c.args(["run", "--no-progress", "--runs", "3", "--warmup", "0"])
         .args(["--runner", "test-runner"])
@@ -61,7 +68,12 @@ fn tak_run(dir: &Path, flags: &[&str], cmd: &[&str]) -> Output {
     if !cmd.is_empty() {
         c.arg("--").args(cmd);
     }
-    c.current_dir(dir).output().expect("failed to run tak")
+    c.env_remove("TAK_ALLOW_EMPTY")
+        .env_remove("GITHUB_ACTIONS")
+        .envs(env.iter().copied())
+        .current_dir(dir)
+        .output()
+        .expect("failed to run tak")
 }
 
 /// Write a baseline by hand, for states a host without valgrind cannot
@@ -1040,4 +1052,209 @@ fn only_report_only_counts_compared_passes_and_says_so() {
         "{}",
         stderr(&out)
     );
+}
+
+const ALLOW: &str = "[gate]\nallow_empty = true\n";
+
+/// The line `allow_empty` adds to a report it let through.
+const ALLOWED: &str = "passes with a warning instead of failing, because `allow_empty` is on";
+
+/// The runner-class churn case against a baseline: saved on one class, gated
+/// on another, so nothing is on both sides. `[gate] allow_empty = true` passes
+/// it with the report's line and one warning; off, it fails as before; the
+/// environment and the flag override the file as for every gate setting.
+#[test]
+fn allow_empty_passes_an_empty_baseline_gate_with_a_warning() {
+    let repo = Repo::new();
+    ok(&tak_run(
+        &repo.dir,
+        &[NC, "--runner", "laptop", "--save-baseline", "before"],
+        &["true"],
+    ));
+    let gate = [NC, "--runner", "ci", "--baseline", "before", "--gate"];
+    let err = fail(&tak_run(&repo.dir, &gate, &["true"]));
+    assert!(err.contains("nothing to gate"), "{err}");
+
+    std::fs::write(repo.dir.join("tak.toml"), ALLOW).unwrap();
+    let out = tak_run(&repo.dir, &gate, &["true"]);
+    let report = stdout(ok(&out));
+    assert!(
+        report
+            .lines()
+            .any(|l| l.starts_with("**Nothing was compared, and so nothing was gated.**")),
+        "{report}"
+    );
+    assert!(report.contains(ALLOWED), "{report}");
+    assert!(
+        stderr(&out).contains(
+            "warning: nothing was compared against baseline `before`; passing because \
+             `allow_empty` is on\n"
+        ),
+        "{}",
+        stderr(&out)
+    );
+
+    // Without --gate there is nothing to waive, so the report does not claim it.
+    let out = tak_run(
+        &repo.dir,
+        &[NC, "--runner", "ci", "--baseline", "before"],
+        &["true"],
+    );
+    assert!(!stdout(ok(&out)).contains(ALLOWED), "{}", stdout(&out));
+    assert!(!stderr(&out).contains("allow_empty"), "{}", stderr(&out));
+
+    let err = fail(&tak_run_env(
+        &repo.dir,
+        &gate,
+        &["true"],
+        &[("TAK_ALLOW_EMPTY", "0")],
+    ));
+    assert!(err.contains("nothing to gate"), "{err}");
+
+    std::fs::remove_file(repo.dir.join("tak.toml")).unwrap();
+    let mut flagged = gate.to_vec();
+    flagged.push("--allow-empty");
+    ok(&tak_run_env(
+        &repo.dir,
+        &flagged,
+        &["true"],
+        &[("TAK_ALLOW_EMPTY", "0")],
+    ));
+}
+
+/// Only the empty case is waived. Wall clock compared on both sides is not
+/// empty, and a gate with no instruction count to check still fails.
+#[test]
+fn allow_empty_does_not_waive_a_wall_clock_only_gate() {
+    let repo = Repo::new();
+    std::fs::write(repo.dir.join("tak.toml"), ALLOW).unwrap();
+    ok(&tak_run(
+        &repo.dir,
+        &[NC, "--save-baseline", "b"],
+        &["true"],
+    ));
+    let out = tak_run(&repo.dir, &[NC, "--baseline", "b", "--gate"], &["true"]);
+    let err = fail(&out);
+    assert!(err.contains("nothing to gate"), "{err}");
+    assert!(!stdout(&out).contains(ALLOWED), "{}", stdout(&out));
+}
+
+/// A failed check is this run doing the wrong work, not history that is
+/// missing, so it fails the gate even when nothing was compared.
+#[test]
+fn allow_empty_does_not_waive_a_failed_check() {
+    let repo = Repo::new();
+    let elsewhere = counted_line("c").replace("test-runner", "other");
+    write_baseline(&repo, "x", &[&elsewhere]);
+    std::fs::write(
+        repo.dir.join("tak.toml"),
+        format!("{ALLOW}\n[bench.c]\ncmd = \"true\"\ncheck = \"false\"\n"),
+    )
+    .unwrap();
+    let out = tak_run(&repo.dir, &[NC, "--baseline", "x", "--gate"], &[]);
+    let err = fail(&out);
+    assert!(err.contains("check failed, so nothing is gated"), "{err}");
+    assert!(!stdout(&out).contains(ALLOWED), "{}", stdout(&out));
+}
+
+/// The same on real counts: counted here, saved only on another runner class.
+/// That is one gap per series, and `allow_empty` passes it.
+#[test]
+fn allow_empty_passes_a_counted_run_against_another_runners_baseline() {
+    if !tak_cli::measure::valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let repo = Repo::new();
+    let cmd = ["sh", "-c", "exit 0"];
+    ok(&tak_run(
+        &repo.dir,
+        &["--runner", "old", "--bench", "s", "--save-baseline", "x"],
+        &cmd,
+    ));
+    let gate = [
+        "--runner",
+        "new",
+        "--bench",
+        "s",
+        "--baseline",
+        "x",
+        "--gate",
+    ];
+    let err = fail(&tak_run(&repo.dir, &gate, &cmd));
+    assert!(err.contains("saved only on runner class `old`"), "{err}");
+
+    std::fs::write(repo.dir.join("tak.toml"), ALLOW).unwrap();
+    let out = tak_run(&repo.dir, &gate, &cmd);
+    assert!(stdout(ok(&out)).contains(ALLOWED), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("passing because `allow_empty` is on"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// A regression against the baseline still fails with the setting on.
+#[test]
+fn allow_empty_still_fails_a_baseline_regression() {
+    if !tak_cli::measure::valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let repo = Repo::new();
+    std::fs::write(repo.dir.join("tak.toml"), ALLOW).unwrap();
+    let quick = ["sh", "-c", "exit 0"];
+    let slow = [
+        "sh",
+        "-c",
+        "i=0; while [ $i -lt 20000 ]; do i=$((i+1)); done",
+    ];
+    ok(&tak_run(
+        &repo.dir,
+        &["--bench", "loop", "--save-baseline", "b"],
+        &quick,
+    ));
+    let out = tak_run(
+        &repo.dir,
+        &["--bench", "loop", "--baseline", "b", "--gate"],
+        &slow,
+    );
+    let err = fail(&out);
+    assert!(err.contains("regressed by more than"), "{err}");
+    assert!(!err.contains("allow_empty"), "{err}");
+}
+
+/// A count that failed is this run's measurement breaking, so it fails the
+/// gate with the setting on even when nothing else could be compared.
+#[test]
+fn allow_empty_does_not_waive_a_failed_count() {
+    if !tak_cli::measure::valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let repo = Repo::new();
+    std::fs::write(
+        repo.dir.join("tak.toml"),
+        format!(
+            "{ALLOW}\n[bench.a]\ncmd = [\"sh\", \"-c\", \"exit 0\"]\n\n\
+             [bench.new]\ncmd = {FAILS_UNDER_VALGRIND}\n"
+        ),
+    )
+    .unwrap();
+    ok(&tak_run(
+        &repo.dir,
+        &["--bench", "a", "--save-baseline", "x"],
+        &[],
+    ));
+    let out = tak_run(
+        &repo.dir,
+        &["--bench", "new", "--baseline", "x", "--gate"],
+        &[],
+    );
+    let err = fail(&out);
+    assert!(
+        err.contains("`new` on `test-runner` (instruction counting failed in this run)"),
+        "{err}"
+    );
+    assert!(!stdout(&out).contains(ALLOWED), "{}", stdout(&out));
 }

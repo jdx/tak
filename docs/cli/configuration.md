@@ -23,6 +23,31 @@ TAK_ACCEPT_TRAILERS=1 tak compare origin/main
 ```
 
 
+## `allow_empty`
+
+- **Type:** `bool`
+- **Default:** `false`
+- **Since:** 0.0.14
+- **Set with:** `--allow-empty`, `TAK_ALLOW_EMPTY`, config `gate.allow_empty`
+
+Whether a comparison that compared nothing passes, with a warning, instead of failing.
+
+Applies to `tak compare`, `tak detect` and `tak run --baseline --gate`: the case where no series was measured on both sides, so the gate had nothing to check. Off by default, because a gate that passed without running reads exactly like one that ran clean, and the causes nobody notices — a base never recorded, notes never fetched, a recording that stopped producing instruction counts — are the ones a green check hides.
+
+Turn it on where comparing nothing is routine rather than a symptom: a runner class that encodes an image or toolchain version, so every update starts a new series and the first comparison after it has no base; or a project still adopting, whose pull requests branch from commits measured before tak was. With it on, those runs exit successfully, the report says `allow_empty` let them through, and a warning goes to stderr — as a `::warning::` annotation under GitHub Actions.
+
+The cost is that the broken causes above warn as well instead of failing. Only the empty case is waived: a regression still fails, and so do a failed check and a failed instruction count against a baseline.
+
+`--allow-empty` turns it on for one run, and `TAK_ALLOW_EMPTY=0` off. Like the rest of its gate, `tak compare` reads it from the base revision's `tak.toml`, so a pull request cannot waive its own empty comparison; turning it on takes effect once the change is merged. `tak detect` and `tak run --baseline` read the working tree's.
+
+```
+tak compare origin/main --allow-empty
+```
+```
+TAK_ALLOW_EMPTY=0 tak detect
+```
+
+
 ## `credit`
 
 - **Type:** `bool`

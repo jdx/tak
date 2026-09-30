@@ -23,5 +23,5 @@ Benchmark a command, or everything declared in tak.toml.
 - **`--profile-dir <DIR>`** — Keep the cachegrind profile behind each instruction count, as `DIR/<bench>/<subject>.cachegrind.out`, for `tak explain`.
 - **`--save-baseline <NAME>`** — Save the results as a named local baseline, kept in the git directory rather than in refs/notes/tak. Replaces what NAME held for the benchmarks measured and keeps the rest.
 - **`--baseline <NAME>`** — Compare the results against a saved local baseline and print the report `tak compare` prints. Reports only; add --gate to fail on a regression.
-- **`--gate`** — With --baseline, fail when an instruction count rose beyond its gate — the one `tak compare` would apply — or when a gated benchmark could not be compared.
+- **`--gate`** — With --baseline, fail when an instruction count rose beyond its gate — the one `tak compare` would apply — or when a gated benchmark could not be compared. `allow_empty` (`--allow-empty`) passes, with a warning, a run where nothing was compared at all.
 - **`-h --help`** — Print help

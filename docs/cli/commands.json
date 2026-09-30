@@ -324,8 +324,8 @@
           {
             "name": "gate",
             "usage": "--gate",
-            "help": "With --baseline, fail when an instruction count rose beyond its gate — the one `tak compare` would apply — or when a gated benchmark could not be compared.",
-            "help_first_line": "With --baseline, fail when an instruction count rose beyond its gate — the one `tak compare` would apply — or when a gated benchmark could not be compared.",
+            "help": "With --baseline, fail when an instruction count rose beyond its gate — the one `tak compare` would apply — or when a gated benchmark could not be compared. `allow_empty` (`--allow-empty`) passes, with a warning, a run where nothing was compared at all.",
+            "help_first_line": "With --baseline, fail when an instruction count rose beyond its gate — the one `tak compare` would apply — or when a gated benchmark could not be compared. `allow_empty` (`--allow-empty`) passes, with a warning, a run where nothing was compared at all.",
             "short": [],
             "long": [
               "gate"
@@ -1146,8 +1146,8 @@
           {
             "name": "no-gate",
             "usage": "--no-gate",
-            "help": "Report without failing, whatever the numbers say. Takes precedence over `--allow-empty`: an empty comparison passes too. Errors, such as an invalid `tak.toml`, still fail.",
-            "help_first_line": "Report without failing, whatever the numbers say. Takes precedence over `--allow-empty`: an empty comparison passes too. Errors, such as an invalid `tak.toml`, still fail.",
+            "help": "Report without failing, whatever the numbers say. Takes precedence over `allow_empty`: an empty comparison passes too. Errors, such as an invalid `tak.toml`, still fail.",
+            "help_first_line": "Report without failing, whatever the numbers say. Takes precedence over `allow_empty`: an empty comparison passes too. Errors, such as an invalid `tak.toml`, still fail.",
             "short": [],
             "long": [
               "no-gate"
@@ -1176,18 +1176,6 @@
             }
           },
           {
-            "name": "allow-empty",
-            "usage": "--allow-empty",
-            "help": "Pass when no series was measured on both sides, instead of failing. For the first pull request after adopting tak, or a runner-class migration. A regression still fails.",
-            "help_first_line": "Pass when no series was measured on both sides, instead of failing. For the first pull request after adopting tak, or a runner-class migration. A regression still fails.",
-            "short": [],
-            "long": [
-              "allow-empty"
-            ],
-            "hide": false,
-            "global": false
-          },
-          {
             "name": "help",
             "usage": "-h --help",
             "help": "Print help",
@@ -1209,7 +1197,7 @@
         "hide": false,
         "args_override_self": true,
         "help": "Compare this commit's measurements against another's.",
-        "help_long": "Compare this commit's measurements against another's.\n\nFails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate`, or when no series was measured on both sides. The gate comes from BASE's tak.toml, not the working tree's, so a change cannot loosen its own; flags and environment variables still override it. Wall clock is reported and never gated. A regression in a benchmark named by `--accept` is reported as accepted and does not fail. So is one named by a `Tak-Accept:` trailer on a commit in BASE..REV, but only when the `accept_trailers` setting is on.",
+        "help_long": "Compare this commit's measurements against another's.\n\nFails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate`, or when no series was measured on both sides, unless `allow_empty` (`--allow-empty`) is on, which passes that case with a warning. The gate comes from BASE's tak.toml, not the working tree's, so a change cannot loosen its own; flags and environment variables still override it. Wall clock is reported and never gated. A regression in a benchmark named by `--accept` is reported as accepted and does not fail. So is one named by a `Tak-Accept:` trailer on a commit in BASE..REV, but only when the `accept_trailers` setting is on.",
         "name": "compare",
         "aliases": [],
         "hidden_aliases": [],
@@ -1392,18 +1380,6 @@
             }
           },
           {
-            "name": "allow-empty",
-            "usage": "--allow-empty",
-            "help": "Succeed when nothing could be compared: REV has no instruction counts, or none of its series has an earlier point in the window. Without it that fails, because a check that examined nothing otherwise looks like a pass. Needed on a first recording or the first on a new runner class. A step onto REV still fails.",
-            "help_first_line": "Succeed when nothing could be compared: REV has no instruction counts, or none of its series has an earlier point in the window. Without it that fails, because a check that examined nothing otherwise looks like a pass. Needed on a first recording or the first on a new runner class. A step onto REV still fails.",
-            "short": [],
-            "long": [
-              "allow-empty"
-            ],
-            "hide": false,
-            "global": false
-          },
-          {
             "name": "help",
             "usage": "-h --help",
             "help": "Print help",
@@ -1425,7 +1401,7 @@
         "hide": false,
         "args_override_self": true,
         "help": "Find instruction-count steps that already landed on a branch.",
-        "help_long": "Find instruction-count steps that already landed on a branch.\n\nMeant for the main-branch workflow, after recording. Walks REV's first-parent history and compares each series' consecutive recorded points. Fails when the step onto REV itself is beyond that series' gate (the same per-benchmark gates as `compare`), so a regression fails the run for the commit that introduced it rather than every run after, and when nothing could be compared. Older steps and slow drift are reported without failing. Wall clock is shown and never gated. A step in a benchmark named by `--accept` is reported as accepted and does not fail. So is one named by a `Tak-Accept:` trailer on a first-parent commit in the step's range, but only when the `accept_trailers` setting is on.",
+        "help_long": "Find instruction-count steps that already landed on a branch.\n\nMeant for the main-branch workflow, after recording. Walks REV's first-parent history and compares each series' consecutive recorded points. Fails when the step onto REV itself is beyond that series' gate (the same per-benchmark gates as `compare`), so a regression fails the run for the commit that introduced it rather than every run after, and when nothing could be compared: REV has no instruction counts, or none of its series has an earlier point in the window. `allow_empty` (`--allow-empty`) passes that case with a warning, for a first recording or the first on a new runner class. Older steps and slow drift are reported without failing. Wall clock is shown and never gated. A step in a benchmark named by `--accept` is reported as accepted and does not fail. So is one named by a `Tak-Accept:` trailer on a first-parent commit in the step's range, but only when the `accept_trailers` setting is on.",
         "name": "detect",
         "aliases": [],
         "hidden_aliases": [],
@@ -1634,6 +1610,18 @@
         }
       },
       {
+        "name": "allow-empty",
+        "usage": "--allow-empty",
+        "help": "Pass, with a warning, when nothing was compared, instead of failing. For `compare`, `detect` and `run --baseline --gate`. A regression still fails.",
+        "help_first_line": "Pass, with a warning, when nothing was compared, instead of failing. For `compare`, `detect` and `run --baseline --gate`. A regression still fails.",
+        "short": [],
+        "long": [
+          "allow-empty"
+        ],
+        "hide": false,
+        "global": true
+      },
+      {
         "name": "no-credit",
         "usage": "--no-credit",
         "help": "Leave the line naming tak off the end of generated reports.",
@@ -1746,6 +1734,47 @@
         "writes_to": null,
         "examples": [
           "TAK_ACCEPT_TRAILERS=1 tak compare origin/main"
+        ],
+        "default_list": [],
+        "extensions": []
+      },
+      "allow_empty": {
+        "default": false,
+        "default_note": null,
+        "data_type": "boolean",
+        "value_type": {
+          "kind": "base",
+          "of": "bool"
+        },
+        "env": "TAK_ALLOW_EMPTY",
+        "envs": [
+          "TAK_ALLOW_EMPTY"
+        ],
+        "cli": [
+          "--allow-empty"
+        ],
+        "bindings": {
+          "config": [
+            "gate.allow_empty"
+          ]
+        },
+        "help": "Whether a comparison that compared nothing passes, with a warning, instead of failing.",
+        "long_help": "Whether a comparison that compared nothing passes, with a warning, instead of failing.\n\nApplies to `tak compare`, `tak detect` and `tak run --baseline --gate`: the case where no series was measured on both sides, so the gate had nothing to check. Off by default, because a gate that passed without running reads exactly like one that ran clean, and the causes nobody notices — a base never recorded, notes never fetched, a recording that stopped producing instruction counts — are the ones a green check hides.\n\nTurn it on where comparing nothing is routine rather than a symptom: a runner class that encodes an image or toolchain version, so every update starts a new series and the first comparison after it has no base; or a project still adopting, whose pull requests branch from commits measured before tak was. With it on, those runs exit successfully, the report says `allow_empty` let them through, and a warning goes to stderr — as a `::warning::` annotation under GitHub Actions.\n\nThe cost is that the broken causes above warn as well instead of failing. Only the empty case is waived: a regression still fails, and so do a failed check and a failed instruction count against a baseline.\n\n`--allow-empty` turns it on for one run, and `TAK_ALLOW_EMPTY=0` off. Like the rest of its gate, `tak compare` reads it from the base revision's `tak.toml`, so a pull request cannot waive its own empty comparison; turning it on takes effect once the change is merged. `tak detect` and `tak run --baseline` read the working tree's.",
+        "help_heading": null,
+        "choices": [],
+        "merge": "replace",
+        "scope": "any",
+        "deprecated": null,
+        "deprecated_warn_at": null,
+        "deprecated_remove_at": null,
+        "renamed_to": null,
+        "hide": false,
+        "since": "0.0.14",
+        "parse": null,
+        "writes_to": null,
+        "examples": [
+          "tak compare origin/main --allow-empty",
+          "TAK_ALLOW_EMPTY=0 tak detect"
         ],
         "default_list": [],
         "extensions": []

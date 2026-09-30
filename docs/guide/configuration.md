@@ -707,6 +707,32 @@ gate (see [where gates are read from](#where-gates-are-read-from)), so a pull re
 turn trailers on for itself. `TAK_ACCEPT_TRAILERS=0` in a workflow overrides the file. Use it
 in a pull-request workflow if `tak.toml` turns trailers on for the main branch.
 
+### Comparing nothing
+
+When no series was measured on both sides, `tak compare`, `tak detect` and
+`tak run --baseline --gate` fail by default: a gate that checked nothing would otherwise look
+like one that passed. `allow_empty` makes that case a warning instead:
+
+```toml
+[gate]
+allow_empty = true
+```
+
+The command exits 0, the report keeps its `**Nothing was compared` first line and adds a line
+naming `allow_empty`, and a warning goes to stderr, as a `::warning::` annotation under GitHub
+Actions. A regression still fails.
+
+Turn it on when comparing nothing is routine rather than a symptom: a [runner
+class](#environment-and-runner-settings) that encodes a CI image or compiler version, so each
+update starts a new series that the main branch has not been measured on yet, or a project
+still adopting tak. The cost is that a broken setup, such as a base that was never recorded or
+notes that were never fetched, also only warns. The
+[CI guide](/guide/ci#when-comparing-nothing-is-routine) has the details.
+
+`--allow-empty` turns it on for one run and `TAK_ALLOW_EMPTY=0` turns it off for one. Like the
+rest of `[gate]`, `tak compare` reads it from the base revision's `tak.toml`, so a pull request
+that turns it on still fails on an empty comparison until it is merged.
+
 ### An absolute floor
 
 A percentage alone serves small benchmarks badly. On a 450k-instruction `--version`, 1% is
@@ -782,7 +808,7 @@ If every row uses `[gate]`, the report looks the same as it did before per-bench
 
 Gates are not recorded. They're policy rather than measurement, so `tak compare BASE` reads
 them from the `tak.toml` in BASE's tree, not from the working tree. That covers `[gate]`
-(`pct`, `min_delta` and `accept_trailers`) and every `gate` table. In CI the working tree is
+(`pct`, `min_delta`, `accept_trailers` and `allow_empty`) and every `gate` table. In CI the working tree is
 the pull request, and a pull request that could edit its own gate could waive it. Flags and
 environment variables still override the base's file. `[report] credit` still comes from the
 working tree.
@@ -807,7 +833,8 @@ series whose subject the benchmark no longer declares is held to the benchmark's
 
 `tak detect` reads gates from the working tree's `tak.toml`, which in a main-branch job is the
 merged commit, and applies each series' gate to its steps and its drift. A report-only
-benchmark never fails it.
+benchmark never fails it. It reads `allow_empty` from there too, as does
+`tak run --baseline --gate`.
 
 ## Environment filtering
 

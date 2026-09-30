@@ -102,6 +102,10 @@
         "accept_trailers": {
           "description": "Honour `Tak-Accept:` commit trailers in `tak compare`. Off by default: the trailers are written by the change being gated.",
           "type": "boolean"
+        },
+        "allow_empty": {
+          "description": "Pass with a warning, instead of failing, when nothing was compared: no series was measured on both sides. `tak compare` reads it from the base revision's tak.toml. Off by default. A regression still fails.",
+          "type": "boolean"
         }
       }
     },

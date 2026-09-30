@@ -77,7 +77,8 @@ So does finding nothing to compare: when no series was measured on both revision
 says `**Nothing was compared` and the command exits non-zero after printing it. That usually
 means the base was never recorded, its notes were not fetched, or the two were measured on
 different runner classes. Pass `--allow-empty` when that is expected: on the first pull request
-after adopting tak, or while a runner-class migration has left the base on the old class.
+after adopting tak, or while a runner-class migration has left the base on the old class. Where
+it is routine, turn on the [`allow_empty` setting](#when-comparing-nothing-is-routine) instead.
 `--no-gate` also passes an empty comparison, since it never fails on the comparison. Errors,
 such as an invalid `tak.toml`, still fail.
 
@@ -86,6 +87,60 @@ fail when the report's first line starts with `**Nothing was compared`, as the
 [pull-request example](/guide/adopting#gate-pull-requests) does. Check only the first line.
 tak writes that verdict before any benchmark name, and the rest of the report echoes text from
 the change under test.
+
+### When comparing nothing is routine
+
+Some projects compare nothing often, for reasons that are not a broken setup:
+
+- **The runner class churns.** A class that encodes the CI image or compiler version, as
+  [`runner_class`](/guide/configuration#environment-and-runner-settings) recommends when those
+  change the numbers, starts a new series on every update. Until the main branch is measured on
+  the new class, every pull request has nothing to compare against. tak's own class includes the
+  GitHub image version, so each image update did this to every open pull request.
+- **The project is still adopting.** Pull requests that branch from commits measured before tak
+  was, and new benchmarks, have no base.
+
+For those, turn on `allow_empty` so that comparing nothing warns instead of failing:
+
+```toml
+[gate]
+allow_empty = true
+```
+
+With it on, `tak compare`, `tak detect` and `tak run --baseline --gate` exit 0 when nothing was
+compared. The report's first line is unchanged, so a script that reads it still sees
+`**Nothing was compared`. A line after it says the comparison passed with a warning because
+`allow_empty` is on, and tak prints one warning line on stderr:
+
+```text
+warning: nothing was compared: no series was measured on both origin/main and HEAD; passing because `allow_empty` is on
+```
+
+Under GitHub Actions (`GITHUB_ACTIONS` set), that line is a `::warning::` workflow command, so it
+also appears as an annotation on the run. It goes to stderr, never to the report on stdout.
+
+**The cost:** tak cannot tell a new runner class from a broken setup. A base that was never
+recorded, notes that were never fetched, or a recording step that stopped producing instruction
+counts also compare nothing, and with `allow_empty` on they warn instead of failing. Pair the
+setting with a check that the data is there, as tak's own main-branch workflow does before
+`tak detect`, and treat the warning as something to read.
+
+Only the empty case is waived. A regression still fails, and so does anything else the gate
+fails on: an error, and, for `tak run --baseline --gate`, a failed check, a failed instruction
+count, or a comparison where only some benchmarks could be checked.
+
+`--allow-empty` is the same setting, for one invocation, and `TAK_ALLOW_EMPTY=0` turns it off
+for one. `--no-gate` takes precedence over both, and prints no warning. `tak compare` reads the
+setting from BASE's `tak.toml`, like the rest of its [gate](#where-the-gate-comes-from), so a
+pull request that turns it on still fails on an empty comparison, and the report says the gate
+policy changes once it is merged.
+
+A workflow that classifies results should treat exit status 0 with a first line starting
+`**Nothing was compared` as its own outcome, neither a pass nor a failure. tak's own
+[`perf-pr.yml`](https://github.com/jdx/tak/blob/main/.github/workflows/perf-pr.yml) reports it
+as a neutral check with a warning. [jdx/tak-action](/guide/adopting#use-the-github-action)
+reads the first line whatever the exit status, so its `fail-on-nothing-compared` input still
+decides there: set it to `false` as well to make the action warn instead of failing.
 
 Each benchmark can have its own gate in `tak.toml`: a different percentage, an absolute
 `min_delta` floor, or `enabled = false` to report a benchmark without failing on it. See
@@ -97,12 +152,14 @@ When some benchmark's gate differs from `[gate]`, the verdict says
 `N benchmark(s) above their gate` instead of `N benchmark(s) above the 1% gate`, and a
 report-only benchmark that rose is listed as `N report-only benchmark(s) above their gate`.
 Classify a result by its exit status first. `tak compare` exits non-zero only for a regression
-in a gated benchmark, for an empty comparison without `--allow-empty`, or for an error. The
+in a gated benchmark, for an empty comparison unless `allow_empty` is on, or for an error. The
 report echoes text from the change under test, such as benchmark names and trailer values, so
-use it only to tell those non-zero cases apart:
+use it only to tell those non-zero cases apart, and to tell an exit status of 0 that compared
+nothing from one that compared everything:
 
 - **Nothing compared:** the report's first line starts with `**Nothing was compared`. tak writes
-  that line before any name.
+  that line before any name. With exit status 0, `allow_empty` or `--no-gate` let it pass; see
+  [when comparing nothing is routine](#when-comparing-nothing-is-routine).
 - **Regression:** a line matching `^\*\*[0-9]+ benchmark\(s\) above (the .*% gate|their gate)`.
   Anchor the pattern to the start of a line, and match both forms.
 - **Anything else** is an error.
@@ -121,16 +178,17 @@ turns an infrastructure change into an apparent code regression.
 ### Where the gate comes from
 
 `tak compare BASE --rev REV` takes its gate policy from the `tak.toml` in BASE's tree, read out
-of git, not from the working tree. The policy is `[gate]` (`pct`, `min_delta` and
-`accept_trailers`) and every per-benchmark `gate` table. In a pull-request job the working tree
-is the pull request, and a gate it can edit is a gate it can waive: raise `pct`, mark the
-benchmark it regressed `enabled = false`, or turn on `accept_trailers` and add a trailer. The
-base has already been reviewed and merged.
+of git, not from the working tree. The policy is `[gate]` (`pct`, `min_delta`,
+`accept_trailers` and `allow_empty`) and every per-benchmark `gate` table. In a pull-request job
+the working tree is the pull request, and a gate it can edit is a gate it can waive: raise
+`pct`, mark the benchmark it regressed `enabled = false`, turn on `accept_trailers` and add a
+trailer, or turn on `allow_empty` and compare nothing. The base has already been reviewed and
+merged.
 
 - **Flags and environment variables still override the file.** `--gate-pct`,
   `--gate-min-delta`, `--accept`, `--no-gate`, `--allow-empty`, `TAK_GATE_PCT`,
-  `TAK_GATE_MIN_DELTA` and `TAK_ACCEPT_TRAILERS` behave as before. The workflow sets them, not
-  the pull request.
+  `TAK_GATE_MIN_DELTA`, `TAK_ACCEPT_TRAILERS` and `TAK_ALLOW_EMPTY` behave as before. The
+  workflow sets them, not the pull request.
 - **The file is found the way `tak run` finds its own:** searching upward from the current
   directory, but through BASE's tree, up to the repository root. Deleting, moving or adding a
   `tak.toml` in the pull request does not change which file gates it. A `tak.toml` committed as
@@ -157,8 +215,8 @@ adding a benchmark with no `gate` table, which is held to `[gate]` either way, i
 The gate comes from `tak.toml` at the base, `a1b2c3d4e5f6`. This revision changes the gate policy (`startup`), and the change takes effect once it is merged.
 ```
 
-The list names `[gate]` when the global gate changed, `accept_trailers` when that did, and
-each benchmark or `benchmark (subject)` whose own gate changed.
+The list names `[gate]` when the global gate changed, `accept_trailers` or `allow_empty` when
+that did, and each benchmark or `benchmark (subject)` whose own gate changed.
 
 **This changes behaviour.** tak 0.0.13 and earlier read `[gate]` from the working tree. Now a
 pull request that loosens a gate is compared under the old gate until it merges. To let a
@@ -216,13 +274,17 @@ report-only, `tak detect` can fail only when nothing could be compared.
 
 When the newest commit has no instruction counts, or no series on it has an earlier point in
 the window, the report says **Nothing was compared** and the command fails, because a check
-that examined nothing would otherwise look like a pass. `--allow-empty` waives this case
-only, so a step onto the newest commit still fails. `--no-gate` makes the command report
-without failing on either, as it does for `tak compare`. Errors still fail.
+that examined nothing would otherwise look like a pass. `allow_empty` (`--allow-empty` for one
+run) waives this case only, with a warning, so a step onto the newest commit still fails.
+`tak detect` reads it from the working tree's `tak.toml`, which on a main-branch run is the
+merged commit. `--no-gate` makes the command report without failing on either, as it does for
+`tak compare`. Errors still fail.
 
 On the first recording, or the first on a new runner class, there is nothing earlier to
 compare with. Pass `--allow-empty` for that run, or seed the history first by recording an
-earlier commit on the same runner class. Other causes are configuration problems:
+earlier commit on the same runner class. If the runner class changes routinely, set
+`[gate] allow_empty = true`; see [when comparing nothing is routine](#when-comparing-nothing-is-routine)
+for what that costs. Other causes are configuration problems:
 
 - The checkout has no history. The walk needs the commits between recorded points, and the
   default `actions/checkout` fetch of one commit leaves nothing to walk. The report notes when
