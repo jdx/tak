@@ -580,7 +580,7 @@ fn table(c: &Comparison, trend: &Trend, gates: &Gates) -> String {
     for (key, (ins, wall)) in &series {
         let (bench, tool, _runner) = key;
         let gate = gates.get(bench, tool);
-        let mut cells = vec![name(bench, tool)];
+        let mut cells = vec![cell(&name(bench, tool))];
         if any_trend {
             cells.push(
                 trend
@@ -803,6 +803,33 @@ pub(crate) fn code(text: &str) -> String {
     } else {
         format!("{fence}{text}{fence}")
     }
+}
+
+/// Plain `text` made safe for one Markdown table cell: an unescaped `|` in a
+/// name from `tak.toml` or a note ends the cell early and shifts every column
+/// after it.
+///
+/// Every `\|` is an escaped pipe to the table, whatever precedes it, and the
+/// table strips that backslash before the inline parse — which then reads the
+/// cell's own backslashes as escapes. So backslashes are doubled first, or a
+/// subject's `\|` would render as a bare `|`, and `a\*b` as `a*b`. For a cell
+/// whose text sits inside a code span, use [`code_cell`] instead.
+pub(crate) fn cell(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('|', "\\|")
+}
+
+/// [`cell`] for text inside a code span, as [`describe`] writes names:
+/// pipes only.
+///
+/// The table strips a pipe's escaping backslash before the code span is
+/// parsed, so `\|` still works there, but a code span shows every other
+/// backslash as written. Doubling them, as [`cell`] does, put `win\\arm` in
+/// the report for a runner named `win\arm`. One case cannot be written
+/// exactly: a backslash directly before a pipe (`a\|b`) is left alone by the
+/// table, so it renders as `a\\|b`. The row stays intact either way, checked
+/// against comrak's GFM tables.
+pub(crate) fn code_cell(text: &str) -> String {
+    text.replace('|', "\\|")
 }
 
 /// One line naming trailers that were ignored, so an author whose trailer did
@@ -1763,6 +1790,43 @@ mod tests {
         assert_ne!(code(" startup "), code("startup"));
         // A span of only spaces is not stripped, so it needs no padding.
         assert_eq!(code("  "), "`  `");
+    }
+
+    #[test]
+    fn a_cell_escapes_backslashes_before_pipes() {
+        assert_eq!(cell("startup"), "startup");
+        assert_eq!(cell("a|b"), r"a\|b");
+        // Doubled so the inline parse gives them back as written: comrak
+        // renders `a\\\|b` as `a\|b` and `win\\arm` as `win\arm`.
+        assert_eq!(cell(r"a\|b"), r"a\\\|b");
+        assert_eq!(cell(r"win\arm"), r"win\\arm");
+    }
+
+    /// Inside a code span a backslash is shown as written, so only pipes are
+    /// escaped: comrak renders `` `win\arm` `` as `win\arm` and `` `a\|b` ``
+    /// as `a|b`, each in one cell.
+    #[test]
+    fn a_code_cell_escapes_only_pipes() {
+        assert_eq!(code_cell("`win\\arm`"), "`win\\arm`");
+        assert_eq!(code_cell("`a|b`"), r"`a\|b`");
+        // The one inexact case: this renders as `a\\|b`, still in one cell.
+        assert_eq!(code_cell(r"`a\|b`"), r"`a\\|b`");
+    }
+
+    /// A name with a pipe in it stays in its own cell, so every row keeps the
+    /// header's column count — the baseline report renders through here too.
+    #[test]
+    fn a_pipe_in_a_name_does_not_split_the_row() {
+        let mut base = rec("a|b", "gha", 100.0, 1.0);
+        let mut head = rec("a|b", "gha", 101.0, 1.0);
+        base.tool = "x|y".into();
+        head.tool = "x|y".into();
+        let md = markdown(&compare(&[base], &[head]), &Trend::new(), &g(1.0), false);
+        assert!(md.contains(r"| a\|b (x\|y) |"), "{md}");
+        let columns = |l: &str| l.replace(r"\|", "").matches('|').count();
+        let rows: Vec<&str> = md.lines().filter(|l| l.starts_with('|')).collect();
+        assert_eq!(rows.len(), 3, "{md}");
+        assert!(rows.iter().all(|r| columns(r) == columns(rows[0])), "{md}");
     }
 
     /// Two runner classes of one accepted benchmark are two entries, and the

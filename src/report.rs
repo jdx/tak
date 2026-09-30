@@ -402,15 +402,12 @@ pub fn markdown(h: &History, rev: &str, credit: bool) -> String {
     for s in &h.series {
         let _ = write!(out, "\n### {}\n\n", compare::describe(&s.key));
         // A subject is free text; an unescaped pipe in one splits its row.
-        // Backslashes first: a subject's own `\|` would otherwise become
-        // `\\|`, an escaped backslash followed by a bare pipe that ends the
-        // cell.
         let body: Vec<Vec<String>> = rows(h, s)
             .into_iter()
             .map(|(_, mut r)| {
                 r[0] = format!("`{}`", r[0]);
                 let last = r.len() - 1;
-                r[last] = r[last].replace('\\', "\\\\").replace('|', "\\|");
+                r[last] = compare::cell(&r[last]);
                 r
             })
             .collect();

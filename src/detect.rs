@@ -21,8 +21,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::accept::{Acceptances, TRAILER};
 use crate::compare::{
-    CREDIT, Change, GATED_METRIC, Gate, Gates, Key, Trend, WALL_METRIC, code, describe, signed_pct,
-    sparkline, thousands,
+    CREDIT, Change, GATED_METRIC, Gate, Gates, Key, Trend, WALL_METRIC, code, code_cell, describe,
+    signed_pct, sparkline, thousands,
 };
 use crate::notes;
 use crate::record::Record;
@@ -690,7 +690,7 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
             };
             out.push_str(&format!(
                 "| {} | {spark} | {} | {ins} | {ins_delta} |{gate_cell} {wall} | {wall_delta} |\n",
-                describe(&s.key),
+                code_cell(&describe(&s.key)),
                 span(s),
             ));
         }
@@ -807,7 +807,7 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
             };
             out.push_str(&format!(
                 "| {} | {} | {ins} | {delta} |{gate_cell}\n",
-                describe(&s.key),
+                code_cell(&describe(&s.key)),
                 span(s)
             ));
         }
@@ -931,6 +931,26 @@ mod tests {
         assert_eq!((f[0].from.as_str(), f[0].to.as_str()), ("c1", "c2"));
         assert_eq!(f[0].commits, 1);
         assert!(d.earlier.is_empty());
+    }
+
+    /// Both tables name a series in their first cell, inside code spans; a
+    /// pipe in the name must not add a column to either, and a backslash must
+    /// show as recorded rather than doubled.
+    #[test]
+    fn a_pipe_in_a_name_does_not_split_the_row() {
+        let named = |v: f64| vec![rec("a|b", r"win\arm", v)];
+        let d = analyze(
+            &[
+                ("c0".to_string(), named(1000.0)),
+                ("c1".to_string(), named(1100.0)),
+                ("c2".to_string(), named(1100.0)),
+                ("c3".to_string(), named(1210.0)),
+            ],
+            &pct(1.0),
+        );
+        assert_eq!((d.latest.len(), d.earlier.len()), (1, 1));
+        let md = markdown(&d, false);
+        assert_eq!(md.matches(r"| `a\|b` on `win\arm` |").count(), 2, "{md}");
     }
 
     #[test]
