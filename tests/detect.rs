@@ -27,13 +27,20 @@ fn git(dir: &Path, args: &[&str]) -> String {
 }
 
 fn tak(dir: &Path, args: &[&str]) -> Output {
+    tak_env(dir, args, &[])
+}
+
+fn tak_env(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_tak"))
         .args(args)
         // No remote exists, so the refresh fails and falls back to local notes,
         // as it does offline. Pointing at a name keeps it from guessing.
         .args(["--remote", "nowhere", "--no-credit"])
-        // The default gate, whatever the environment running the tests says.
+        // The default gate and trailer policy, whatever the environment
+        // running the tests says.
         .env_remove("TAK_GATE_PCT")
+        .env_remove("TAK_ACCEPT_TRAILERS")
+        .envs(env.iter().copied())
         .current_dir(dir)
         .output()
         .expect("failed to run tak")
@@ -465,4 +472,127 @@ fn a_history_of_exactly_the_limit_is_not_cut_short() {
     );
     assert!(!md.contains("limit of"), "{md}");
     assert!(!md.contains("Nothing was compared"), "{md}");
+}
+
+/// c0 recorded at 1000, c1 unrecorded with a `Tak-Accept: startup` trailer,
+/// c2 recorded at 1100: a 10% step whose range, c0..c2, holds the trailer.
+fn accepted_repo() -> (tempfile::TempDir, Vec<String>) {
+    let dir = tempfile::Builder::new()
+        .prefix("tak-detect-accept-")
+        .tempdir()
+        .unwrap();
+    let d = dir.path();
+    git(d, &["init", "--quiet", "-b", "main"]);
+    let mut shas = Vec::new();
+    for (msg, value) in [
+        ("c0", Some(1000)),
+        ("c1\n\nTak-Accept: startup", None),
+        ("c2", Some(1100)),
+    ] {
+        git(d, &["commit", "--quiet", "--allow-empty", "-m", msg]);
+        if let Some(v) = value {
+            git(
+                d,
+                &[
+                    "notes",
+                    "--ref",
+                    "refs/notes/tak",
+                    "add",
+                    "-m",
+                    &line("startup", "gha", v),
+                ],
+            );
+        }
+        shas.push(git(d, &["rev-parse", "HEAD"]));
+    }
+    (dir, shas)
+}
+
+/// Trailers are ignored unless `accept_trailers` is on, and the report says
+/// one was found. On, the trailer in the step's range accepts it.
+#[test]
+fn a_trailer_in_the_steps_range_accepts_it_when_enabled() {
+    let (dir, c) = accepted_repo();
+
+    let out = tak(dir.path(), &["detect"]);
+    let md = stdout(&out);
+    assert!(!out.status.success(), "trailers are off by default: {md}");
+    assert!(md.contains("were found but not honoured"), "{md}");
+
+    let out = tak_env(dir.path(), &["detect"], &[("TAK_ACCEPT_TRAILERS", "1")]);
+    let md = stdout(&out);
+    assert!(out.status.success(), "{md}");
+    assert!(md.contains("**+10.00%** (accepted)"), "{md}");
+    assert!(
+        md.contains(&format!("(accepted by `Tak-Accept` in `{}`)", short(&c[1]))),
+        "{md}"
+    );
+}
+
+/// `--accept` works whatever the setting says: the escape for a manual rerun
+/// of a main-branch job whose step was accepted on its pull request.
+#[test]
+fn accept_flag_waives_a_step_onto_the_head() {
+    let (dir, _) = accepted_repo();
+    let out = tak(dir.path(), &["detect", "--accept", "startup"]);
+    let md = stdout(&out);
+    assert!(out.status.success(), "{md}");
+    assert!(md.contains("(accepted by `--accept`)"), "{md}");
+
+    // Exact names only: another benchmark's acceptance changes nothing.
+    let out = tak(dir.path(), &["detect", "--accept", "other"]);
+    assert!(!out.status.success());
+    // And an empty one is an error before anything is walked.
+    let out = tak(dir.path(), &["detect", "--accept", ""]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("empty"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The range is first-parent. A trailer on a branch commit behind a merge's
+/// second parent did not land on main as its own commit, so it does not
+/// accept the step.
+#[test]
+fn only_first_parent_trailers_in_the_range_count() {
+    let (dir, _) = repo();
+    let d = dir.path();
+    // A side branch whose commit carries the trailer, merged with a plain
+    // merge commit that is then recorded well above c7.
+    git(d, &["checkout", "--quiet", "-b", "side"]);
+    git(
+        d,
+        &[
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "side\n\nTak-Accept: startup",
+        ],
+    );
+    git(d, &["checkout", "--quiet", "main"]);
+    git(
+        d,
+        &["merge", "--quiet", "--no-ff", "-m", "merge side", "side"],
+    );
+    git(
+        d,
+        &[
+            "notes",
+            "--ref",
+            "refs/notes/tak",
+            "add",
+            "-m",
+            &line("startup", "gha", 1300),
+        ],
+    );
+    let out = tak_env(d, &["detect"], &[("TAK_ACCEPT_TRAILERS", "1")]);
+    let md = stdout(&out);
+    assert!(
+        !out.status.success(),
+        "the side commit is not first-parent: {md}"
+    );
+    assert!(!md.contains("(accepted)"), "{md}");
 }

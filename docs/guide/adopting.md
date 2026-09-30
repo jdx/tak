@@ -248,6 +248,13 @@ that one push with `tak detect --allow-empty` and remove the flag afterwards. Le
 `--allow-empty` in place means a checkout without history or a recording that stopped
 producing instruction counts also passes.
 
+A regression accepted on its pull request through a label is not recorded anywhere
+`tak detect` can see, so the main-branch check fails once on the commit that merged it. To
+avoid that, have the merged commit carry a `Tak-Accept:` trailer and set
+`TAK_ACCEPT_TRAILERS: "1"` on the detect step, or re-run that one check with
+`tak detect --accept BENCH`. See
+[accepted steps on main](/guide/ci#accepted-steps-on-main).
+
 `fetch-depth: 0` gives the walk the commits between recorded points. A bounded depth works if
 it reaches back past the oldest of the 20 recorded commits the check examines by default.
 
@@ -321,6 +328,9 @@ jobs:
       - name: Compare and gate
         env:
           BASE_SHA: ${{ steps.base.outputs.sha }}
+          # tak.toml comes from the pull request, which could otherwise turn on
+          # `accept_trailers` and accept its own regression with a trailer.
+          TAK_ACCEPT_TRAILERS: "0"
         run: |
           set +e
           tak compare "$BASE_SHA" > /tmp/tak-report.md
@@ -370,6 +380,37 @@ reporting job that checks out no code and executes nothing from the pull request
 Markdown report and exit status to it as an artifact. mise's
 [pull-request workflow](https://github.com/jdx/mise/blob/main/.github/workflows/perf-pr.yml)
 shows that separation.
+
+### When a regression is intentional
+
+A change that makes a benchmark more expensive on purpose should be accepted for the affected
+benchmark. Do not weaken the gate for every benchmark. Pass the benchmark name to the compare
+step:
+
+```sh
+tak compare "$BASE_SHA" --accept startup
+```
+
+The regression in `startup` is reported as accepted, and every other benchmark still gates.
+In CI, drive `--accept` from a pull-request label that only maintainers can apply. Then the
+pull request's author cannot waive their own gate.
+[Accepting an intentional regression](/guide/ci#accept-from-a-pull-request-label) shows a
+workflow step that does this.
+
+A `Tak-Accept: startup` commit trailer can do the same, but only after the project opts in
+with `[gate] accept_trailers = true`. Trailers are written by the change being gated, so they
+are ignored by default. If the project opts in and squash-merges pull requests, keep the
+trailer in the final paragraph of the squashed commit message.
+
+`tak compare` reads `tak.toml` from the pull request's checkout, so a pull request can turn
+trailers on for itself. Set `TAK_ACCEPT_TRAILERS: "0"` in the environment of the job that
+compares, as the workflow above does. The environment takes precedence over the file. With
+[jdx/tak-action](#use-the-github-action), put it in the compare job's `env:` so that it
+reaches the action's steps. Whether the action can pass `--accept` depends on its release;
+its README lists its inputs.
+
+An acceptance never makes an empty comparison pass. When nothing was measured on both sides,
+`tak compare` still fails unless `--allow-empty` or `--no-gate` is given.
 
 ## Backfill published releases
 

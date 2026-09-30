@@ -9,6 +9,7 @@
 //! Rendering lives in [`markdown`], separate from the comparison itself, so a
 //! chart or a different report format is a new function rather than a rewrite.
 
+use crate::accept::Acceptances;
 use crate::config::SELF_TOOL;
 use crate::record::Record;
 use std::collections::{BTreeMap, BTreeSet};
@@ -212,10 +213,20 @@ pub struct Comparison {
     /// removed, occasionally a run that failed to record — worth surfacing
     /// either way, because a silently vanishing benchmark stops gating.
     pub removed: Vec<Key>,
+    /// Benchmarks the change declared it regresses on purpose. Their
+    /// regressions are still reported, and still counted by [`regressions`],
+    /// but not by [`failures`] — the set the gate actually fails on.
+    ///
+    /// [`regressions`]: Comparison::regressions
+    /// [`failures`]: Comparison::failures
+    pub accepted: Acceptances,
+    /// `Tak-Accept` trailers found in the range and deliberately not honoured,
+    /// because `accept_trailers` is off. Kept only to say so in the report.
+    pub ignored_trailers: Acceptances,
 }
 
 impl Comparison {
-    /// Changes beyond an enabled gate: what `tak compare` fails on.
+    /// Changes beyond an enabled gate, accepted or not.
     pub fn regressions(&self, gates: &Gates) -> Vec<&Change> {
         self.changes
             .iter()
@@ -224,6 +235,42 @@ impl Comparison {
                 gate.enabled && c.exceeds(&gate)
             })
             .collect()
+    }
+
+    /// What `tak compare` fails on: regressions no acceptance covers.
+    ///
+    /// Layered on [`regressions`](Comparison::regressions), so each series is
+    /// still judged against its own effective gate, and an acceptance can only
+    /// waive a change that would otherwise have failed. A report-only series
+    /// never reaches this, so it never needs accepting.
+    pub fn failures(&self, gates: &Gates) -> Vec<&Change> {
+        self.regressions(gates)
+            .into_iter()
+            .filter(|c| !self.accepted.covers(&c.bench))
+            .collect()
+    }
+
+    /// The regressions an acceptance waived.
+    pub fn accepted_regressions(&self, gates: &Gates) -> Vec<&Change> {
+        self.regressions(gates)
+            .into_iter()
+            .filter(|c| self.accepted.covers(&c.bench))
+            .collect()
+    }
+
+    /// Attach what the change declared. Separate from [`compare`] because the
+    /// numbers and the declaration come from different places — notes and
+    /// commit messages — and a comparison is meaningful without either.
+    pub fn with_accepted(mut self, accepted: Acceptances) -> Self {
+        self.accepted = accepted;
+        self
+    }
+
+    /// Record trailers that were present but not honoured. They never affect
+    /// the gate; they exist so the report can explain why a trailer did nothing.
+    pub fn with_ignored_trailers(mut self, ignored: Acceptances) -> Self {
+        self.ignored_trailers = ignored;
+        self
     }
 
     /// Changes beyond a report-only gate: flagged, never failed on.
@@ -305,6 +352,8 @@ pub fn compare(base: &[Record], head: &[Record]) -> Comparison {
         changes,
         added: head_keys.difference(&base_keys).cloned().collect(),
         removed: base_keys.difference(&head_keys).cloned().collect(),
+        accepted: Acceptances::default(),
+        ignored_trailers: Acceptances::default(),
     }
 }
 
@@ -453,6 +502,8 @@ pub fn markdown(c: &Comparison, trend: &Trend, gates: &Gates, credit: bool) -> S
         out.push_str(&table(c, trend, gates));
     }
 
+    out.push_str(&unused_acceptances(c, gates));
+    out.push_str(&ignored_trailers(c));
     out.push_str(&outliers(c));
     out.push_str(
         "\n<sub>Only instruction counts gate. Wall clock is shown for context — \
@@ -539,8 +590,11 @@ fn table(c: &Comparison, trend: &Trend, gates: &Gates) -> String {
             Some(ch) => {
                 // A report-only row that crossed its threshold says so in
                 // words: the warning sign means "this fails", and a row that
-                // cannot fail should not wear it.
+                // cannot fail should not wear it. An accepted row is marked
+                // too, so it cannot be read as a passing one by someone who
+                // only scans the table.
                 let flag = match (ch.exceeds(&gate), gate.enabled) {
+                    (true, true) if c.accepted.covers(bench) => " (accepted)",
                     (true, true) => " ⚠️",
                     (true, false) => " (not gated)",
                     (false, _) => "",
@@ -597,6 +651,8 @@ fn verdict(c: &Comparison, gates: &Gates, uniform: bool) -> String {
     };
 
     let regressions = c.regressions(gates);
+    let failures = c.failures(gates);
+    let accepted = c.accepted_regressions(gates);
     if uniform {
         // Named on both verdicts. Without it, a failing report can show one 2%
         // rise failing beside another passing and give no reason; the floor is
@@ -614,14 +670,21 @@ fn verdict(c: &Comparison, gates: &Gates, uniform: bool) -> String {
                 "No instruction-count regression above {}%{floor}.\n",
                 global.pct,
             ));
-        } else {
+        } else if !failures.is_empty() {
             out.push_str(&format!(
                 "**{} benchmark(s) above the {}% gate{floor}:** {}\n",
-                regressions.len(),
+                failures.len(),
                 global.pct,
-                listed(&regressions, false)
+                listed(&failures, false)
             ));
         }
+        out.push_str(&accepted_line(
+            c,
+            &accepted,
+            &format!("the {}% gate", global.pct),
+            !failures.is_empty(),
+            |_| String::new(),
+        ));
         return out;
     }
 
@@ -635,19 +698,168 @@ fn verdict(c: &Comparison, gates: &Gates, uniform: bool) -> String {
         out.push_str("Every benchmark here is report-only, so none can fail the gate.\n");
     } else if regressions.is_empty() {
         out.push_str("No gated benchmark rose beyond its gate.\n");
-    } else {
+    } else if !failures.is_empty() {
         out.push_str(&format!(
             "**{} benchmark(s) above their gate:** {}\n",
-            regressions.len(),
-            listed(&regressions, true)
+            failures.len(),
+            listed(&failures, true)
         ));
     }
+    out.push_str(&accepted_line(
+        c,
+        &accepted,
+        "their gate",
+        !failures.is_empty(),
+        |ch| format!(" (gate {})", gates.of(ch).threshold()),
+    ));
     let reported = c.reported(gates);
     if !reported.is_empty() {
         out.push_str(&format!(
             "\n**{} report-only benchmark(s) above their gate, not failing:** {}\n",
             reported.len(),
             listed(&reported, true)
+        ));
+    }
+    out
+}
+
+/// The accepted regressions, on their own line in bold, each with its runner,
+/// its gate when `gate_of` names one, and where the acceptance came from.
+///
+/// Its own line because an acceptance is an override of the gate, and the
+/// point of scoping it is that it stays as visible as the regression would
+/// have been. `above {which}` keeps the wording the failure line uses, so a
+/// script matching `(s) above the N% gate` or `above their gate` sees an
+/// accepted rise as a rise. The runner is named because one benchmark
+/// accepted on two runner classes is two entries that would otherwise read
+/// identically.
+fn accepted_line(
+    c: &Comparison,
+    accepted: &[&Change],
+    which: &str,
+    after_failures: bool,
+    gate_of: impl Fn(&Change) -> String,
+) -> String {
+    if accepted.is_empty() {
+        return String::new();
+    }
+    format!(
+        "{}**{} accepted regression(s) above {which}, not failing it:** {}\n",
+        if after_failures { "\n" } else { "" },
+        accepted.len(),
+        accepted
+            .iter()
+            .map(|ch| format!(
+                "{} on {} {}{} ({})",
+                code(&name(&ch.bench, &ch.tool)),
+                code(&ch.runner),
+                signed_pct(ch.pct()),
+                gate_of(ch),
+                c.accepted.describe(&ch.bench)
+            ))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// `text` as a Markdown code span, whatever it contains.
+///
+/// Acceptance names come from commit messages and flags, not from a validated
+/// config, so a backtick in one is plausible; a single-backtick span would close
+/// early and garble the rest of the line. CommonMark allows a fence of any
+/// length that does not occur inside.
+///
+/// Padded with one space each side whenever the text holds a backtick or starts
+/// or ends with a space. CommonMark strips one leading and one trailing space
+/// from a span that has both, so unpadded, `" startup "` renders exactly like
+/// `startup` — two benchmark names the flag deliberately keeps apart would
+/// read as one in the report. The padding is what gets stripped, leaving the
+/// name as written. A span of only spaces is never stripped, so it is left
+/// unpadded.
+pub(crate) fn code(text: &str) -> String {
+    let mut longest = 0;
+    let mut run = 0;
+    for ch in text.chars() {
+        run = if ch == '`' { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    let fence = "`".repeat(longest + 1);
+    let edge_space = text.starts_with(' ') || text.ends_with(' ');
+    let only_spaces = text.chars().all(|c| c == ' ');
+    if (longest > 0 || edge_space) && !only_spaces {
+        format!("{fence} {text} {fence}")
+    } else {
+        format!("{fence}{text}{fence}")
+    }
+}
+
+/// One line naming trailers that were ignored, so an author whose trailer did
+/// nothing can see why rather than assume tak failed to read it.
+fn ignored_trailers(c: &Comparison) -> String {
+    if c.ignored_trailers.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n`{}` trailers were found but not honoured, because `gate.accept_trailers` is \
+         off: {}\n",
+        crate::accept::TRAILER,
+        c.ignored_trailers
+            .iter()
+            .map(|(bench, _)| format!("{} ({})", code(bench), c.ignored_trailers.describe(bench)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// Acceptances that did not accept anything, each with the reason.
+///
+/// Reported rather than dropped. A stale acceptance is harmless today and a
+/// surprise the day that benchmark does regress; a misspelt one means the
+/// regression it was written for still fails, and the author needs to see why.
+/// A report-only benchmark is its own case: it can never fail, so accepting it
+/// does nothing, and saying "did not rise" would be wrong when it did. None of
+/// these fail the gate by themselves.
+fn unused_acceptances(c: &Comparison, gates: &Gates) -> String {
+    let mut quiet = Vec::new();
+    let mut report_only = Vec::new();
+    let mut unknown = Vec::new();
+    for (bench, _) in c.accepted.iter() {
+        let entry = format!("{} ({})", code(bench), c.accepted.describe(bench));
+        let counted: Vec<&Change> = c
+            .changes
+            .iter()
+            .filter(|ch| ch.bench == bench && ch.metric == GATED_METRIC)
+            .collect();
+        if !c.changes.iter().any(|ch| ch.bench == bench) {
+            unknown.push(entry);
+        } else if counted.iter().any(|ch| {
+            let gate = gates.of(ch);
+            gate.enabled && ch.exceeds(&gate)
+        }) {
+            // Accepted something.
+        } else if !counted.is_empty() && counted.iter().all(|ch| !gates.of(ch).enabled) {
+            report_only.push(entry);
+        } else {
+            quiet.push(entry);
+        }
+    }
+    let mut out = String::new();
+    if !quiet.is_empty() {
+        out.push_str(&format!(
+            "\nAccepted, but not above its gate, so nothing was accepted: {}\n",
+            quiet.join(", ")
+        ));
+    }
+    if !report_only.is_empty() {
+        out.push_str(&format!(
+            "\nAccepted, but report-only, so it can never fail and nothing was accepted: {}\n",
+            report_only.join(", ")
+        ));
+    }
+    if !unknown.is_empty() {
+        out.push_str(&format!(
+            "\nAccepted, but no benchmark by that name was compared on both sides: {}\n",
+            unknown.join(", ")
         ));
     }
     out
@@ -695,6 +907,7 @@ fn outliers(c: &Comparison) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accept::Source;
 
     fn key(bench: &str) -> Key {
         (bench.to_string(), "self".to_string(), "gha".to_string())
@@ -1279,6 +1492,320 @@ mod tests {
         let md = markdown(&c, &trend, &g(1.0), false);
         assert!(md.contains("| trend |"), "{md}");
         assert!(md.contains('█'), "{md}");
+    }
+
+    fn accepting(names: &str, source: Source) -> Acceptances {
+        let mut a = Acceptances::default();
+        a.add(names, source);
+        a
+    }
+
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// The point of the feature: one benchmark's deliberate regression passes
+    /// the gate while another's still fails it.
+    #[test]
+    fn an_acceptance_covers_only_the_benchmark_it_names() {
+        let c = compare(
+            &[
+                rec("a", "gha", 1_000_000.0, 10.0),
+                rec("b", "gha", 1_000_000.0, 10.0),
+            ],
+            &[
+                rec("a", "gha", 1_100_000.0, 10.0),
+                rec("b", "gha", 1_100_000.0, 10.0),
+            ],
+        )
+        .with_accepted(accepting("a", Source::Trailer(SHA.into())));
+        assert_eq!(
+            c.regressions(&g(1.0)).len(),
+            2,
+            "both still count as regressed"
+        );
+        let failures = c.failures(&g(1.0));
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].bench, "b");
+    }
+
+    /// Accepted is not the same as passing, and the report must not let the
+    /// two be confused: the row is marked, and the verdict names the source.
+    #[test]
+    fn an_accepted_regression_stays_visible_with_its_source() {
+        let c = compare(
+            &[rec("a", "gha", 1_000_000.0, 10.0)],
+            &[rec("a", "gha", 1_100_000.0, 10.0)],
+        )
+        .with_accepted(accepting("a", Source::Trailer(SHA.into())));
+        assert!(c.failures(&g(1.0)).is_empty());
+        let md = markdown(&c, &Trend::new(), &g(1.0), false);
+        assert!(md.contains("**+10.00%** (accepted)"), "{md}");
+        assert!(
+            md.contains("**1 accepted regression(s) above the 1% gate, not failing it:** `a` on `gha` +10.00% (`Tak-Accept` in `0123456789ab`)"),
+            "{md}"
+        );
+        assert!(!md.contains("No instruction-count regression"), "{md}");
+        assert!(!md.contains("⚠️"), "{md}");
+    }
+
+    #[test]
+    fn failures_and_acceptances_are_reported_separately() {
+        let c = compare(
+            &[
+                rec("a", "gha", 1_000_000.0, 10.0),
+                rec("b", "gha", 1_000_000.0, 10.0),
+            ],
+            &[
+                rec("a", "gha", 1_100_000.0, 10.0),
+                rec("b", "gha", 1_200_000.0, 10.0),
+            ],
+        )
+        .with_accepted(accepting("a", Source::Flag));
+        let md = markdown(&c, &Trend::new(), &g(1.0), false);
+        assert!(
+            md.contains("**1 benchmark(s) above the 1% gate:** `b` +20.00%"),
+            "{md}"
+        );
+        assert!(md.contains("`a` on `gha` +10.00% (`--accept`)"), "{md}");
+    }
+
+    /// One name covers every tool and runner the benchmark was measured with.
+    #[test]
+    fn an_acceptance_covers_every_series_of_its_benchmark() {
+        let mut other = rec("a", "gha", 1_000_000.0, 10.0);
+        other.tool = "other".into();
+        let mut other_head = other.clone();
+        other_head.metrics.insert(GATED_METRIC.into(), 2_000_000.0);
+        let c = compare(
+            &[
+                rec("a", "gha", 1_000_000.0, 10.0),
+                rec("a", "arm", 1_000_000.0, 10.0),
+                other,
+            ],
+            &[
+                rec("a", "gha", 2_000_000.0, 10.0),
+                rec("a", "arm", 2_000_000.0, 10.0),
+                other_head,
+            ],
+        )
+        .with_accepted(accepting("a", Source::Flag));
+        assert_eq!(c.regressions(&g(1.0)).len(), 3);
+        assert!(c.failures(&g(1.0)).is_empty());
+        let md = markdown(&c, &Trend::new(), &g(1.0), false);
+        assert!(md.contains("`a (other)` on `gha` +100.00%"), "{md}");
+    }
+
+    /// An acceptance that accepted nothing is reported: stale, it would
+    /// silently cover the next real regression; misspelt, it explains why the
+    /// gate still failed. Neither fails the gate on its own.
+    #[test]
+    fn an_acceptance_with_nothing_to_accept_is_reported() {
+        let c = compare(
+            &[
+                rec("a", "gha", 1_000_000.0, 10.0),
+                rec("b", "gha", 1_000_000.0, 10.0),
+            ],
+            &[
+                rec("a", "gha", 1_000_000.0, 10.0),
+                rec("b", "gha", 1_100_000.0, 10.0),
+            ],
+        )
+        .with_accepted(accepting("a,bb", Source::Flag));
+        assert_eq!(c.failures(&g(1.0)).len(), 1, "a typo must not accept `b`");
+        let md = markdown(&c, &Trend::new(), &g(1.0), false);
+        assert!(
+            md.contains(
+                "Accepted, but not above its gate, so nothing was accepted: `a` (`--accept`)"
+            ),
+            "{md}"
+        );
+        assert!(
+            md.contains("no benchmark by that name was compared on both sides: `bb` (`--accept`)"),
+            "{md}"
+        );
+    }
+
+    /// With nothing compared there is no table, but an acceptance still has
+    /// to be accounted for — this is the state a runner migration produces.
+    #[test]
+    fn an_acceptance_is_reported_when_nothing_was_compared() {
+        let c =
+            compare(&[], &[rec("a", "gha", 1.0, 1.0)]).with_accepted(accepting("a", Source::Flag));
+        let md = markdown(&c, &Trend::new(), &g(1.0), false);
+        assert!(md.contains("nothing was gated"), "{md}");
+        assert!(
+            md.contains("no benchmark by that name was compared"),
+            "{md}"
+        );
+    }
+
+    /// Acceptance only ever relaxes the gate for a regression. An improvement
+    /// under an acceptance is still just an improvement.
+    #[test]
+    fn an_acceptance_never_invents_a_regression() {
+        let c = compare(
+            &[rec("a", "gha", 1_000_000.0, 10.0)],
+            &[rec("a", "gha", 500_000.0, 10.0)],
+        )
+        .with_accepted(accepting("a", Source::Flag));
+        let md = markdown(&c, &Trend::new(), &g(1.0), false);
+        assert!(
+            md.contains("No instruction-count regression above 1%"),
+            "{md}"
+        );
+        assert!(!md.contains("(accepted)"), "{md}");
+    }
+
+    /// Ignored trailers are reported and change nothing else: the regression
+    /// still fails, and nothing is marked accepted.
+    #[test]
+    fn an_ignored_trailer_is_named_and_accepts_nothing() {
+        let c = compare(
+            &[rec("a", "gha", 1_000_000.0, 10.0)],
+            &[rec("a", "gha", 1_100_000.0, 10.0)],
+        )
+        .with_ignored_trailers(accepting("a", Source::Trailer(SHA.into())));
+        assert_eq!(c.failures(&g(1.0)).len(), 1);
+        let md = markdown(&c, &Trend::new(), &g(1.0), false);
+        assert!(
+            md.contains("trailers were found but not honoured, because `gate.accept_trailers` is off: `a` (`Tak-Accept` in `0123456789ab`)"),
+            "{md}"
+        );
+        assert!(!md.contains("(accepted)"), "{md}");
+    }
+
+    /// A backtick in a name must not close the code span it is shown in.
+    #[test]
+    fn a_name_with_backticks_keeps_its_code_span() {
+        assert_eq!(code("startup"), "`startup`");
+        assert_eq!(code("a`b"), "`` a`b ``");
+        assert_eq!(code("``x"), "``` ``x ```");
+        let c = compare(&[], &[]).with_accepted(accepting("we`ird", Source::Flag));
+        let md = markdown(&c, &Trend::new(), &g(1.0), false);
+        assert!(md.contains("`` we`ird `` (`--accept`)"), "{md}");
+    }
+
+    /// CommonMark strips one space from each side of a span that has both, so
+    /// a name with edge spaces is padded to survive that and render as itself.
+    /// Unpadded, `" startup "` and `startup` rendered identically on GitHub.
+    #[test]
+    fn a_name_with_edge_spaces_keeps_them() {
+        assert_eq!(code(" startup "), "`  startup  `");
+        assert_eq!(code(" startup"), "`  startup `");
+        assert_eq!(code("startup "), "` startup  `");
+        assert_ne!(code(" startup "), code("startup"));
+        // A span of only spaces is not stripped, so it needs no padding.
+        assert_eq!(code("  "), "`  `");
+    }
+
+    /// Two runner classes of one accepted benchmark are two entries, and the
+    /// verdict has to say which is which.
+    #[test]
+    fn an_accepted_entry_names_its_runner() {
+        let c = compare(
+            &[
+                rec("a", "gha", 1_000_000.0, 10.0),
+                rec("a", "arm", 1_000_000.0, 10.0),
+            ],
+            &[
+                rec("a", "gha", 1_100_000.0, 10.0),
+                rec("a", "arm", 1_200_000.0, 10.0),
+            ],
+        )
+        .with_accepted(accepting("a", Source::Flag));
+        let md = markdown(&c, &Trend::new(), &g(1.0), false);
+        assert!(md.contains("`a` on `arm` +20.00% (`--accept`)"), "{md}");
+        assert!(md.contains("`a` on `gha` +10.00% (`--accept`)"), "{md}");
+    }
+
+    /// Each series is judged against its own effective gate before acceptance
+    /// is consulted. `startup` at 5% with a floor did not regress, so accepting
+    /// it waived nothing; `install` at the global 1% did, and was waived.
+    #[test]
+    fn an_acceptance_is_judged_against_the_series_own_gate() {
+        let mut gates = g(1.0);
+        gates.set_series("startup", SELF_TOOL, gate(5.0, 20_000, true));
+        let mut accepted = Acceptances::default();
+        accepted.add("startup, install", Source::Flag);
+        let c = startup_and_install().with_accepted(accepted);
+        assert!(c.failures(&gates).is_empty());
+        assert_eq!(benches(&c.accepted_regressions(&gates)), ["install"]);
+        let md = markdown(&c, &Trend::new(), &gates, false);
+        assert!(
+            md.contains(
+                "**1 accepted regression(s) above their gate, not failing it:** \
+                 `install` on `gha` +2.00% (gate 1%) (`--accept`)\n"
+            ),
+            "{md}"
+        );
+        assert!(
+            md.contains("Accepted, but not above its gate, so nothing was accepted: `startup`"),
+            "{md}"
+        );
+        assert!(!md.contains("No gated benchmark rose"), "{md}");
+    }
+
+    /// The floor decides first. A rise under `min_delta` is not a regression,
+    /// so an acceptance naming it accepted nothing and the report says so.
+    #[test]
+    fn an_acceptance_does_not_count_a_rise_under_the_floor() {
+        let gates = Gates::uniform(Gate::new(1.0, 10_000).unwrap());
+        let mut accepted = Acceptances::default();
+        accepted.add("startup, install", Source::Flag);
+        let c = startup_and_install().with_accepted(accepted);
+        assert!(c.failures(&gates).is_empty());
+        assert_eq!(benches(&c.accepted_regressions(&gates)), ["install"]);
+        let md = markdown(&c, &Trend::new(), &gates, false);
+        assert!(
+            md.contains(
+                "**1 accepted regression(s) above the 1% gate, not failing it:** \
+                 `install` on `gha` +2.00% (`--accept`)\n"
+            ),
+            "{md}"
+        );
+        assert!(
+            md.contains("not above its gate, so nothing was accepted: `startup`"),
+            "{md}"
+        );
+    }
+
+    /// A report-only series can never fail, so it never needs accepting. An
+    /// acceptance naming one is listed with that reason, and the row keeps its
+    /// report-only marking rather than claiming an acceptance happened.
+    #[test]
+    fn accepting_a_report_only_benchmark_accepts_nothing() {
+        let mut gates = g(1.0);
+        gates.set_series("startup", SELF_TOOL, gate(1.0, 0, false));
+        let c = startup_and_install().with_accepted(accepting("startup", Source::Flag));
+        assert_eq!(benches(&c.failures(&gates)), ["install"]);
+        assert!(c.accepted_regressions(&gates).is_empty());
+        let md = markdown(&c, &Trend::new(), &gates, false);
+        assert!(md.contains("**+2.00%** (not gated)"), "{md}");
+        assert!(!md.contains("(accepted)"), "{md}");
+        assert!(
+            md.contains(
+                "Accepted, but report-only, so it can never fail and nothing was \
+                 accepted: `startup` (`--accept`)"
+            ),
+            "{md}"
+        );
+        assert!(
+            md.contains("**1 report-only benchmark(s) above their gate, not failing:**"),
+            "{md}"
+        );
+    }
+
+    /// With nothing accepted, a per-benchmark report is exactly what it was
+    /// without acceptance support: every line this adds is conditional.
+    #[test]
+    fn an_empty_acceptance_leaves_a_per_benchmark_report_unchanged() {
+        let mut gates = g(1.0);
+        gates.set_series("startup", SELF_TOOL, gate(5.0, 20_000, true));
+        let plain = markdown(&startup_and_install(), &Trend::new(), &gates, false);
+        let c = startup_and_install()
+            .with_accepted(Acceptances::default())
+            .with_ignored_trailers(Acceptances::default());
+        assert_eq!(markdown(&c, &Trend::new(), &gates, false), plain);
+        assert!(!plain.contains("accepted"), "{plain}");
     }
 
     #[test]

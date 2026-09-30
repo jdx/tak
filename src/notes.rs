@@ -244,6 +244,43 @@ pub fn rev_list(rev: &str, n: usize) -> Result<Vec<String>> {
     Ok(out.lines().map(str::to_string).collect())
 }
 
+/// The values of trailer `key` on every commit in `base..head`, one line per
+/// commit: its SHA, a NUL, then the values joined by commas.
+///
+/// Every commit in the range, not first-parent only — the opposite choice to
+/// [`rev_list`], for a different question. A trend follows the trunk; this asks
+/// what the change being measured declares, and under a merge-commit workflow
+/// the declaration sits on the branch commits, reachable only through the
+/// merge's second parent. Under squash-merge the range is the one squashed
+/// commit, and whatever trailers survived into its message.
+///
+/// `unfold` joins a value git wrapped onto continuation lines, and the comma
+/// separator keeps repeated trailers on one line, so a line is always exactly
+/// one commit. Commits with no such trailer still print their SHA; the parser
+/// skips the empty value.
+///
+/// `--no-show-signature` for the same reason [`log`] passes it: a user's
+/// `log.showSignature` would otherwise put GPG output on stdout, between the
+/// lines this parses. `--end-of-options` and `--` keep the range a revision
+/// whatever it looks like.
+///
+/// `first_parent` narrows the range to the trunk's own commits, for `tak
+/// detect`: after a merge, what landed on main is the commit on its
+/// first-parent line — the squash, the rebased commit, or the merge itself —
+/// and that is the history a main-branch check has reviewed as merged. A
+/// branch commit behind a merge's second parent was only ever gated on its
+/// pull request.
+pub fn trailers(base: &str, head: &str, key: &str, first_parent: bool) -> Result<String> {
+    let format = format!("--format=%H%x00%(trailers:key={key},valueonly,unfold,separator=%x2C)");
+    let range = format!("{base}..{head}");
+    let mut args = vec!["log", "--no-show-signature"];
+    if first_parent {
+        args.push("--first-parent");
+    }
+    args.extend([format.as_str(), "--end-of-options", &range, "--"]);
+    git(&args)
+}
+
 /// One commit on a first-parent walk, with whatever tak recorded on it.
 #[derive(Debug, Clone)]
 pub struct Logged {

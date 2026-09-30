@@ -265,6 +265,56 @@
             }
           },
           {
+            "name": "save-baseline",
+            "usage": "--save-baseline <NAME>",
+            "help": "Save the results as a named local baseline, kept in the git directory rather than in refs/notes/tak. Replaces what NAME held for the benchmarks measured and keeps the rest.",
+            "help_first_line": "Save the results as a named local baseline, kept in the git directory rather than in refs/notes/tak. Replaces what NAME held for the benchmarks measured and keeps the rest.",
+            "short": [],
+            "long": [
+              "save-baseline"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "NAME",
+              "usage": "<NAME>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "baseline",
+            "usage": "--baseline <NAME>",
+            "help": "Compare the results against a saved local baseline and print the report `tak compare` prints. Reports only; add --gate to fail on a regression.",
+            "help_first_line": "Compare the results against a saved local baseline and print the report `tak compare` prints. Reports only; add --gate to fail on a regression.",
+            "short": [],
+            "long": [
+              "baseline"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "NAME",
+              "usage": "<NAME>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "gate",
+            "usage": "--gate",
+            "help": "With --baseline, fail when an instruction count rose beyond its gate — the one `tak compare` would apply — or when a gated benchmark could not be compared.",
+            "help_first_line": "With --baseline, fail when an instruction count rose beyond its gate — the one `tak compare` would apply — or when a gated benchmark could not be compared.",
+            "short": [],
+            "long": [
+              "gate"
+            ],
+            "hide": false,
+            "global": false
+          },
+          {
             "name": "help",
             "usage": "-h --help",
             "help": "Print help",
@@ -1062,6 +1112,26 @@
             "global": false
           },
           {
+            "name": "accept",
+            "usage": "--accept <BENCH>",
+            "help": "Accept a regression in this benchmark: report it, but do not fail on it. Repeatable; each value is one exact benchmark name. Honoured whatever `accept_trailers` says.",
+            "help_first_line": "Accept a regression in this benchmark: report it, but do not fail on it. Repeatable; each value is one exact benchmark name. Honoured whatever `accept_trailers` says.",
+            "short": [],
+            "long": [
+              "accept"
+            ],
+            "var": true,
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "BENCH",
+              "usage": "<BENCH>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
             "name": "allow-empty",
             "usage": "--allow-empty",
             "help": "Pass when no series was measured on both sides, instead of failing. For the first pull request after adopting tak, or a runner-class migration. A regression still fails.",
@@ -1095,7 +1165,7 @@
         "hide": false,
         "args_override_self": true,
         "help": "Compare this commit's measurements against another's.",
-        "help_long": "Compare this commit's measurements against another's.\n\nFails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate` in the working tree's tak.toml, or when no series was measured on both sides. Wall clock is reported and never gated.",
+        "help_long": "Compare this commit's measurements against another's.\n\nFails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate` in the working tree's tak.toml, or when no series was measured on both sides. Wall clock is reported and never gated. A regression in a benchmark named by `--accept` is reported as accepted and does not fail. So is one named by a `Tak-Accept:` trailer on a commit in BASE..REV, but only when the `accept_trailers` setting is on.",
         "name": "compare",
         "aliases": [],
         "hidden_aliases": [],
@@ -1180,6 +1250,26 @@
             "global": false
           },
           {
+            "name": "accept",
+            "usage": "--accept <BENCH>",
+            "help": "Accept a step onto REV in this benchmark: report it, but do not fail on it. Repeatable; each value is one exact benchmark name. Honoured whatever `accept_trailers` says.",
+            "help_first_line": "Accept a step onto REV in this benchmark: report it, but do not fail on it. Repeatable; each value is one exact benchmark name. Honoured whatever `accept_trailers` says.",
+            "short": [],
+            "long": [
+              "accept"
+            ],
+            "var": true,
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "BENCH",
+              "usage": "<BENCH>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
             "name": "allow-empty",
             "usage": "--allow-empty",
             "help": "Succeed when nothing could be compared: REV has no instruction counts, or none of its series has an earlier point in the window. Without it that fails, because a check that examined nothing otherwise looks like a pass. Needed on a first recording or the first on a new runner class. A step onto REV still fails.",
@@ -1213,7 +1303,7 @@
         "hide": false,
         "args_override_self": true,
         "help": "Find instruction-count steps that already landed on a branch.",
-        "help_long": "Find instruction-count steps that already landed on a branch.\n\nMeant for the main-branch workflow, after recording. Walks REV's first-parent history and compares each series' consecutive recorded points. Fails when the step onto REV itself is beyond that series' gate (the same per-benchmark gates as `compare`), so a regression fails the run for the commit that introduced it rather than every run after, and when nothing could be compared. Older steps and slow drift are reported without failing. Wall clock is shown and never gated.",
+        "help_long": "Find instruction-count steps that already landed on a branch.\n\nMeant for the main-branch workflow, after recording. Walks REV's first-parent history and compares each series' consecutive recorded points. Fails when the step onto REV itself is beyond that series' gate (the same per-benchmark gates as `compare`), so a regression fails the run for the commit that introduced it rather than every run after, and when nothing could be compared. Older steps and slow drift are reported without failing. Wall clock is shown and never gated. A step in a benchmark named by `--accept` is reported as accepted and does not fail. So is one named by a `Tak-Accept:` trailer on a first-parent commit in the step's range, but only when the `accept_trailers` setting is on.",
         "name": "detect",
         "aliases": [],
         "hidden_aliases": [],
@@ -1500,6 +1590,44 @@
   },
   "config": {
     "props": {
+      "accept_trailers": {
+        "default": false,
+        "default_note": null,
+        "data_type": "boolean",
+        "value_type": {
+          "kind": "base",
+          "of": "bool"
+        },
+        "env": "TAK_ACCEPT_TRAILERS",
+        "envs": [
+          "TAK_ACCEPT_TRAILERS"
+        ],
+        "cli": [],
+        "bindings": {
+          "config": [
+            "gate.accept_trailers"
+          ]
+        },
+        "help": "Whether `tak compare` and `tak detect` honour `Tak-Accept:` trailers on the commits they compare.",
+        "long_help": "Whether `tak compare` and `tak detect` honour `Tak-Accept:` trailers on the commits they compare.\n\nOff by default, because of who writes those trailers. A trailer is part of a commit message, and the commits `tak compare` reads are the change being gated — on a pull request, the author's own. Honouring them by default would let any change waive its own gate by adding one line, which makes the gate advisory for exactly the changes it exists to stop. The acceptance would be visible in the report, but visible is not the same as approved.\n\nWith this off, trailers are ignored entirely; if the compared range carries any, the report says so in one line, so an author is not left wondering why theirs did nothing. `tak compare --accept BENCH` works either way, and is the recommended route in CI: pass it from a workflow step driven by something only maintainers can do, such as applying a pull-request label.\n\nTurn it on where every commit in the compared range has already been reviewed by the time the result matters, or where everyone who can push is trusted to waive the gate — a solo project, or comparisons along an already-reviewed main branch.\n\n`tak.toml` is read from the checkout being measured, so a pull request can change this key just as it can change `gate.pct`. Where the gate is enforced against changes you do not trust, set `TAK_ACCEPT_TRAILERS=0` in the workflow: the environment takes precedence over the file.",
+        "help_heading": null,
+        "choices": [],
+        "merge": "replace",
+        "scope": "any",
+        "deprecated": null,
+        "deprecated_warn_at": null,
+        "deprecated_remove_at": null,
+        "renamed_to": null,
+        "hide": false,
+        "since": "0.0.14",
+        "parse": null,
+        "writes_to": null,
+        "examples": [
+          "TAK_ACCEPT_TRAILERS=1 tak compare origin/main"
+        ],
+        "default_list": [],
+        "extensions": []
+      },
       "credit": {
         "default": true,
         "default_note": null,

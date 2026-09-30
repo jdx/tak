@@ -19,8 +19,9 @@
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::accept::{Acceptances, TRAILER};
 use crate::compare::{
-    CREDIT, Change, GATED_METRIC, Gate, Gates, Key, Trend, WALL_METRIC, describe, signed_pct,
+    CREDIT, Change, GATED_METRIC, Gate, Gates, Key, Trend, WALL_METRIC, code, describe, signed_pct,
     sparkline, thousands,
 };
 use crate::notes;
@@ -161,6 +162,16 @@ pub struct Detection {
     /// The same promise `tak compare --no-gate` makes, so a workflow that must
     /// always exit successfully needs one flag, not two.
     pub no_gate: bool,
+    /// What each step onto the head may be accepted by: `--accept`, plus the
+    /// `Tak-Accept` trailers in that step's own range. Per series, because two
+    /// series' previous points can lie at different commits, and a trailer
+    /// outside a step's range says nothing about that step.
+    pub accepted: BTreeMap<Key, Acceptances>,
+    /// Every acceptance offered, across all ranges, for reporting the ones
+    /// that accepted nothing.
+    pub offered: Acceptances,
+    /// Trailers found but not honoured because `accept_trailers` is off.
+    pub ignored_trailers: Acceptances,
 }
 
 impl Detection {
@@ -180,7 +191,65 @@ impl Detection {
             cutoff: None,
             allow_empty: false,
             no_gate: false,
+            accepted: BTreeMap::new(),
+            offered: Acceptances::default(),
+            ignored_trailers: Acceptances::default(),
         }
+    }
+
+    /// Apply acceptances to the steps onto the head.
+    ///
+    /// `flags` is `--accept`, which covers every step. `trailer_logs` maps a
+    /// step's `from` commit to the [`crate::notes::trailers`] output for
+    /// `from..head`, which is exactly that step's range: pass it only when
+    /// `accept_trailers` is on. A benchmark name covers every tool and runner
+    /// class it was measured on, as in `tak compare`.
+    pub fn accept(&mut self, flags: &Acceptances, trailer_logs: &BTreeMap<String, String>) {
+        self.offered = flags.clone();
+        for log in trailer_logs.values() {
+            self.offered.add_trailer_log(log);
+        }
+        for s in &self.latest {
+            let mut a = flags.clone();
+            if let Some(log) = trailer_logs.get(&s.from) {
+                a.add_trailer_log(log);
+            }
+            if !a.is_empty() {
+                self.accepted.insert(s.key.clone(), a);
+            }
+        }
+    }
+
+    /// The acceptance covering `s`, if `s` is a step onto the head that one
+    /// names. An older step of the same series is never "accepted": only the
+    /// head's step can fail, so only it can need to be.
+    fn acceptance(&self, s: &Step) -> Option<&Acceptances> {
+        if s.to != self.head {
+            return None;
+        }
+        self.accepted.get(&s.key).filter(|a| a.covers(&s.key.0))
+    }
+
+    /// Steps onto the head that would fail, waived by an acceptance.
+    pub fn accepted_steps(&self) -> Vec<&Step> {
+        self.latest
+            .iter()
+            .filter(|s| s.fails(&self.gates) && self.acceptance(s).is_some())
+            .collect()
+    }
+
+    /// Offered acceptances that waived nothing, in name order.
+    fn unused_acceptances(&self) -> Vec<&str> {
+        let used: BTreeSet<&str> = self
+            .accepted_steps()
+            .iter()
+            .map(|s| s.key.0.as_str())
+            .collect();
+        self.offered
+            .iter()
+            .map(|(name, _)| name)
+            .filter(|name| !used.contains(name))
+            .collect()
     }
 
     /// Steps onto the head beyond an enabled gate: what makes the command fail.
@@ -191,7 +260,7 @@ impl Detection {
     pub fn failures(&self) -> Vec<&Step> {
         self.latest
             .iter()
-            .filter(|s| s.fails(&self.gates))
+            .filter(|s| s.fails(&self.gates) && self.acceptance(s).is_none())
             .collect()
     }
 
@@ -501,11 +570,13 @@ fn span(s: &Step) -> String {
     }
 }
 
-fn instructions_cells(s: &Step, gates: &Gates) -> (String, String) {
+fn instructions_cells(s: &Step, d: &Detection) -> (String, String) {
+    let gates = &d.gates;
     let ch = &s.instructions;
     // As in `compare`: the warning sign means "this fails", and a report-only
-    // row that crossed its threshold says so in words instead.
+    // or accepted row that crossed its threshold says so in words instead.
     let flag = match (s.exceeds(gates), s.gate(gates).enabled) {
+        (true, true) if d.acceptance(s).is_some() => " (accepted)",
         (true, true) => " ⚠️",
         (true, false) => " (not gated)",
         (false, _) => "",
@@ -604,7 +675,7 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
                 .filter(|v| !v.is_empty())
                 .map(|v| format!("`{v}`"))
                 .unwrap_or_else(|| "—".into());
-            let (ins, ins_delta) = instructions_cells(s, gates);
+            let (ins, ins_delta) = instructions_cells(s, d);
             let gate_cell = if uniform {
                 String::new()
             } else {
@@ -656,6 +727,49 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
                 );
             }
         }
+        let accepted = d.accepted_steps();
+        if !accepted.is_empty() {
+            // Its own bold line, with where each acceptance came from: an
+            // override of the gate must be as visible as what it overrides.
+            out.push_str(&format!(
+                "\n**{} accepted step(s) above {the_gate} at `{head}`, not failing:** {}\n",
+                accepted.len(),
+                accepted
+                    .iter()
+                    .map(|s| {
+                        let by = d.acceptance(s).map(|a| a.describe(&s.key.0));
+                        format!("{} (accepted by {})", listed(&[*s]), by.unwrap_or_default())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        let unused = d.unused_acceptances();
+        if !unused.is_empty() {
+            out.push_str(&format!(
+                "\nAccepted, but no step onto `{head}` needed it, so nothing was accepted: {}\n",
+                unused
+                    .iter()
+                    .map(|name| format!("{} ({})", code(name), d.offered.describe(name)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !d.ignored_trailers.is_empty() {
+            out.push_str(&format!(
+                "\n`{TRAILER}` trailers were found but not honoured, because \
+                 `gate.accept_trailers` is off: {}\n",
+                d.ignored_trailers
+                    .iter()
+                    .map(|(name, _)| format!(
+                        "{} ({})",
+                        code(name),
+                        d.ignored_trailers.describe(name)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         let reported = d.reported();
         if !reported.is_empty() {
             out.push_str(&format!(
@@ -680,7 +794,7 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
             );
         }
         for s in &d.earlier {
-            let (ins, delta) = instructions_cells(s, gates);
+            let (ins, delta) = instructions_cells(s, d);
             let gate_cell = if uniform {
                 String::new()
             } else {
@@ -1237,5 +1351,104 @@ mod tests {
         let md = markdown(&d, false);
         assert!(!md.contains("| gate |"), "{md}");
         assert!(md.contains("stepped above the 1% gate"), "{md}");
+    }
+
+    fn flags(names: &[&str]) -> Acceptances {
+        let mut a = Acceptances::default();
+        for n in names {
+            a.add_name(n, crate::accept::Source::Flag).unwrap();
+        }
+        a
+    }
+
+    /// `--accept` waives the step onto the head for the benchmark it names,
+    /// and only that one; the report says it was accepted and by what.
+    #[test]
+    fn an_accepted_step_is_reported_and_does_not_fail() {
+        let mut d = analyze(&two_series_step(), &pct(1.0));
+        d.accept(&flags(&["a"]), &BTreeMap::new());
+        let f = d.failures();
+        assert_eq!(f.len(), 1, "b is not accepted");
+        assert_eq!(f[0].key.0, "b");
+        assert_eq!(d.accepted_steps().len(), 1);
+        let md = markdown(&d, false);
+        assert!(md.contains("**+10.00%** (accepted)"), "{md}");
+        assert!(
+            md.contains("1 accepted step(s) above the 1% gate at `c1`, not failing:"),
+            "{md}"
+        );
+        assert!(md.contains("(accepted by `--accept`)"), "{md}");
+
+        d.accept(&flags(&["a", "b"]), &BTreeMap::new());
+        assert!(d.failures().is_empty());
+    }
+
+    /// A trailer counts only for a step whose range holds it. The log is keyed
+    /// by each step's `from`, so a trailer read for one range never accepts a
+    /// step from another.
+    #[test]
+    fn a_trailer_counts_only_in_its_steps_range() {
+        let w = vec![
+            ("c0".to_string(), vec![rec("a", "gha", 1000.0)]),
+            ("c1".to_string(), vec![rec("b", "gha", 1000.0)]),
+            (
+                "c2".to_string(),
+                vec![rec("a", "gha", 1100.0), rec("b", "gha", 1100.0)],
+            ),
+        ];
+        let mut d = analyze(&w, &pct(1.0));
+        let a = d.latest.iter().find(|s| s.key.0 == "a").unwrap();
+        assert_eq!(a.from, "c0");
+        // `Tak-Accept: a, b` on c1, which is in c0..c2 but not in c1..c2.
+        let logs = BTreeMap::from([
+            ("c0".to_string(), "c2\0\nc1\0a,b\n".to_string()),
+            ("c1".to_string(), "c2\0\n".to_string()),
+        ]);
+        d.accept(&Acceptances::default(), &logs);
+        let f = d.failures();
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].key.0, "b", "c1 is outside b's range");
+        let md = markdown(&d, false);
+        assert!(md.contains("(accepted by `Tak-Accept` in `c1`)"), "{md}");
+    }
+
+    /// An acceptance that waived nothing is reported, not dropped, so a stale
+    /// one is visible before it matters.
+    #[test]
+    fn an_unused_acceptance_is_reported() {
+        let mut d = analyze(&walk(&[Some(1000.0), Some(1000.0)]), &pct(1.0));
+        d.accept(&flags(&["a", "nope"]), &BTreeMap::new());
+        let md = markdown(&d, false);
+        assert!(
+            md.contains("no step onto `c1` needed it, so nothing was accepted: `a` (`--accept`), `nope` (`--accept`)"),
+            "{md}"
+        );
+    }
+
+    /// Only the head's step can be accepted: an older step of an accepted
+    /// benchmark is still listed as an earlier step, not as accepted.
+    #[test]
+    fn an_older_step_is_never_marked_accepted() {
+        let mut d = analyze(
+            &walk(&[Some(1000.0), Some(1100.0), Some(1100.0)]),
+            &pct(1.0),
+        );
+        d.accept(&flags(&["a"]), &BTreeMap::new());
+        assert_eq!(d.earlier.len(), 1);
+        let md = markdown(&d, false);
+        assert!(!md.contains("(accepted)"), "{md}");
+        assert!(md.contains("**+10.00%** ⚠️"), "{md}");
+    }
+
+    #[test]
+    fn ignored_trailers_are_named() {
+        let mut d = analyze(&two_series_step(), &pct(1.0));
+        d.ignored_trailers.add_trailer_log("c1\0a\n");
+        assert_eq!(d.failures().len(), 2, "an ignored trailer accepts nothing");
+        let md = markdown(&d, false);
+        assert!(
+            md.contains("`Tak-Accept` trailers were found but not honoured, because `gate.accept_trailers` is off: `a` (`Tak-Accept` in `c1`)"),
+            "{md}"
+        );
     }
 }
