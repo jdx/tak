@@ -227,11 +227,12 @@ enum Cmd {
     /// Compare this commit's measurements against another's.
     ///
     /// Fails when an instruction count has risen by more than `gate_pct` and
-    /// `gate_min_delta`, or by more than a benchmark's own `gate` in the
-    /// working tree's tak.toml, or when no series was measured on both
-    /// sides. Wall clock is reported and never gated. A regression in a
-    /// benchmark named by `--accept` is reported as accepted and does not
-    /// fail. So is one named by a `Tak-Accept:` trailer on a commit in
+    /// `gate_min_delta`, or by more than a benchmark's own `gate`, or when no
+    /// series was measured on both sides. The gate comes from BASE's
+    /// tak.toml, not the working tree's, so a change cannot loosen its own;
+    /// flags and environment variables still override it. Wall clock is
+    /// reported and never gated. A regression in a benchmark named by
+    /// `--accept` is reported as accepted and does not fail. So is one named by a `Tak-Accept:` trailer on a commit in
     /// BASE..REV, but only when the `accept_trailers` setting is on.
     Compare {
         /// Revision to compare against.
@@ -1842,6 +1843,10 @@ fn floor_suffix(gate: &compare::Gate) -> String {
 }
 
 /// Compare `rev` against `base`, print the report, and gate on it.
+///
+/// `cli` beside `settings`: the base's gate is resolved afresh under the same
+/// flags, so they have to arrive unresolved as well.
+#[allow(clippy::too_many_arguments)]
 fn cmd_compare(
     base: String,
     rev: String,
@@ -1849,11 +1854,24 @@ fn cmd_compare(
     no_gate: bool,
     accept_flags: Vec<String>,
     allow_empty: bool,
+    cli: &CliLayer,
     settings: &Settings,
 ) -> Result<()> {
-    let gates = compare_gates(settings, None)?;
-    let base_sha = notes::rev_parse(&base).with_context(|| format!("cannot resolve {base}"))?;
+    // The working tree's policy is loaded first, and still has to be valid:
+    // it is what this change will gate with once merged, and a bad gate should
+    // fail here, on its own pull request, before anything is fetched.
+    let proposed = Policy {
+        gates: compare_gates(settings, None)?,
+        accept_trailers: settings.accept_trailers,
+    };
+    // The commit itself is needed, not only its notes: the gate is read out of
+    // its tree. A workflow that found the merge base has already fetched it.
+    let base_sha = notes::rev_parse(&base).with_context(|| {
+        format!("cannot resolve {base}; tak compare needs the base commit locally, so fetch it")
+    })?;
     let head_sha = notes::rev_parse(&rev).with_context(|| format!("cannot resolve {rev}"))?;
+    let (policy, from) = base_policy(&base_sha, cli)?;
+    let gates = &policy.gates;
 
     let mut accepted = Acceptances::default();
     for name in &accept_flags {
@@ -1865,7 +1883,7 @@ fn cmd_compare(
     // trailer was ignored should be told, not left guessing.
     let log = notes::trailers(&base_sha, &head_sha, accept::TRAILER, false);
     let mut ignored = Acceptances::default();
-    if settings.accept_trailers {
+    if policy.accept_trailers {
         // Fatal when honoured, unlike the trend below. Carrying on would still
         // fail closed, but on a regression the author accepted, with a report
         // that says nothing about why the acceptance was not seen.
@@ -1886,15 +1904,25 @@ fn cmd_compare(
     let base_records = notes::read(Some(&remote), &base_sha)?;
     let head_records = notes::read(None, &head_sha)?;
 
-    let comparison = compare::compare(&base_records, &head_records)
+    let mut comparison = compare::compare(&base_records, &head_records)
         .with_accepted(accepted)
         .with_ignored_trailers(ignored);
     // Never fatal: a shallow checkout has no history to walk, and a missing
     // sparkline is a smaller loss than a failed gate.
     let trend = gather_trend(&base_sha, &head_sha, &head_records).unwrap_or_default();
+    // Beside the verdict, where a pull request that edits a gate on purpose
+    // looks when the gate it wrote did not apply.
+    let at = detect::short(&base_sha);
+    let measured = base_records
+        .iter()
+        .chain(&head_records)
+        .map(|r| (r.bench.clone(), r.tool.clone()))
+        .collect();
+    let changed = proposed.changes_from(&policy, &measured);
+    comparison.gate_source = compare::gate_source(from.as_deref(), at, &changed);
     print!(
         "{}",
-        compare::markdown(&comparison, &trend, &gates, settings.credit)
+        compare::markdown(&comparison, &trend, gates, settings.credit)
     );
 
     if no_gate {
@@ -1915,13 +1943,13 @@ fn cmd_compare(
         )
     }
     // Accepted regressions are reported above and do not count here.
-    let regressions = comparison.failures(&gates);
+    let regressions = comparison.failures(gates);
     if regressions.is_empty() {
         return Ok(());
     }
     // A non-zero exit is the gate. The table above already says which and by
     // how much, so this only has to be unambiguous about why the job failed.
-    if comparison.gated_uniformly(&gates) {
+    if comparison.gated_uniformly(gates) {
         let floor = floor_suffix(&gates.global);
         bail!(
             "{} benchmark(s) regressed by more than {}%{floor}",
@@ -2062,11 +2090,10 @@ fn cmd_detect(
 /// The gate for every series: `[gate]` and its flags, overridden per benchmark
 /// by the `tak.toml` in the working tree.
 ///
-/// The working tree's file, not one read from either revision's history. That
-/// is where `[gate]` already comes from, and in CI it is the checked-out head:
-/// a pull request that loosens a benchmark's gate does so in its own diff,
-/// where a reviewer can see it. Reading the base's file instead would make a
-/// new benchmark's gate take effect one merge late.
+/// The working tree's file is right for `tak detect`, which runs on the merged
+/// branch, and for `tak run --baseline`, which is local. `tak compare`
+/// enforces [`base_policy`] instead and uses this only to tell a pull request
+/// that its own file would gate differently.
 ///
 /// Loaded before any notes are read, so a bad gate fails the command before it
 /// has fetched anything. No `tak.toml` is fine — every series gets the global
@@ -2085,6 +2112,112 @@ fn compare_gates(settings: &Settings, config: Option<&Path>) -> Result<compare::
         Some((_, cfg)) => cfg.gates(global),
         None => compare::Gates::uniform(global),
     })
+}
+
+/// Everything a `tak.toml` can say about whether `tak compare` fails.
+struct Policy {
+    gates: compare::Gates,
+    accept_trailers: bool,
+}
+
+impl Policy {
+    /// What this policy would enforce differently from `base`, named for the
+    /// report; empty when it would gate every series the same way.
+    ///
+    /// Both sides are resolved under the same flags and environment, so a
+    /// difference an override masks is not reported: with the workflow
+    /// unchanged, merging it changes nothing either.
+    fn changes_from(&self, base: &Policy, measured: &BTreeSet<(String, String)>) -> Vec<String> {
+        let mut out = self.gates.changes_from(&base.gates, measured);
+        if self.accept_trailers != base.accept_trailers {
+            out.push("`accept_trailers`".to_string());
+        }
+        out
+    }
+}
+
+/// The gate policy `tak compare` enforces, read from `tak.toml` in the base
+/// revision's tree, and the path it was found at.
+///
+/// Not the working tree's. In CI that is the change under review, and a gate
+/// the change can edit is a gate it can waive: raise `pct`, mark the benchmark
+/// it regressed `enabled = false`, or turn on `accept_trailers` and add a
+/// trailer. The base is already reviewed and merged. The cost is that a gate
+/// change takes effect one merge late, which the report says when it applies.
+///
+/// Only the gate moves. `[report] credit` is cosmetic, and nothing else in
+/// the file bears on a comparison, which measures nothing: the benchmarks the
+/// working tree declares are what `tak run` measured on this side. Flags and
+/// environment variables still override the base's file, because the workflow
+/// sets them, not the change.
+///
+/// Found by searching upward from the current directory, as `tak run` finds
+/// its file, but through the base's tree rather than the disk. A path taken
+/// from the working tree would let a change pick which file gates it: delete
+/// or move `tak.toml`, or add one nearer the working directory, and the base
+/// would have nothing there. For the same reason a base with no `tak.toml`
+/// falls back to the defaults, never to the working tree's file.
+///
+/// A base file that does not parse is an error, not a fallback: the base is
+/// the trusted side, and whatever it failed to say would otherwise be replaced
+/// by defaults nobody chose. Missing objects are an error too, rather than
+/// being read as a missing file.
+fn base_policy(base_sha: &str, cli: &CliLayer) -> Result<(Policy, Option<String>)> {
+    let at = detect::short(base_sha);
+    let found = find_at(base_sha).with_context(|| {
+        format!(
+            "cannot read the gate policy from the base, {at}: tak compare reads {} out \
+             of the base commit's tree, so its objects must be in this clone",
+            config::FILE_NAME
+        )
+    })?;
+    let (layer, config, path) = match found {
+        None => (TakConfigLayer::empty(), None, None),
+        Some((path, text)) => {
+            let origin = format!("{at}:{path}");
+            let context = || {
+                format!(
+                    "in {path} at the base, {at}, which sets the gate for this comparison; \
+                     fix it there"
+                )
+            };
+            let layer = TakConfigLayer::parse(&origin, &text).with_context(context)?;
+            let config = Config::parse(&text).with_context(context)?;
+            (layer, Some(config), Some(path))
+        }
+    };
+    let settings = Settings::resolve(cli, &EnvLayer::from_process(), &layer)
+        .with_context(|| format!("could not read settings from the base, {at}"))?;
+    let global = global_gate(&settings)?;
+    let gates = match config {
+        Some(cfg) => cfg.gates(global),
+        None => compare::Gates::uniform(global),
+    };
+    let policy = Policy {
+        gates,
+        accept_trailers: settings.accept_trailers,
+    };
+    Ok((policy, path))
+}
+
+/// The nearest `tak.toml` in `commit`'s tree, searching from the current
+/// directory up to the repository root: its path from the root, and its text.
+fn find_at(commit: &str) -> Result<Option<(String, String)>> {
+    let prefix = notes::prefix()?;
+    let mut dir = prefix.trim_end_matches('/');
+    loop {
+        let path = match dir {
+            "" => config::FILE_NAME.to_string(),
+            _ => format!("{dir}/{}", config::FILE_NAME),
+        };
+        if let Some(text) = notes::file_at(commit, &path)? {
+            return Ok(Some((path, text)));
+        }
+        if dir.is_empty() {
+            return Ok(None);
+        }
+        dir = dir.rsplit_once('/').map_or("", |(parent, _)| parent);
+    }
 }
 
 /// The `[gate]` settings, checked, from whichever source set them.
@@ -3136,6 +3269,7 @@ fn main() -> Result<()> {
             no_gate,
             accept,
             allow_empty,
+            &overrides,
             &resolve_settings(&overrides)?,
         ),
         Cmd::Explain { base, head, top } => cmd_explain(&base, &head, top),

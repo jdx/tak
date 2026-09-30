@@ -233,6 +233,96 @@ pub fn rev_parse(rev: &str) -> Result<String> {
     git(&["rev-parse", &format!("{rev}^{{commit}}")])
 }
 
+/// The current directory relative to the repository root, as git spells it:
+/// `a/b/` in a subdirectory, empty at the root.
+pub fn prefix() -> Result<String> {
+    git(&["rev-parse", "--show-prefix"])
+}
+
+/// The contents of `path`, relative to the repository root, in `commit`'s
+/// tree, or `None` when that tree has no such file.
+///
+/// Absent and unreadable are told apart, which is why this asks `ls-tree`
+/// before reading: `cat-file` fails the same way for a path the commit does
+/// not have and for a tree this clone never fetched. A caller that falls back
+/// on absence must not fall back on the second, or a checkout missing the
+/// objects would quietly get a different answer from one that has them.
+///
+/// `cat-file blob` rather than `git show`: plumbing, so no pager, no textconv
+/// and nothing a user's config can put between the bytes and the parser.
+/// `--literal-pathspecs` because a directory name is data here, not a glob.
+///
+/// A symlink is followed, as the search on disk follows one, but only within
+/// `commit`'s own tree: its blob holds the target path, which is resolved and
+/// looked up in the same tree. A target that is absolute or climbs out of the
+/// repository is refused rather than read from the disk, because the disk is
+/// the working tree, and the working tree is what this read exists to avoid.
+/// A link that leads nowhere is an error, not an absent file: the tree says a
+/// file is there, and falling back would ignore it.
+pub fn file_at(commit: &str, path: &str) -> Result<Option<String>> {
+    let mut at = path.to_string();
+    for _ in 0..=MAX_LINKS {
+        let entry = git(&[
+            "--literal-pathspecs",
+            "ls-tree",
+            "-z",
+            "--full-tree",
+            commit,
+            "--",
+            &at,
+        ])?;
+        let Some((meta, _)) = entry.split_once('\t') else {
+            if at == path {
+                return Ok(None);
+            }
+            bail!("{path} at {commit} is a symlink to {at}, which does not exist there");
+        };
+        let blob = format!("{commit}:{at}");
+        match meta.split(' ').next() {
+            Some("100644" | "100755") => return git(&["cat-file", "blob", &blob]).map(Some),
+            Some("120000") => {
+                let target = git(&["cat-file", "blob", &blob])?;
+                at = resolve_link(&at, &target).with_context(|| {
+                    format!(
+                        "{path} at {commit} is a symlink to {target}, which is outside \
+                         the repository"
+                    )
+                })?;
+            }
+            _ => bail!("{at} at {commit} is not a regular file"),
+        }
+    }
+    bail!("{path} at {commit} goes through more than {MAX_LINKS} symlinks")
+}
+
+/// Symlinks [`file_at`] follows before giving up. A loop would otherwise never
+/// end, and a real configuration is one link deep, not nine.
+const MAX_LINKS: usize = 8;
+
+/// Where a symlink at `link` pointing at `target` leads, as a path from the
+/// repository root, or `None` when it leaves the repository.
+///
+/// Lexical, as the tree has no directories to stat: `..` pops the path built
+/// so far. Popping past the root, or an absolute target, escapes.
+fn resolve_link(link: &str, target: &str) -> Option<String> {
+    if target.starts_with('/') || target.starts_with('\\') {
+        return None;
+    }
+    let mut parts: Vec<&str> = link.split('/').collect();
+    parts.pop();
+    for part in target.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            name => parts.push(name),
+        }
+    }
+    // The root itself is a directory, never the file being looked for.
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
 /// The most recent `n` commits reachable from `rev`, newest first.
 ///
 /// First-parent only. A merge commit's second parent is the branch that was
@@ -492,6 +582,30 @@ mod tests {
 
     const LINE: &str =
         r#"{"bench":"a","metrics":{"instructions":5.0},"runner":"r","tool":"self","ts":"t","v":1}"#;
+
+    /// A link resolves from its own directory, and never out of the tree.
+    #[test]
+    fn a_link_resolves_inside_the_tree_or_not_at_all() {
+        let cases = [
+            ("tak.toml", "config/tak.toml", Some("config/tak.toml")),
+            (
+                "a/b/tak.toml",
+                "../shared/./tak.toml",
+                Some("a/shared/tak.toml"),
+            ),
+            ("a/tak.toml", "../tak.base.toml", Some("tak.base.toml")),
+            ("a/tak.toml", "../../etc/tak.toml", None),
+            ("tak.toml", "/etc/tak.toml", None),
+            ("tak.toml", ".", None),
+        ];
+        for (link, target, want) in cases {
+            assert_eq!(
+                resolve_link(link, target).as_deref(),
+                want,
+                "{link} -> {target}"
+            );
+        }
+    }
 
     /// `%N` ends with a newline and is empty for a commit with no note; both
     /// have to come out as a commit, the second with no records.
