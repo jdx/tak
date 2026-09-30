@@ -1,0 +1,23 @@
+cmd: ./mycli --help
+events: Ir
+fl=???
+fn=???
+0 500
+fl=src/args.rs
+fn=mycli::parse_args
+10 200
+11 300
+fl=src/main.rs
+fn=main
+1 60
+2 200
+fl=src/old.rs
+fn=mycli::gone
+5 40
+fl=src/render.rs
+fn=mycli::render
+20 100
+fl=src/util.rs
+fn=mycli::parse_args
+3 100
+summary: 1500

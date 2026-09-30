@@ -905,15 +905,17 @@ pub fn instructions(
             settings,
         },
         &DEFAULT_OK_EXIT_CODES,
+        false,
         &|| Ok(()),
     )
+    .map(|c| c.map(|(c, _)| c))
 }
 
 /// [`instructions`] for a declared subject: its environment, its
 /// `ok_exit_codes`, and its prepare step before every cachegrind run, since
 /// each run has to start from the same state the timed samples did.
 pub fn subject_instructions(s: &Subject, settings: &Settings) -> Result<Option<Counted>> {
-    subject_instructions_vetted(s, settings, &|| Ok(()))
+    subject_count(s, settings, false, &|| Ok(())).map(|c| c.map(|(c, _)| c))
 }
 
 /// [`subject_instructions`], asking `vet` before each counted run, after its
@@ -923,6 +925,39 @@ pub fn subject_instructions_vetted(
     settings: &Settings,
     vet: &dyn Fn() -> Result<()>,
 ) -> Result<Option<Counted>> {
+    subject_count(s, settings, false, vet).map(|c| c.map(|(c, _)| c))
+}
+
+/// [`subject_instructions`], also returning the cachegrind profile of the run
+/// whose count is reported. That is the minimum, so the profile's total is
+/// the number recorded, and attributing a change to its functions explains
+/// exactly the change the gate saw.
+///
+/// The profile is a separate result: failing to keep it must not cost the
+/// count, which is the one metric that gates.
+pub fn subject_profile(s: &Subject, settings: &Settings) -> Result<Option<(Counted, Profiled)>> {
+    subject_profile_vetted(s, settings, &|| Ok(()))
+}
+
+/// [`subject_profile`], asking `vet` as [`subject_instructions_vetted`] does.
+pub fn subject_profile_vetted(
+    s: &Subject,
+    settings: &Settings,
+    vet: &dyn Fn() -> Result<()>,
+) -> Result<Option<(Counted, Profiled)>> {
+    Ok(subject_count(s, settings, true, vet)?
+        .map(|(c, p)| (c, p.expect("a profile was asked for"))))
+}
+
+/// The raw cachegrind profile behind a count, or why it could not be kept.
+pub type Profiled = Result<Vec<u8>>;
+
+fn subject_count(
+    s: &Subject,
+    settings: &Settings,
+    profile: bool,
+    vet: &dyn Fn() -> Result<()>,
+) -> Result<Option<(Counted, Option<Profiled>)>> {
     count(
         &s.cmd,
         s.prepare.as_deref(),
@@ -932,6 +967,7 @@ pub fn subject_instructions_vetted(
             settings,
         },
         &s.ok_exit_codes,
+        profile,
         vet,
     )
 }
@@ -1393,32 +1429,67 @@ fn version_once(argv: &[String], site: &Site, timeout: Duration) -> Result<Strin
 
 /// `ok` applies to the subject under valgrind: cachegrind exits with its
 /// client's code, and re-raises the signal a client died of.
+///
+/// With `profile`, each run writes its per-function profile to a scratch
+/// file, and the one from the run at the minimum is returned. Without it the
+/// profile goes to `/dev/null` as it always has. cachegrind writes it after
+/// the client exits, so keeping it cannot move the count.
+///
+/// Anything that stops the profile being kept is returned in its place
+/// rather than failing the count: an instruction count is still the gate
+/// with or without the profile that explains it.
 fn count(
     cmd: &[String],
     prepare: Option<&[String]>,
     site: &Site,
     ok: &[i32],
+    profile: bool,
     vet: &dyn Fn() -> Result<()>,
-) -> Result<Option<Counted>> {
+) -> Result<Option<(Counted, Option<Profiled>)>> {
     if !valgrind_available() {
         return Ok(None);
     }
 
+    // An absolute path, since the subject may run in its own `dir`; removed
+    // with the directory on every exit path. When it cannot be created the
+    // runs go to `/dev/null` as they would without `profile`.
+    let (scratch, unkept) = match profile.then(tempfile::tempdir) {
+        Some(Ok(d)) => (Some(d), None),
+        Some(Err(e)) => (
+            None,
+            Some(
+                anyhow::Error::new(e)
+                    .context("could not create a directory for cachegrind profiles"),
+            ),
+        ),
+        None => (None, None),
+    };
     let mut samples: Vec<u64> = Vec::with_capacity(COUNTER_RUNS as usize);
-    for _ in 0..COUNTER_RUNS {
+    for run in 0..COUNTER_RUNS {
         if let Some(p) = prepare {
             prepare_once(p, site)?;
         }
         vet()?;
+        let out_file = match &scratch {
+            // valgrind expands `%p` and `%q{VAR}` in this path and reads `%%`
+            // as a literal one. A temporary directory seldom holds a `%`, but
+            // TMPDIR is the user's to set.
+            Some(d) => d
+                .path()
+                .join(format!("run-{run}"))
+                .to_string_lossy()
+                .replace('%', "%%"),
+            None => "/dev/null".to_string(),
+        };
         let mut argv: Vec<String> = [
             "valgrind",
             "--tool=cachegrind",
             "--cache-sim=no",
             "--branch-sim=no",
-            "--cachegrind-out-file=/dev/null",
         ]
         .map(String::from)
         .to_vec();
+        argv.push(format!("--cachegrind-out-file={out_file}"));
         argv.extend_from_slice(cmd);
         let mut c = command(&argv, site)?;
         c.stdout(Stdio::null());
@@ -1429,6 +1500,24 @@ fn count(
         let bin = cmd.first().map(String::as_str).unwrap_or("(empty command)");
         accepted(bin, out.status, ok, " under valgrind")?;
         match parse_irefs(&stderr) {
+            // cachegrind that cannot open its output file still exits with
+            // the client's code, and reports `I refs: 0` — a count that would
+            // record as the largest improvement ever measured. Seen with
+            // valgrind 3.24 when the subject removed the directory the profile
+            // was going to. Decided on the count, not on the message: stderr
+            // is the subject's as well, and a program printing the same words
+            // must not lose a real count. No process retires zero
+            // instructions, so zero is never a measurement.
+            Some(0) => {
+                let unwritable =
+                    valgrind_lines(&stderr).any(|l| l.contains("can't open output data file"));
+                if unwritable {
+                    bail!(
+                        "cachegrind could not write its profile to {out_file}, and counts nothing when that happens"
+                    );
+                }
+                bail!("cachegrind counted no instructions");
+            }
             Some(n) => samples.push(n),
             // Valgrind is installed but produced no summary — a real failure,
             // not the same thing as valgrind being absent. Reporting it as
@@ -1440,16 +1529,47 @@ fn count(
         }
     }
 
-    Ok(Some(Counted {
+    let counted = Counted {
         min: *samples.iter().min().expect("COUNTER_RUNS > 0"),
         max: *samples.iter().max().expect("COUNTER_RUNS > 0"),
         runs: COUNTER_RUNS,
-    }))
+    };
+    // The first run at the minimum. A hermetic subject's runs are identical,
+    // and for one that is not, the minimum is the quiet path the recorded
+    // count describes.
+    let best = samples
+        .iter()
+        .position(|n| *n == counted.min)
+        .expect("the minimum is one of the samples");
+    let kept = match (scratch, unkept) {
+        (Some(d), _) => {
+            let path = d.path().join(format!("run-{best}"));
+            Some(
+                std::fs::read(&path)
+                    .with_context(|| format!("cachegrind wrote no profile to {}", path.display()))
+                    .and_then(|raw| {
+                        if raw.is_empty() {
+                            bail!("cachegrind wrote an empty profile to {}", path.display());
+                        }
+                        Ok(raw)
+                    }),
+            )
+        }
+        (None, Some(e)) => Some(Err(e)),
+        (None, None) => None,
+    };
+    Ok(Some((counted, kept)))
 }
 
 /// Extract the `I refs:` count from cachegrind's stderr summary.
+///
+/// Only valgrind's own lines are read, and the last summary among them: the
+/// subject shares the stream, and one that prints `I refs:` must not supply
+/// its own count.
 fn parse_irefs(stderr: &str) -> Option<u64> {
-    let line = stderr.lines().find(|l| l.contains("I refs:"))?;
+    let line = valgrind_lines(stderr)
+        .filter(|l| l.contains("I refs:"))
+        .last()?;
     let digits: String = line
         .rsplit(':')
         .next()?
@@ -1459,9 +1579,32 @@ fn parse_irefs(stderr: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
+/// The lines valgrind itself wrote to a stderr it shares with its client,
+/// with their `==<pid>==` prefix removed.
+fn valgrind_lines(stderr: &str) -> impl Iterator<Item = &str> {
+    stderr.lines().filter_map(|l| {
+        let rest = l.strip_prefix("==")?;
+        let (pid, rest) = rest.split_once("==")?;
+        (!pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit())).then_some(rest)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The subject's stderr is interleaved with valgrind's; only valgrind's
+    /// prefixed lines are its summary.
+    #[test]
+    fn a_count_printed_by_the_subject_is_not_the_count() {
+        let s = "I refs: 5\n==7== error: can't open output data file\n==7== I refs:      1,234\nI refs: 9\n";
+        assert_eq!(parse_irefs(s), Some(1_234));
+        assert_eq!(parse_irefs("I refs: 5\n"), None);
+        assert_eq!(
+            valgrind_lines("==x== no\n== 1== no\n==12== yes\n").collect::<Vec<_>>(),
+            [" yes"]
+        );
+    }
 
     #[test]
     fn parses_cachegrind_summary() {

@@ -612,8 +612,10 @@ written by the change being gated, so they are ignored by default:
 accept_trailers = true
 ```
 
-`TAK_ACCEPT_TRAILERS=0` in a workflow overrides the file. Use it where the gate is enforced
-against pull requests you do not trust, because a pull request can edit `tak.toml`.
+`tak compare` reads this key from the base revision's `tak.toml`, as it reads the rest of the
+gate (see [where gates are read from](#where-gates-are-read-from)), so a pull request cannot
+turn trailers on for itself. `TAK_ACCEPT_TRAILERS=0` in a workflow overrides the file. Use it
+in a pull-request workflow if `tak.toml` turns trailers on for the main branch.
 
 ### An absolute floor
 
@@ -686,16 +688,36 @@ No gated benchmark rose beyond its gate.
 
 If every row uses `[gate]`, the report looks the same as it did before per-benchmark gates.
 
-Gates are not recorded. They're policy rather than measurement, so `tak compare` reads them from
-the `tak.toml` in the working tree, which in CI is the checked-out head. A pull request that
-changes a gate is compared under the new gate, and the change shows up in its diff. A series in
-the notes whose benchmark `tak.toml` no longer declares is held to `[gate]`. A series whose
-subject the benchmark no longer declares is held to the benchmark's gate. `tak compare` works
-without a `tak.toml` and holds every series to `[gate]`. A `tak.toml` that doesn't parse is an
-error.
+### Where gates are read from
 
-`tak detect` reads gates the same way and applies each series' gate to its steps and its
-drift. A report-only benchmark never fails it.
+Gates are not recorded. They're policy rather than measurement, so `tak compare BASE` reads
+them from the `tak.toml` in BASE's tree, not from the working tree. That covers `[gate]`
+(`pct`, `min_delta` and `accept_trailers`) and every `gate` table. In CI the working tree is
+the pull request, and a pull request that could edit its own gate could waive it. Flags and
+environment variables still override the base's file. `[report] credit` still comes from the
+working tree.
+
+**A gate change takes effect once it is merged.** A pull request that loosens, tightens or adds
+a gate is compared under the base's gate, and the report adds a line below the verdict saying
+the change takes effect once it is merged. This is a change from tak 0.0.13 and earlier, which read
+`[gate]` from the working tree. To let a specific regression through on the pull request
+itself, use [`--accept BENCH`](/guide/ci#accept-an-intentional-regression) from the workflow
+rather than editing the gate.
+
+BASE's file is found by searching upward from the current directory through BASE's tree. With
+none there, every series is held to tak's defaults plus any flags and environment variables,
+never to the working tree's file, and the report says so. A BASE `tak.toml` that doesn't parse
+is an error: fix it on the base branch. It is one of the errors `--no-gate` does not waive:
+`--no-gate` never fails on the comparison, but errors still fail. The working tree's `tak.toml`
+has to parse as well. The
+[CI guide](/guide/ci#where-the-gate-comes-from) covers the git objects this needs.
+
+A series in the notes whose benchmark `tak.toml` no longer declares is held to `[gate]`. A
+series whose subject the benchmark no longer declares is held to the benchmark's gate.
+
+`tak detect` reads gates from the working tree's `tak.toml`, which in a main-branch job is the
+merged commit, and applies each series' gate to its steps and its drift. A report-only
+benchmark never fails it.
 
 ## Environment filtering
 

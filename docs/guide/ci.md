@@ -89,10 +89,9 @@ the change under test.
 
 Each benchmark can have its own gate in `tak.toml`: a different percentage, an absolute
 `min_delta` floor, or `enabled = false` to report a benchmark without failing on it. See
-[per-benchmark gates](/guide/configuration#per-benchmark-gates). `tak compare` reads these from
-the `tak.toml` in the working tree, not from the notes or from the base revision. In a
-pull-request job that checks out the head, the pull request's own `tak.toml` decides, so a
-change to a gate is part of the diff under review.
+[per-benchmark gates](/guide/configuration#per-benchmark-gates). `tak compare` reads these,
+like the rest of its gate, from the base revision's `tak.toml`; see
+[where the gate comes from](#where-the-gate-comes-from).
 
 When some benchmark's gate differs from `[gate]`, the verdict says
 `N benchmark(s) above their gate` instead of `N benchmark(s) above the 1% gate`, and a
@@ -113,8 +112,71 @@ start a line. The exit status still keeps a check correct even if it did. tak's 
 [`perf-pr.yml`](https://github.com/jdx/tak/blob/main/.github/workflows/perf-pr.yml) classifies
 its check this way.
 
+To see which functions a change came from, keep cachegrind's profiles on both sides; see
+[Explain an instruction-count change](./attribution).
+
 Always keep measurements partitioned by runner class. Comparing numbers across runner classes
 turns an infrastructure change into an apparent code regression.
+
+### Where the gate comes from
+
+`tak compare BASE --rev REV` takes its gate policy from the `tak.toml` in BASE's tree, read out
+of git, not from the working tree. The policy is `[gate]` (`pct`, `min_delta` and
+`accept_trailers`) and every per-benchmark `gate` table. In a pull-request job the working tree
+is the pull request, and a gate it can edit is a gate it can waive: raise `pct`, mark the
+benchmark it regressed `enabled = false`, or turn on `accept_trailers` and add a trailer. The
+base has already been reviewed and merged.
+
+- **Flags and environment variables still override the file.** `--gate-pct`,
+  `--gate-min-delta`, `--accept`, `--no-gate`, `--allow-empty`, `TAK_GATE_PCT`,
+  `TAK_GATE_MIN_DELTA` and `TAK_ACCEPT_TRAILERS` behave as before. The workflow sets them, not
+  the pull request.
+- **The file is found the way `tak run` finds its own:** searching upward from the current
+  directory, but through BASE's tree, up to the repository root. Deleting, moving or adding a
+  `tak.toml` in the pull request does not change which file gates it. A `tak.toml` committed as
+  a symlink is followed within BASE's tree. A link that is absolute, leads outside the
+  repository, or names a file BASE does not have is an error.
+- **No `tak.toml` at BASE** means tak's defaults plus any flags and environment variables. The
+  working tree's file is never used instead. The report says so in a line below the verdict.
+- **A BASE `tak.toml` that does not parse** fails the comparison, naming the base. Fix it on the
+  base branch. This includes a file an older tak accepted and the running tak does not.
+- **These failures are errors.** An unparseable BASE `tak.toml`, a bad symlink, and missing
+  BASE objects (below) fail before any report is printed. `--no-gate` never fails on the
+  comparison, but errors still fail, and these are errors.
+- **Everything else still comes from the working tree.** `[report] credit` only changes the
+  footer, and nothing else in `tak.toml` affects a comparison: the benchmarks were already
+  measured by `tak run` on each side.
+
+When the working tree's `tak.toml` would gate some series differently from BASE's, under the
+same flags and environment, the report adds a line below the verdict saying which file applied,
+what changed, and that the change takes effect once it is merged. It never comes first, so the
+first-line check for `**Nothing was compared` still holds. Only effective values count:
+adding a benchmark with no `gate` table, which is held to `[gate]` either way, is not a change.
+
+```text
+The gate comes from `tak.toml` at the base, `a1b2c3d4e5f6`. This revision changes the gate policy (`startup`), and the change takes effect once it is merged.
+```
+
+The list names `[gate]` when the global gate changed, `accept_trailers` when that did, and
+each benchmark or `benchmark (subject)` whose own gate changed.
+
+**This changes behaviour.** tak 0.0.13 and earlier read `[gate]` from the working tree. Now a
+pull request that loosens a gate is compared under the old gate until it merges. To let a
+specific regression through on that pull request, pass [`--accept BENCH`](#accept-an-intentional-regression)
+from the workflow, for example from a maintainer-applied label, rather than editing the gate. A
+pull request that tightens a gate or adds a benchmark's gate is also compared under the old
+one, and its gate applies to the pull requests after it.
+
+BASE's commit and tree objects must be in the clone. The documented pull-request workflow
+fetches the base branch with full history before finding the merge base, so they are. When the
+base commit is missing, `tak compare` fails with `cannot resolve BASE` and asks for it to be
+fetched. When the commit is present but its tree is not, as in a `--filter=tree:0` partial
+clone that cannot reach its remote, it fails with `cannot read the gate policy from the base`
+rather than falling back to the defaults.
+
+This closes the route through `tak.toml` only. A pull-request job that installs tak from the
+pull request's own `mise.toml`, or runs pull-request code before comparing, is still running
+code the pull request controls.
 
 ## Detect regressions that landed
 
@@ -258,8 +320,8 @@ to accept the regression. For example, a GitHub Actions step can pass every
 ```
 
 The labels are passed as JSON and read one per line, so a label for a benchmark whose name
-contains a space stays whole. `TAK_ACCEPT_TRAILERS: "0"` stops a pull request from turning
-trailers on in its own `tak.toml`; see below.
+contains a space stays whole. `TAK_ACCEPT_TRAILERS: "0"` keeps trailers off on pull requests
+even if the base branch's `tak.toml` turns them on; see below.
 
 To re-run the gate when a label changes, add `labeled` and `unlabeled` to the workflow's
 `pull_request` types. Only people with triage or write access to the repository can apply
@@ -289,10 +351,12 @@ everyone who can push may waive the gate:
 accept_trailers = true
 ```
 
-`TAK_ACCEPT_TRAILERS=1` enables trailers for one invocation. `tak.toml` is read from the
-checkout being measured, so a pull request can change `accept_trailers`, just as it can change
-`gate.pct`. Where the gate is enforced against changes you do not trust, set
-`TAK_ACCEPT_TRAILERS=0` in the workflow. The environment takes precedence over the file.
+`TAK_ACCEPT_TRAILERS=1` enables trailers for one invocation. `tak compare` reads
+`accept_trailers` from the base revision's `tak.toml`, like the rest of its
+[gate](#where-the-gate-comes-from), so a pull request cannot turn trailers on for itself. A
+project that sets `accept_trailers = true` in `tak.toml` for its main-branch `tak detect` turns
+them on for pull requests too, once that is merged. Set `TAK_ACCEPT_TRAILERS=0` in the
+pull-request workflow to keep them off there. The environment takes precedence over the file.
 
 With trailers off, the report still says when the compared range contains `Tak-Accept`
 trailers. That line names them and states that they were not honoured, so an author knows why
