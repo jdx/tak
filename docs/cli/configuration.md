@@ -16,7 +16,7 @@ With this off, trailers are ignored entirely; if the compared range carries any,
 
 Turn it on where every commit in the compared range has already been reviewed by the time the result matters, or where everyone who can push is trusted to waive the gate — a solo project, or comparisons along an already-reviewed main branch.
 
-`tak.toml` is read from the checkout being measured, so a pull request can change this key just as it can change `gate.pct`. Where the gate is enforced against changes you do not trust, set `TAK_ACCEPT_TRAILERS=0` in the workflow: the environment takes precedence over the file.
+`tak compare` reads this key, like the rest of its gate, from the base revision's `tak.toml` rather than the checkout being measured, so a pull request cannot turn trailers on for itself; turning them on takes effect once that change is merged. `tak detect` reads the working tree's, which on a main-branch run is merged history. The environment takes precedence over either file.
 
 ```
 TAK_ACCEPT_TRAILERS=1 tak compare origin/main

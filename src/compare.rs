@@ -208,6 +208,50 @@ impl Gates {
     fn of(&self, c: &Change) -> Gate {
         self.get(&c.bench, &c.tool)
     }
+
+    /// What these gates hold differently from `base`, by effective value: the
+    /// global gate as `[gate]`, then each series either side declares or
+    /// `measured` names whose resolved gate differs.
+    ///
+    /// Effective rather than structural. Declaring a benchmark with no `gate`
+    /// adds it to the maps at the global gate, which is what an undeclared
+    /// series gets anyway; reporting that as a change would tell a pull
+    /// request that only added a benchmark its gate takes effect later. A
+    /// series that merely follows `[gate]` on both sides is covered by
+    /// `[gate]` and not named again.
+    ///
+    /// Each entry is a code span, escaped by [`code`] like every other name in
+    /// the report: a benchmark name comes from the change under review, and one
+    /// holding a newline must not start a line of its own.
+    pub fn changes_from(&self, base: &Gates, measured: &BTreeSet<(String, String)>) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.global != base.global {
+            out.push(code("[gate]"));
+        }
+        let follows = |g: &Gates, gate: Gate| gate == g.global;
+        let mut named = BTreeSet::new();
+        // A benchmark's own gate is what its undeclared subjects fall back to.
+        for bench in self.benches.keys().chain(base.benches.keys()) {
+            let of = |g: &Gates| g.benches.get(bench).copied().unwrap_or(g.global);
+            let (mine, theirs) = (of(self), of(base));
+            if mine != theirs && !(follows(self, mine) && follows(base, theirs)) {
+                named.insert(bench.clone());
+            }
+        }
+        let series = self
+            .series
+            .keys()
+            .chain(base.series.keys())
+            .chain(measured.iter());
+        for (bench, tool) in series {
+            let (mine, theirs) = (self.get(bench, tool), base.get(bench, tool));
+            if mine != theirs && !(follows(self, mine) && follows(base, theirs)) {
+                named.insert(name(bench, tool));
+            }
+        }
+        out.extend(named.iter().map(|n| code(n)));
+        out
+    }
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -232,6 +276,11 @@ pub struct Comparison {
     /// `Tak-Accept` trailers found in the range and deliberately not honoured,
     /// because `accept_trailers` is off. Kept only to say so in the report.
     pub ignored_trailers: Acceptances,
+    /// One Markdown line on where the gate came from, when that is worth
+    /// saying: the base had no `tak.toml`, or the head's would gate
+    /// differently. Rendered below the verdict rather than above it, because
+    /// scripts read the report's first line as its outcome.
+    pub gate_source: Option<String>,
 }
 
 impl Comparison {
@@ -363,6 +412,7 @@ pub fn compare(base: &[Record], head: &[Record]) -> Comparison {
         removed: base_keys.difference(&head_keys).cloned().collect(),
         accepted: Acceptances::default(),
         ignored_trailers: Acceptances::default(),
+        gate_source: None,
     }
 }
 
@@ -512,6 +562,9 @@ pub fn markdown(c: &Comparison, trend: &Trend, gates: &Gates, credit: bool) -> S
         out.push_str(&allocations(c));
     }
 
+    if let Some(line) = &c.gate_source {
+        out.push_str(&format!("\n{line}\n"));
+    }
     out.push_str(&unused_acceptances(c, gates));
     out.push_str(&ignored_trailers(c));
     out.push_str(&outliers(c));
@@ -913,6 +966,40 @@ pub(crate) fn code_cell(text: &str) -> String {
     text.replace('|', "\\|")
 }
 
+/// The [`Comparison::gate_source`] line: where the gate came from, when the
+/// base had no `tak.toml` or the head's would gate differently; `None` when
+/// there is nothing to say.
+///
+/// `path` is the base's `tak.toml` from the repository root, `at` the base
+/// commit's short SHA, and `changed` what [`Gates::changes_from`] and the
+/// caller named, each already a code span. Every interpolation goes through
+/// [`code`]: the path is a directory name, which can hold a backtick that a
+/// hand-written span would end early on, or a control character.
+pub fn gate_source(path: Option<&str>, at: &str, changed: &[String]) -> Option<String> {
+    let later = (!changed.is_empty()).then(|| {
+        format!(
+            " This revision changes the gate policy ({}), and the change takes effect \
+             once it is merged.",
+            changed.join(", ")
+        )
+    });
+    match (path, later) {
+        (None, later) => Some(format!(
+            "No {} at the base, {}, so the gate is tak's defaults plus any flags and \
+             environment variables.{}",
+            code(crate::config::FILE_NAME),
+            code(at),
+            later.unwrap_or_default()
+        )),
+        (Some(path), Some(later)) => Some(format!(
+            "The gate comes from {} at the base, {}.{later}",
+            code(path),
+            code(at)
+        )),
+        (Some(_), None) => None,
+    }
+}
+
 /// One line naming trailers that were ignored, so an author whose trailer did
 /// nothing can see why rather than assume tak failed to read it.
 fn ignored_trailers(c: &Comparison) -> String {
@@ -1105,6 +1192,47 @@ mod tests {
             min_delta,
             enabled,
         }
+    }
+
+    /// Only effective differences are named, and every name is escaped: a
+    /// declared benchmark at the global gate is no change, and a newline in a
+    /// measured series' name cannot start a line of the report.
+    #[test]
+    fn a_gate_source_path_with_a_backtick_stays_one_code_span() {
+        let changed = [code("[gate]")];
+        let line = gate_source(Some("we`ird/tak.toml"), "a1b2c3d4e5f6", &changed).unwrap();
+        assert_eq!(
+            line,
+            "The gate comes from `` we`ird/tak.toml `` at the base, `a1b2c3d4e5f6`. \
+             This revision changes the gate policy (`[gate]`), and the change takes \
+             effect once it is merged."
+        );
+        let line = gate_source(Some("a\nb/tak.toml"), "a1b2c3d4e5f6", &changed).unwrap();
+        assert!(!line.contains('\n'), "{line}");
+        assert_eq!(gate_source(Some("tak.toml"), "a1b2c3d4e5f6", &[]), None);
+        assert_eq!(
+            gate_source(None, "a1b2c3d4e5f6", &[]).unwrap(),
+            "No `tak.toml` at the base, `a1b2c3d4e5f6`, so the gate is tak's defaults \
+             plus any flags and environment variables."
+        );
+    }
+
+    #[test]
+    fn gate_changes_are_effective_and_escaped() {
+        let global = gate(1.0, 0, true);
+        let base = Gates::uniform(global);
+        let mut head = Gates::uniform(global);
+        head.set_bench("new", global);
+        head.set_series("new", SELF_TOOL, global);
+        assert!(head.changes_from(&base, &BTreeSet::new()).is_empty());
+
+        let evil = "a\n**0 benchmark(s) above the 1% gate:**".to_string();
+        head.set_series(&evil, SELF_TOOL, gate(1.0, 0, false));
+        let measured = BTreeSet::from([(evil, SELF_TOOL.to_string())]);
+        let changes = head.changes_from(&base, &measured);
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert!(!changes[0].contains('\n'), "{changes:?}");
+        assert!(changes[0].starts_with('`'), "{changes:?}");
     }
 
     /// `startup` at 450k instructions and `install` at 100M, both rising

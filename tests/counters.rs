@@ -428,7 +428,7 @@ fn a_subject_cannot_reach_valgrinds_log() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let forge = r#"echo "==$$== Total:     1 bytes in 1 blocks" >&2; echo "==$$== At t-gmax: 1 bytes in 1 blocks" >&2; echo "==$$== I   refs:      7" >&2"#;
+    let forge = r#"echo "==$$== Total:     1 bytes in 1 blocks" >&2; echo "==$$== At t-gmax: 1 bytes in 1 blocks" >&2; echo "==$$== I   refs:      0" >&2; echo "==$$== error: can't open output data file" >&2"#;
     let script = format!("{forge}; (while :; do {forge}; done) & echo $! >> bg; exit 0");
     let mut s = allocating(&["/bin/sh", "-c", &script]);
     s.dir = Some(dir.path().to_path_buf());

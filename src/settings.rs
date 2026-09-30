@@ -138,10 +138,11 @@ pub struct Settings {
     /// the time the result matters, or where everyone who can push is trusted to waive
     /// the gate — a solo project, or comparisons along an already-reviewed main branch.
     ///
-    /// `tak.toml` is read from the checkout being measured, so a pull request can change
-    /// this key just as it can change `gate.pct`. Where the gate is enforced against
-    /// changes you do not trust, set `TAK_ACCEPT_TRAILERS=0` in the workflow: the
-    /// environment takes precedence over the file.
+    /// `tak compare` reads this key, like the rest of its gate, from the base revision's
+    /// `tak.toml` rather than the checkout being measured, so a pull request cannot turn
+    /// trailers on for itself; turning them on takes effect once that change is merged.
+    /// `tak detect` reads the working tree's, which on a main-branch run is merged
+    /// history. The environment takes precedence over either file.
     #[usage(
         default = false,
         env = "TAK_ACCEPT_TRAILERS",
@@ -281,6 +282,18 @@ impl TakConfigLayer {
             .with_context(|| format!("could not parse {}", path.display()))?;
         Ok(Self {
             found: Some((path.to_path_buf(), table)),
+        })
+    }
+
+    /// Parse settings from text that is not a file on disk, for `tak compare`
+    /// reading the base revision's `tak.toml` out of git. `origin` names it in
+    /// errors, as a path would.
+    pub fn parse(origin: &str, text: &str) -> Result<Self> {
+        let table: toml::Table = text
+            .parse()
+            .with_context(|| format!("could not parse {origin}"))?;
+        Ok(Self {
+            found: Some((std::path::PathBuf::from(origin), table)),
         })
     }
 

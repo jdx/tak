@@ -54,6 +54,9 @@ cmd run help="Benchmark a command, or everything declared in tak.toml." {
     flag --export-json help="Write every sample and summary to PATH as hyperfine-compatible JSON." {
         arg <PATH>
     }
+    flag --profile-dir help="Keep the cachegrind profile behind each instruction count, as `DIR/<bench>/<subject>.cachegrind.out`, for `tak explain`." {
+        arg <DIR>
+    }
     flag --save-baseline help="Save the results as a named local baseline, kept in the git directory rather than in refs/notes/tak. Replaces what NAME held for the benchmarks measured and keeps the rest." {
         arg <NAME>
     }
@@ -159,7 +162,7 @@ cmd compare help="Compare this commit's measurements against another's." {
     long_help #"""
 Compare this commit's measurements against another's.
 
-Fails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate` in the working tree's tak.toml, or when no series was measured on both sides. Wall clock is reported and never gated. A regression in a benchmark named by `--accept` is reported as accepted and does not fail. So is one named by a `Tak-Accept:` trailer on a commit in BASE..REV, but only when the `accept_trailers` setting is on.
+Fails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate`, or when no series was measured on both sides. The gate comes from BASE's tak.toml, not the working tree's, so a change cannot loosen its own; flags and environment variables still override it. Wall clock is reported and never gated. A regression in a benchmark named by `--accept` is reported as accepted and does not fail. So is one named by a `Tak-Accept:` trailer on a commit in BASE..REV, but only when the `accept_trailers` setting is on.
 """#
     flag --rev help="Revision to compare. Defaults to HEAD." default=HEAD {
         arg <REV>
@@ -174,6 +177,19 @@ Fails when an instruction count has risen by more than `gate_pct` and `gate_min_
     flag --allow-empty help="Pass when no series was measured on both sides, instead of failing. For the first pull request after adopting tak, or a runner-class migration. A regression still fails."
     flag "-h --help" help="Print help" action=help builtin=#true
     arg "[BASE]" help="Revision to compare against." default="origin/main"
+}
+cmd explain help="Show which functions an instruction-count change came from." {
+    long_help #"""
+Show which functions an instruction-count change came from.
+
+Reads two sets of profiles written by `tak run --profile-dir`, pairs them by benchmark and subject, and prints the functions whose counts changed most as markdown. Reports only; it never fails on the numbers.
+"""#
+    flag --top help="Functions to list for each benchmark." default="10" {
+        arg <N>
+    }
+    flag "-h --help" help="Print help" action=help builtin=#true
+    arg <BASE> help="Base profiles: a directory written by `tak run --profile-dir`, or one profile file."
+    arg <HEAD> help="Head profiles, in the same form as the base."
 }
 cmd detect help="Find instruction-count steps that already landed on a branch." {
     long_help #"""
@@ -228,7 +244,7 @@ config {
         example "TAK_GATE_PCT=5 tak compare origin/main"
         source "config" "gate.pct"
     }
-    prop "accept_trailers" type="bool" default=#false since="0.0.14" help="Whether `tak compare` and `tak detect` honour `Tak-Accept:` trailers on the commits they compare." long_help="Whether `tak compare` and `tak detect` honour `Tak-Accept:` trailers on the commits they compare.\n\nOff by default, because of who writes those trailers. A trailer is part of a commit message, and the commits `tak compare` reads are the change being gated — on a pull request, the author's own. Honouring them by default would let any change waive its own gate by adding one line, which makes the gate advisory for exactly the changes it exists to stop. The acceptance would be visible in the report, but visible is not the same as approved.\n\nWith this off, trailers are ignored entirely; if the compared range carries any, the report says so in one line, so an author is not left wondering why theirs did nothing. `tak compare --accept BENCH` works either way, and is the recommended route in CI: pass it from a workflow step driven by something only maintainers can do, such as applying a pull-request label.\n\nTurn it on where every commit in the compared range has already been reviewed by the time the result matters, or where everyone who can push is trusted to waive the gate — a solo project, or comparisons along an already-reviewed main branch.\n\n`tak.toml` is read from the checkout being measured, so a pull request can change this key just as it can change `gate.pct`. Where the gate is enforced against changes you do not trust, set `TAK_ACCEPT_TRAILERS=0` in the workflow: the environment takes precedence over the file." {
+    prop "accept_trailers" type="bool" default=#false since="0.0.14" help="Whether `tak compare` and `tak detect` honour `Tak-Accept:` trailers on the commits they compare." long_help="Whether `tak compare` and `tak detect` honour `Tak-Accept:` trailers on the commits they compare.\n\nOff by default, because of who writes those trailers. A trailer is part of a commit message, and the commits `tak compare` reads are the change being gated — on a pull request, the author's own. Honouring them by default would let any change waive its own gate by adding one line, which makes the gate advisory for exactly the changes it exists to stop. The acceptance would be visible in the report, but visible is not the same as approved.\n\nWith this off, trailers are ignored entirely; if the compared range carries any, the report says so in one line, so an author is not left wondering why theirs did nothing. `tak compare --accept BENCH` works either way, and is the recommended route in CI: pass it from a workflow step driven by something only maintainers can do, such as applying a pull-request label.\n\nTurn it on where every commit in the compared range has already been reviewed by the time the result matters, or where everyone who can push is trusted to waive the gate — a solo project, or comparisons along an already-reviewed main branch.\n\n`tak compare` reads this key, like the rest of its gate, from the base revision's `tak.toml` rather than the checkout being measured, so a pull request cannot turn trailers on for itself; turning them on takes effect once that change is merged. `tak detect` reads the working tree's, which on a main-branch run is merged history. The environment takes precedence over either file." {
         env "TAK_ACCEPT_TRAILERS"
         example "TAK_ACCEPT_TRAILERS=1 tak compare origin/main"
         source "config" "gate.accept_trailers"
