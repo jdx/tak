@@ -265,6 +265,56 @@
             }
           },
           {
+            "name": "save-baseline",
+            "usage": "--save-baseline <NAME>",
+            "help": "Save the results as a named local baseline, kept in the git directory rather than in refs/notes/tak. Replaces what NAME held for the benchmarks measured and keeps the rest.",
+            "help_first_line": "Save the results as a named local baseline, kept in the git directory rather than in refs/notes/tak. Replaces what NAME held for the benchmarks measured and keeps the rest.",
+            "short": [],
+            "long": [
+              "save-baseline"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "NAME",
+              "usage": "<NAME>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "baseline",
+            "usage": "--baseline <NAME>",
+            "help": "Compare the results against a saved local baseline and print the report `tak compare` prints. Reports only; add --gate to fail on a regression.",
+            "help_first_line": "Compare the results against a saved local baseline and print the report `tak compare` prints. Reports only; add --gate to fail on a regression.",
+            "short": [],
+            "long": [
+              "baseline"
+            ],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "NAME",
+              "usage": "<NAME>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "gate",
+            "usage": "--gate",
+            "help": "With --baseline, fail when an instruction count rose beyond its gate — the one `tak compare` would apply — or when a gated benchmark could not be compared.",
+            "help_first_line": "With --baseline, fail when an instruction count rose beyond its gate — the one `tak compare` would apply — or when a gated benchmark could not be compared.",
+            "short": [],
+            "long": [
+              "gate"
+            ],
+            "hide": false,
+            "global": false
+          },
+          {
             "name": "help",
             "usage": "-h --help",
             "help": "Print help",
