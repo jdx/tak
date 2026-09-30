@@ -54,6 +54,7 @@ fn echo() -> tak_cli::config::Subject {
         counters: true,
         allocations: false,
         ok_exit_codes: vec![0],
+        metrics: std::collections::BTreeMap::new(),
     }
 }
 

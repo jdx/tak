@@ -875,6 +875,61 @@ fn a_report_only_failed_check_is_flagged_not_failed() {
     );
 }
 
+/// A failed metric stops a baseline being saved as it stops `--record`: a
+/// baseline missing a declared metric would be compared against as if the
+/// metric had been removed. An existing baseline of that name is left alone.
+#[test]
+fn a_failing_metric_saves_no_baseline() {
+    let repo = Repo::new();
+    std::fs::write(
+        repo.dir.join("tak.toml"),
+        "[bench.startup]\ncmd = \"true\"\n[bench.startup.metric.binary_bytes]\nfile = \"bin\"\n",
+    )
+    .unwrap();
+    std::fs::write(repo.dir.join("bin"), vec![0u8; 100]).unwrap();
+    ok(&tak_run(&repo.dir, &[NC, "--save-baseline", "before"], &[]));
+    let saved = std::fs::read_to_string(repo.baseline_file("before")).unwrap();
+    assert!(saved.contains(r#""binary_bytes":100.0"#), "{saved}");
+
+    std::fs::remove_file(repo.dir.join("bin")).unwrap();
+    let err = fail(&tak_run(&repo.dir, &[NC, "--save-baseline", "before"], &[]));
+    assert!(
+        err.contains("not saving baseline `before`: a run missing a declared metric"),
+        "{err}"
+    );
+    assert!(err.contains("1 metric(s) failed"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(repo.baseline_file("before")).unwrap(),
+        saved,
+        "the earlier baseline was replaced"
+    );
+    let err = fail(&tak_run(&repo.dir, &[NC, "--save-baseline", "after"], &[]));
+    assert!(err.contains("not saving baseline `after`"), "{err}");
+    assert!(!repo.baseline_file("after").exists());
+    assert_no_notes(&repo.dir);
+}
+
+/// A baseline report shares `compare`'s renderer, custom-metrics table
+/// included.
+#[test]
+fn a_baseline_report_shows_custom_metrics() {
+    let repo = Repo::new();
+    std::fs::write(
+        repo.dir.join("tak.toml"),
+        "[bench.startup]\ncmd = \"true\"\n[bench.startup.metric.binary_bytes]\nfile = \"bin\"\n",
+    )
+    .unwrap();
+    std::fs::write(repo.dir.join("bin"), vec![0u8; 1000]).unwrap();
+    ok(&tak_run(&repo.dir, &[NC, "--save-baseline", "before"], &[]));
+    std::fs::write(repo.dir.join("bin"), vec![0u8; 1500]).unwrap();
+    let out = tak_run(&repo.dir, &[NC, "--baseline", "before"], &[]);
+    let report = stdout(ok(&out));
+    assert!(
+        report.contains("| startup | binary_bytes | 1,000 → 1,500 | +50.00% |"),
+        "{report}"
+    );
+}
+
 /// Report-only benchmarks never fail `--gate`, including when none of them
 /// has an instruction count to compare. The run passes and says nothing was
 /// gated, rather than failing for want of a count it was never going to gate.

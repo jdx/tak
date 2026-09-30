@@ -44,6 +44,7 @@ dir = "."
 env = { A = "1" }
 vars = { v = "x" }
 allocations = false
+metric.binary_bytes.file = "target/release/x"
 
 [subject.shared]
 cmd = ["true"]
@@ -64,6 +65,7 @@ dir = "."
 env = { B = "2" }
 vars = { w = "y" }
 allocations = true
+metric.bundle_kb.cmd = ["true"]
 
 [bench.single]
 cmd = "true"
@@ -83,6 +85,7 @@ dir = "."
 env = { C = "3" }
 vars = { u = "z" }
 allocations = true
+metric.lines_count.cmd = "true"
 
 [bench.multi]
 subjects = ["shared"]
@@ -151,6 +154,11 @@ fn the_schema_and_the_parser_agree_on_every_key() {
     let mut bench = keys(&table(&t["bench"]["single"]));
     bench.extend(keys(&table(&t["bench"]["multi"])));
     assert_eq!(bench, props(&s, "/definitions/bench"), "[bench.NAME]");
+
+    // A metric table's keys, between the ones above.
+    let mut metric = keys(&table(&t["defaults"]["metric"]["binary_bytes"]));
+    metric.extend(keys(&table(&t["subject"]["shared"]["metric"]["bundle_kb"])));
+    assert_eq!(metric, props(&s, "/definitions/metric"), "[*.metric.NAME]");
     assert_eq!(
         keys(&table(&t["bench"]["single"]["gate"])),
         props(&s, "/definitions/gate"),

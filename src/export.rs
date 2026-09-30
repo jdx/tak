@@ -8,11 +8,13 @@
 //! holds several benchmarks. `user` and `system` are omitted because tak does
 //! not measure CPU time. Everything tak adds is an extra key, and none of
 //! hyperfine's changes meaning: `checks` is present only for a subject with a
-//! `check`, `version` only for one with a `version_cmd`, and `allocations`
-//! only for one whose heap allocations were counted.
+//! `check`, `version` only for one with a `version_cmd`, `allocations` only
+//! for one whose heap allocations were counted, and `metrics` only for one
+//! with custom metrics.
 
 use anyhow::{Context, Result};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 #[derive(Debug, Serialize)]
@@ -70,6 +72,12 @@ pub struct ExportResult {
     /// The outcome of the subject's `check`, when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checks: Option<Checks>,
+    /// The subject's custom metrics by name, each `null` when it could not
+    /// be taken. Absent for a subject that declares none, so the hyperfine
+    /// shape is unchanged for everyone else. A BTreeMap so the keys come
+    /// out in the same order every run.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub metrics: BTreeMap<String, Option<f64>>,
     /// Heap allocations DHAT counted, when the subject asked for them and
     /// valgrind was there to count them.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -151,6 +159,7 @@ impl ExportResult {
             times,
             checks: None,
             allocations: None,
+            metrics: BTreeMap::new(),
         }
     }
 
@@ -247,6 +256,23 @@ mod tests {
         assert_eq!(
             Allocations::from_metrics(&BTreeMap::from([("alloc_blocks".to_string(), 1.0)])),
             None
+        );
+    }
+
+    /// Custom metrics appear only for a subject that declares some, and a
+    /// failed one is `null` rather than missing, so a reader can tell "not
+    /// declared" from "declared and broken".
+    #[test]
+    fn metrics_are_exported_only_when_declared() {
+        let mut r = ExportResult::new("b", "s", "s", &[5.0]);
+        assert!(serde_json::to_value(&r).unwrap().get("metrics").is_none());
+        r.metrics = BTreeMap::from([
+            ("binary_bytes".to_string(), Some(1234.0)),
+            ("bundle_kb".to_string(), None),
+        ]);
+        assert_eq!(
+            serde_json::to_value(&r).unwrap()["metrics"],
+            serde_json::json!({"binary_bytes": 1234.0, "bundle_kb": null})
         );
     }
 

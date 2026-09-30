@@ -600,6 +600,118 @@ fn a_program_symlinked_out_of_the_checkout_is_not_measured() {
     assert!(repo.notes(&linked).is_empty());
 }
 
+/// A declared metric that cannot be taken at a commit — its file does not
+/// exist there — keeps that commit from being recorded, as `tak run
+/// --record` refuses it, instead of storing the run with the metric absent.
+/// A commit where it can be taken records it.
+#[test]
+fn a_commit_missing_a_metric_records_nothing() {
+    let repo = Repo::new();
+    config(
+        &repo,
+        "[bench.startup.metric.data_bytes]\nfile = \"data.bin\"\n",
+    );
+    repo.write(".gitignore", "tool\ntak.toml\n");
+    repo.git(&["add", ".gitignore"]);
+    let base = repo.commit_tool(Some("v1"));
+    let without = repo.commit_tool(Some("v2"));
+    repo.write("data.bin", "12345");
+    repo.git(&["add", "data.bin"]);
+    let with = repo.commit_tool(Some("v3"));
+
+    let out = repo.tak(&["--commits", &format!("{base}..main")]);
+    assert!(out.status.success(), "{}", both(&out));
+    assert!(repo.notes(&without).is_empty(), "{}", both(&out));
+    assert!(
+        stdout(&out).contains("1 metric(s) failed: startup `data_bytes`"),
+        "{}",
+        both(&out)
+    );
+    let recorded = repo.notes(&with);
+    assert_eq!(recorded.len(), 1, "{}", both(&out));
+    assert_eq!(recorded[0].metrics["data_bytes"], 5.0);
+}
+
+/// A failed metric at the newest commit is remembered as a failed
+/// measurement, like any other, so `--limit 1` reaches the next commit on
+/// the next run instead of rebuilding the same one forever.
+#[test]
+fn a_failed_metric_is_passed_over_next_time() {
+    let repo = Repo::new();
+    config(
+        &repo,
+        "[bench.startup.metric.data_bytes]\nfile = \"data.bin\"\n",
+    );
+    repo.write(".gitignore", "tool\ntak.toml\n");
+    repo.git(&["add", ".gitignore"]);
+    let v1 = repo.commit_tool(Some("v1"));
+    repo.write("data.bin", "123");
+    repo.git(&["add", "data.bin"]);
+    let v2 = repo.commit_tool(Some("v2"));
+    repo.git(&["rm", "-q", "data.bin"]);
+    let missing = repo.commit_tool(Some("v3"));
+    let range = format!("{v1}..main");
+
+    let first = repo.tak(&["--commits", &range, "--limit", "1"]);
+    assert!(
+        !first.status.success(),
+        "nothing recorded: {}",
+        both(&first)
+    );
+    assert!(
+        stdout(&first).contains("1 metric(s) failed: startup `data_bytes`"),
+        "{}",
+        stdout(&first)
+    );
+    assert!(
+        stdout(&first).contains(&format!("measurement failed: {}", &missing[..12])),
+        "{}",
+        stdout(&first)
+    );
+    assert!(repo.notes(&missing).is_empty());
+    assert_eq!(repo.builds(), 1);
+
+    let second = repo.tak(&["--commits", &range, "--limit", "1"]);
+    assert!(second.status.success(), "{}", both(&second));
+    assert_eq!(repo.builds(), 2, "one more build, not a retry of the same");
+    let recorded = repo.notes(&v2);
+    assert_eq!(
+        recorded.len(),
+        1,
+        "the next commit was reached: {}",
+        both(&second)
+    );
+    assert_eq!(recorded[0].metrics["data_bytes"], 3.0);
+    assert!(repo.notes(&missing).is_empty());
+}
+
+/// A metric's file symlinked out of the checkout would record the live
+/// tree's file at every commit, so that commit is not measured.
+#[test]
+fn a_metric_file_symlinked_out_of_the_checkout_is_not_measured() {
+    let repo = Repo::new();
+    config(
+        &repo,
+        "[bench.startup.metric.data_bytes]\nfile = \"data.bin\"\n",
+    );
+    repo.write(".gitignore", "tool\ntak.toml\n");
+    repo.git(&["add", ".gitignore"]);
+    let base = repo.commit_tool(Some("v1"));
+    let outside = repo.tmp.parent().unwrap().join("outside-data");
+    std::fs::write(&outside, "outside").unwrap();
+    std::os::unix::fs::symlink(&outside, repo.dir.join("data.bin")).unwrap();
+    repo.git(&["add", "data.bin"]);
+    let linked = repo.commit_tool(Some("v2"));
+
+    let out = repo.tak(&["--commits", &format!("{base}..main")]);
+    assert!(
+        stdout(&out).contains("data.bin leads outside the checkout"),
+        "{}",
+        both(&out)
+    );
+    assert!(repo.notes(&linked).is_empty());
+}
+
 /// A commit dated before 1970 is recorded with its own date, and does not
 /// stop the rest of the range.
 #[test]
@@ -1241,4 +1353,84 @@ fn a_build_program_symlinked_out_of_the_checkout_is_refused() {
             .exists()
     );
     assert!(repo.notes(&linked).is_empty());
+}
+
+/// A two-commit history whose newest tree has a `wx` directory, and a
+/// directory outside the repository for a symlink to point at.
+fn history_with_wx(repo: &Repo) -> PathBuf {
+    repo.write(".gitignore", "tool\ntak.toml\n");
+    repo.write("wx/keep", "");
+    repo.write("wy/keep", "");
+    repo.git(&["add", ".gitignore", "wx", "wy"]);
+    repo.commit_tool(Some("v1"));
+    repo.commit_tool(Some("v2"));
+    let outside = repo.tmp.parent().unwrap().join("outside-dir");
+    std::fs::create_dir_all(&outside).unwrap();
+    outside
+}
+
+/// A sample can swap its own `dir` for a symlink, and the next sample's
+/// `prepare` runs there before the sample does. The check runs before that
+/// prepare too, not only after it.
+#[test]
+fn a_prepare_does_not_run_through_a_dir_the_last_sample_moved() {
+    let repo = Repo::new();
+    let outside = history_with_wx(&repo);
+    // The path goes in as `$1`, not spliced into the script, so a TMPDIR
+    // with spaces cannot split it; `{:?}` quotes it for TOML.
+    repo.write(
+        "tak.toml",
+        &format!(
+            "[build]\ncmd = [\"true\"]\n\
+             [bench.fixture]\n\
+             cmd = [\"sh\", \"-c\", \"d=$PWD && cd / && rm -rf \\\"$d\\\" && ln -s \\\"$1\\\" \\\"$d\\\"\", \"sh\", {:?}]\n\
+             dir = \"wx\"\nprepare = [\"sh\", \"-c\", \"touch prepared\"]\nruns = 2\nwarmup = 0\n",
+            outside.display().to_string()
+        ),
+    );
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let out = repo.tak(&["--commits", "HEAD~1..HEAD"]);
+    assert!(
+        both(&out).contains("wx leads outside the checkout"),
+        "{}",
+        both(&out)
+    );
+    assert!(
+        !outside.join("prepared").exists(),
+        "the second prepare ran outside the checkout"
+    );
+    assert!(repo.notes(&head).is_empty(), "the commit was recorded");
+}
+
+/// Every subject's setup runs before any sample, so an earlier setup can
+/// move a path a later one acts through. Each setup is checked before it
+/// runs, not only once all of them have.
+#[test]
+fn a_setup_does_not_run_through_a_dir_an_earlier_setup_moved() {
+    let repo = Repo::new();
+    let outside = history_with_wx(&repo);
+    repo.write(
+        "tak.toml",
+        &format!(
+            "[build]\ncmd = [\"true\"]\n\
+             [bench.cmp]\nruns = 1\nwarmup = 0\n\
+             [bench.cmp.subject.x]\ncmd = [\"true\"]\n\
+             setup = [\"sh\", \"-c\", \"rm -rf wy && ln -s \\\"$1\\\" wy\", \"sh\", {:?}]\n\
+             [bench.cmp.subject.y]\ncmd = [\"true\"]\ndir = \"wy\"\n\
+             setup = [\"sh\", \"-c\", \"touch wy/set-up\"]\n",
+            outside.display().to_string()
+        ),
+    );
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let out = repo.tak(&["--commits", "HEAD~1..HEAD"]);
+    assert!(
+        both(&out).contains("wy leads outside the checkout"),
+        "{}",
+        both(&out)
+    );
+    assert!(
+        !outside.join("set-up").exists(),
+        "y's setup ran through the moved directory"
+    );
+    assert!(repo.notes(&head).is_empty(), "the commit was recorded");
 }

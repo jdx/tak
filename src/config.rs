@@ -184,6 +184,91 @@ struct Layer {
     /// competitor's upgrade for it to fail, and a single-command benchmark
     /// needs a way to turn it on.
     allocations: Option<bool>,
+    /// Numbers recorded beside the timings, by name: a file's size, or what
+    /// a command prints. Merged by name across layers, like `env`, with a
+    /// more specific layer's metric replacing a same-named one outright.
+    #[serde(default)]
+    metric: BTreeMap<String, MetricDecl>,
+}
+
+/// A custom metric as written: exactly one of `file` or `cmd`.
+///
+/// Two fields on one table rather than a tagged enum, so the error for a
+/// table with both or neither can name the metric and say what is wrong,
+/// instead of serde's "data did not match any variant".
+///
+/// Unknown keys are refused, unlike in the tables around it: with only two
+/// keys to spell, a typo such as `fiel = "new.bin"` next to an old `file`
+/// would otherwise go on recording the old file's size without a word.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetricDecl {
+    /// A path, relative to `tak.toml`, whose size in bytes is the value.
+    file: Option<String>,
+    /// A command that prints the value on stdout.
+    cmd: Option<Cmd>,
+}
+
+impl MetricDecl {
+    fn resolve(&self) -> Result<MetricSource> {
+        match (&self.file, &self.cmd) {
+            (Some(_), Some(_)) => bail!("sets both `file` and `cmd`; use one or the other"),
+            (None, None) => bail!("needs `file` or `cmd`"),
+            (Some(f), None) if f.trim().is_empty() => bail!("`file` is empty"),
+            (Some(f), None) => Ok(MetricSource::File(PathBuf::from(f))),
+            (None, Some(c)) => Ok(MetricSource::Cmd(c.argv().context("cmd")?)),
+        }
+    }
+}
+
+/// Where a custom metric's value comes from, resolved.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MetricSource {
+    /// The size of this file in bytes. Relative to `tak.toml` until
+    /// [`Subject::anchor`] makes it absolute; never relative to `dir`.
+    File(PathBuf),
+    /// Run once, untimed, after the subject's samples, in its `dir` and
+    /// `env`; see [`crate::measure::custom_metric`].
+    Cmd(Vec<String>),
+}
+
+/// The longest name a custom metric may have. Room for a descriptive name
+/// with its unit on the end, and short enough to fit a report's table.
+const METRIC_NAME_MAX: usize = 64;
+
+/// Check a custom metric's name.
+///
+/// Lowercase ASCII, digits and `_`, starting with a letter. Names are keys in
+/// every record and are matched byte for byte across commits, so `Bundle_KB`
+/// and `bundle_kb` would silently be two series; one spelling per name rules
+/// that out. The charset also keeps a name usable unquoted as a TOML key, a
+/// JSON key and a jq path. Built-in names are refused because a declared
+/// metric shares the record's one map with them: an `instructions` printed by
+/// a script would replace the counted one, and the gate would read it.
+fn metric_name(name: &str) -> Result<()> {
+    // The charset below already excludes control characters. This check runs
+    // first anyway, so a newline in a metric name gets the same explanation
+    // as one in a benchmark name.
+    crate::record::check_name("metric", name)?;
+    let mut chars = name.chars();
+    let well_formed = chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !well_formed {
+        bail!(
+            "metric name {name:?} must start with a lowercase letter and use only a-z, 0-9 and _, \
+             such as `binary_bytes`"
+        );
+    }
+    if name.len() > METRIC_NAME_MAX {
+        bail!("metric name `{name}` is longer than {METRIC_NAME_MAX} characters");
+    }
+    if crate::record::is_builtin_metric(name) {
+        bail!(
+            "metric name `{name}` is reserved for what tak measures itself \
+             (`instructions`, and anything starting `wall_` or `alloc_`)"
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -465,6 +550,9 @@ pub struct Subject {
     /// Never empty. A death by signal fails whatever this holds, and
     /// `setup` and `prepare` are always held to exit 0.
     pub ok_exit_codes: Vec<i32>,
+    /// Custom metrics by name, recorded beside the timings. Empty unless a
+    /// layer declares some.
+    pub metrics: BTreeMap<String, MetricSource>,
 }
 
 impl Subject {
@@ -504,6 +592,17 @@ impl Subject {
         }
         if let Some(version) = &mut self.version_cmd {
             program(version);
+        }
+        // A metric's file is found from `tak.toml` like a program path, not
+        // from `dir`: the binary a startup benchmark runs from a fixture
+        // directory is still the one under `target/`. Unlike a program, a
+        // bare name is a path too, since there is no PATH to look it up on.
+        for source in self.metrics.values_mut() {
+            match source {
+                MetricSource::File(p) if p.is_relative() => *p = root.join(&*p),
+                MetricSource::File(_) => {}
+                MetricSource::Cmd(argv) => program(argv),
+            }
         }
         self.dir = Some(match &self.dir {
             Some(d) => root.join(d),
@@ -703,6 +802,14 @@ impl Config {
             for (k, v) in &l.vars {
                 out.push((format!("{at}.vars.{k}"), v));
             }
+            for (k, m) in &l.metric {
+                if let Some(f) = &m.file {
+                    out.push((format!("{at}.metric.{k}.file"), f));
+                }
+                if let Some(c) = &m.cmd {
+                    cmd(out, &format!("{at}.metric.{k}.cmd"), c);
+                }
+            }
         }
         fn cmd<'a>(out: &mut Vec<(String, &'a str)>, at: &str, c: &'a Cmd) {
             match c {
@@ -814,6 +921,22 @@ fn resolve(
         ok_exit_codes: match last(layers, |l| l.ok_exit_codes.as_ref()) {
             Some(codes) => ok_exit_codes(codes)?,
             None => DEFAULT_OK_EXIT_CODES.to_vec(),
+        },
+        metrics: {
+            // By name, a later layer's table replacing an earlier one's
+            // whole: a subject switching `binary_bytes` from `file` to `cmd`
+            // must not end up with both.
+            let mut decls: BTreeMap<&String, &MetricDecl> = BTreeMap::new();
+            for l in layers {
+                decls.extend(&l.metric);
+            }
+            decls
+                .into_iter()
+                .map(|(name, decl)| {
+                    let source = decl.resolve().with_context(|| format!("metric `{name}`"))?;
+                    Ok((name.clone(), source))
+                })
+                .collect::<Result<_>>()?
         },
     })
 }
@@ -928,6 +1051,12 @@ impl Config {
         for (place, l) in cfg.layers() {
             if let Some(codes) = &l.ok_exit_codes {
                 ok_exit_codes(codes).with_context(|| format!("in {place}"))?;
+            }
+            // And every metric, for the same reason.
+            for (name, decl) in &l.metric {
+                metric_name(name)
+                    .and_then(|()| decl.resolve().map(drop))
+                    .with_context(|| format!("in {place}.metric.{name}"))?;
             }
         }
         // Every gate, including a shared subject's that no benchmark lists
@@ -1795,6 +1924,182 @@ cmd = "mycli 'two words'""#,
             msg.contains("subject.spare") && msg.contains("4294967296"),
             "{msg}"
         );
+    }
+
+    /// Metrics merge by name across layers, like `env`: each layer can add
+    /// one, and a more specific layer's table replaces a same-named one whole.
+    #[test]
+    fn metrics_merge_by_name_and_replace_whole() {
+        let c = Config::parse(
+            r#"
+            [defaults.metric.binary_bytes]
+            file = "target/release/{{ subject }}"
+
+            [subject.mine]
+            cmd = ["./mine"]
+            [subject.mine.metric.bundle_kb]
+            cmd = "node size.js"
+
+            [subject.other]
+            cmd = ["other"]
+            [subject.other.metric.binary_bytes]
+            cmd = ["./size-of", "other"]
+
+            [bench.plain]
+            cmd = "x"
+
+            [bench.cmp]
+            subjects = ["mine", "other"]
+            [bench.cmp.metric.lines_count]
+            cmd = ["wc-ish"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            only(&c, "plain").metrics,
+            BTreeMap::from([(
+                "binary_bytes".to_string(),
+                MetricSource::File("target/release/{{ subject }}".into())
+            )])
+        );
+        let cmp = c.subjects("cmp").unwrap();
+        assert_eq!(
+            cmp[0].metrics.keys().collect::<Vec<_>>(),
+            ["binary_bytes", "bundle_kb", "lines_count"],
+            "defaults, bench and subject all add"
+        );
+        assert_eq!(
+            cmp[0].metrics["bundle_kb"],
+            MetricSource::Cmd(vec!["node".into(), "size.js".into()])
+        );
+        assert_eq!(
+            cmp[1].metrics["binary_bytes"],
+            MetricSource::Cmd(vec!["./size-of".into(), "other".into()]),
+            "replaced whole: a cmd, and no file left over"
+        );
+        assert!(
+            Config::parse("[bench.a]\ncmd = \"x\"")
+                .unwrap()
+                .subjects("a")
+                .unwrap()[0]
+                .metrics
+                .is_empty()
+        );
+    }
+
+    /// A metric's file is found from tak.toml whatever `dir` says, and its
+    /// command like any other program.
+    #[test]
+    fn metric_paths_are_anchored_at_the_config() {
+        let mut s = Config::parse(
+            r#"
+            [bench.a]
+            cmd = "x"
+            dir = "fixture"
+            metric.rel_bytes.file = "target/mine"
+            metric.abs_bytes.file = "/usr/bin/env"
+            metric.script_count.cmd = ["./count.sh", "./arg"]
+            metric.bare_count.cmd = "jq length out.json"
+            "#,
+        )
+        .unwrap()
+        .subjects("a")
+        .unwrap()
+        .remove(0);
+        s.anchor(Path::new("/repo"));
+        assert_eq!(
+            s.metrics["rel_bytes"],
+            MetricSource::File("/repo/target/mine".into())
+        );
+        assert_eq!(
+            s.metrics["abs_bytes"],
+            MetricSource::File("/usr/bin/env".into())
+        );
+        assert_eq!(
+            s.metrics["script_count"],
+            MetricSource::Cmd(vec!["/repo/./count.sh".into(), "./arg".into()])
+        );
+        assert_eq!(
+            s.metrics["bare_count"],
+            MetricSource::Cmd(vec!["jq".into(), "length".into(), "out.json".into()])
+        );
+    }
+
+    #[test]
+    fn metric_names_are_checked_at_parse_time() {
+        for good in ["binary_bytes", "a", "p99_ms", "x2"] {
+            metric_name(good).unwrap_or_else(|e| panic!("{good}: {e:#}"));
+        }
+        for bad in [
+            "",
+            "Binary_bytes",
+            "binary-bytes",
+            "binary.bytes",
+            "2x",
+            "_x",
+            "größe",
+            "instructions",
+            "wall_min_ms",
+            "wall_custom",
+        ] {
+            assert!(metric_name(bad).is_err(), "accepted {bad:?}");
+        }
+        assert!(metric_name(&"a".repeat(METRIC_NAME_MAX)).is_ok());
+        assert!(metric_name(&"a".repeat(METRIC_NAME_MAX + 1)).is_err());
+        // A control character gets the explanation every recorded name gets.
+        let err = format!("{:#}", metric_name("size\nbytes").unwrap_err());
+        assert!(err.contains("control character"), "{err}");
+        let err = Config::parse(
+            "[bench.a]\ncmd = \"x\"\n[bench.a.metric.\"size\\nbytes\"]\nfile = \"a\"",
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("control character"), "{err:#}");
+
+        let err = Config::parse(
+            "[bench.a]\ncmd = \"x\"\n[bench.a.metric.instructions]\ncmd = \"echo 1\"",
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("bench.a.metric.instructions") && msg.contains("reserved"),
+            "{msg}"
+        );
+
+        // DHAT's counts share the record's map too: a script printing
+        // `alloc_bytes` would overwrite the counted one.
+        let err = format!("{:#}", metric_name("alloc_bytes").unwrap_err());
+        assert!(err.contains("reserved") && err.contains("alloc_"), "{err}");
+    }
+
+    /// Both, neither, or an empty one is a mistake, caught before anything
+    /// runs — including in a layer nothing uses yet.
+    #[test]
+    fn a_metric_needs_exactly_one_source() {
+        for (bad, why) in [
+            ("file = \"a\"\ncmd = \"b\"", "both"),
+            ("", "needs `file` or `cmd`"),
+            ("file = \"\"", "empty"),
+            ("cmd = []", "empty command"),
+            ("cmd = [\"{{ env.X \"]", "template"),
+        ] {
+            let toml = format!("[bench.a]\ncmd = \"x\"\n[bench.a.metric.size_bytes]\n{bad}");
+            let err = Config::parse(&toml).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains(why) && msg.contains("size_bytes"),
+                "{bad}: {msg}"
+            );
+        }
+        // A misspelt key is an error, not ignored beside the one it meant.
+        let err = Config::parse(
+            "[bench.a]\ncmd = \"x\"\n[bench.a.metric.size_bytes]\nfile = \"old.bin\"\nfiel = \"new.bin\"",
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("fiel"), "{err:#}");
+
+        let unused = "[subject.spare]\ncmd = \"y\"\n[subject.spare.metric.Bad]\nfile = \"a\"\n[bench.a]\ncmd = \"x\"";
+        let err = Config::parse(unused).unwrap_err();
+        assert!(format!("{err:#}").contains("subject.spare"), "{err:#}");
     }
 
     #[test]

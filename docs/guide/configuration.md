@@ -333,6 +333,92 @@ after `--`.
 - Valgrind measures the process it starts, not the programs that process runs. For
   `["sh", "-c", "…"]`, it counts the shell's allocations.
 
+## Recording other metrics
+
+Some changes show up in a number that no timing captures: a binary's size, a bundle's size, a
+count from a tool's own output. A benchmark can record such numbers beside its timings:
+
+```toml
+[bench.startup]
+cmd = ["./mycli", "--version"]
+runs = 10
+
+# The size of a file, in bytes.
+[bench.startup.metric.binary_bytes]
+file = "mycli"
+
+# The one number a command prints.
+[bench.startup.metric.help_lines_count]
+cmd = ["sh", "-c", "./mycli --help | wc -l"]
+```
+
+A single-command benchmark lists them with the timings, in name order, and a multi-subject
+benchmark adds them to the end of each subject's summary line. With GNU `ls` copied to
+`mycli`:
+
+```text
+  startup  …/mycli --version
+  binary_bytes             142312
+  help_lines_count            138
+  wall_max_ms                3.06
+  …
+```
+
+- **`file`** is a path relative to `tak.toml`, not to `dir`, like a program path. Its size in
+  bytes is the value. It must be a regular file (a symlink to one is followed); a directory
+  is an error.
+- **`cmd`** runs like `check`: in the subject's `dir` and `env`, with the same variables
+  removed, and no implicit shell. It must exit 0 and print exactly one non-negative number
+  on stdout, such as `1234`, `12.5` or `1.2e6`. Surrounding whitespace is ignored. A sign,
+  `inf`, a unit, a thousands separator, a second number or any other text is an error rather
+  than something tak tries to pick a number out of. A command that prints more than 1 KiB is
+  stopped as soon as it does. So is anything it leaves running in the background with its
+  stdout still open, and the metric is an error, since more output could still arrive.
+  stderr is ignored unless the command fails, when tak reports its last line.
+- **Each metric is taken once**, after the subject's samples and its instruction and
+  allocation counts, and isn't part of any of them. `setup` or the samples can create what it measures. `--dry-run`
+  lists each metric without taking it.
+- **A metric that can't be taken fails the run.** A missing file or a command that exits
+  non-zero or prints something other than one number is reported on stderr. Every benchmark
+  is still measured and `--export-json` is still written, with that metric as `null`. Then tak
+  exits non-zero, recording or not, and neither `--record` nor `--save-baseline` writes anything:
+  a stored run with a declared metric missing would look like one where the metric had been
+  removed.
+- **Names** use lowercase letters, digits and `_`, start with a letter, and are at most 64
+  characters. `instructions` and anything starting with `wall_` or `alloc_` are reserved for
+  what tak measures itself. End the name with its unit, `_bytes`, `_kb`, `_count`, `_ms`, so a report
+  reader doesn't have to guess. tak doesn't enforce the suffix.
+- **Lower is taken as better.** Several records of one series on a commit reduce to their
+  minimum, as for every metric. Record a size or a count, not a score where higher is better.
+- **Custom metrics never gate.** `tak compare` reports them in a table of their own, after the
+  main one, and only when there are some. A file's size is deterministic for a given build,
+  but a command's output is not known to be.
+
+`metric` tables [layer](#sharing-settings-between-benchmarks) by name, like `env`: each layer
+can add metrics, and a more specific layer's table replaces a same-named one entirely. `file`
+and `cmd` are [templates](#templates), so a single table in `[defaults]` can cover every
+subject:
+
+::: v-pre
+```toml
+[defaults.metric.binary_bytes]
+file = "bin/{{ subject }}"
+```
+:::
+
+`--record` stores each metric in the same record as the subject's timings, keyed by its name.
+`--export-json` adds a [`metrics`](#exported-results) object to the subject's result. This is
+`tak compare` between a commit where `mycli` was GNU `true` and one where it was `ls`:
+
+```text
+| benchmark | metric | value | Δ |
+|---|---|---:|---:|
+| startup | binary_bytes | 26,936 → 142,312 | +428.33% |
+| startup | help_lines_count | 14 → 138 | +885.71% |
+
+<sub>Metrics declared in tak.toml are reported, never gated. As for every metric, lower is taken as better.</sub>
+```
+
 ## Comparing several programs
 
 To compare programs against each other, declare them as subjects of one benchmark instead of
@@ -483,7 +569,7 @@ JavaScript and jq, and `runner` is the class `--record` would store the run unde
 A value tak can't read is `null` rather than an error. None of this is stored by `--record`:
 series are partitioned by `runner`, and a kernel update shouldn't split one.
 
-Each result has `bench` and `subject`. Three more keys appear only when the subject asks for them:
+Each result has `bench` and `subject`. These keys appear only when the subject asks for them:
 
 - `version`, for a subject with a [`version_cmd`](#recording-each-program-s-version): the first
   line it printed, or `null` if it failed.
@@ -492,6 +578,8 @@ Each result has `bench` and `subject`. Three more keys appear only when the subj
 - `allocations`, for a subject with [`allocations = true`](#counting-heap-allocations) when
   valgrind was there to count them: `{"blocks": 33, "bytes": 7649, "peak_bytes": 7336}`,
   the same minimums `--record` stores.
+- `metrics`, for a subject with [custom metrics](#recording-other-metrics): each one's value
+  by name, such as `{"binary_bytes": 142312.0}`, or `null` for one that could not be taken.
 
 `user` and `system` are absent because tak doesn't measure CPU time.
 
@@ -528,17 +616,18 @@ cmd = ["./target/release/mycli", "install", "--no-cache"]
 
 Settings stack from least to most specific: `[defaults]`, then the benchmark, then the
 shared `[subject.NAME]`, then the benchmark's own `[bench.B.subject.NAME]`. Each layer's
-setting replaces the one before, except `env` and `vars`, which merge key by key. `[defaults]`
-takes every benchmark setting (`runs`, `warmup`, `budget`, `min_runs`, `max_runs`,
-`ok_exit_codes`, `setup`, `prepare`, `check`, `version_cmd`, `dir`, `env`, `vars`,
-`allocations`). It is a
-separate table because `[env]` already holds `env.deny` and `env.allow`.
+setting replaces the one before, except `env`, `vars` and `metric`, which merge key by key.
+`[defaults]` takes every benchmark setting (`runs`, `warmup`, `budget`, `min_runs`,
+`max_runs`, `ok_exit_codes`, `setup`, `prepare`, `check`, `version_cmd`, `dir`, `env`, `vars`,
+`metric`, `allocations`). It is a separate table because `[env]` already holds `env.deny` and
+`env.allow`.
 
 ## Templates
 
 <!-- tera syntax looks like Vue interpolation; v-pre stops VitePress evaluating it. -->
 ::: v-pre
-Values in `cmd`, `setup`, `prepare`, `check`, `version_cmd`, `dir`, `env` and `vars` are
+Values in `cmd`, `setup`, `prepare`, `check`, `version_cmd`, `dir`, `env`, `vars` and a
+metric's `file` or `cmd` are
 [tera](https://keats.github.io/tera/) templates, the same syntax mise uses. tak renders them itself before anything runs, so a
 command can use a path that only exists at run time and still be a plain argument list,
 without a shell:
@@ -664,8 +753,9 @@ tak compare origin/main --gate-pct 2
 TAK_GATE_PCT=2 tak compare origin/main
 ```
 
-Only instruction counts are gated. Wall-clock changes are displayed but never fail the
-comparison. Use `tak compare --no-gate` when a report must not fail on the comparison; errors, such as an
+Only instruction counts are gated. Wall-clock changes and
+[custom metrics](#recording-other-metrics) are displayed but never fail the comparison. Use
+`tak compare --no-gate` when a report must not fail on the comparison; errors, such as an
 invalid `tak.toml`, still fail it. To let
 one benchmark regress on purpose while the others still gate, pass `--accept BENCH`; see
 [accepting an intentional regression](/guide/ci#accept-an-intentional-regression).

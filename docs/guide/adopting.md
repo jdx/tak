@@ -546,10 +546,12 @@ Build output goes to a file in the temporary directory, and a failed build shows
 lines. Every path inside the checkout that tak builds or runs with must resolve inside it once
 symlinks are followed. That covers `[build].dir` and the build's program, and a benchmark's
 `dir` and the programs of its `cmd`, `setup`, `prepare`, `check` and `version_cmd`. The old
-tree's own code runs during measurement, so they are checked again after every `setup` of a
-benchmark has run, before every sample (after its `prepare`), and before every `check`. A commit
-with a symlink at one of those paths that points elsewhere is reported and not recorded. The
-check before each sample is untimed and took about 17µs on a Linux host.
+tree's own code runs during measurement, and any step can change the paths the next one runs
+with, so they are checked again before each step that runs from the checkout. That means
+before each `setup` and again once every setup of the benchmark has run, before each
+`prepare` and again after it, before each `check`, and before each counted Valgrind run. A
+commit with a symlink at one of those paths that points elsewhere is reported and not
+recorded. The check is untimed and took about 17µs on a Linux host.
 
 The checkouts are removed when tak finishes, fails, or is stopped with Ctrl-C, SIGTERM or
 SIGHUP, and nothing is recorded or remembered for the commit that was in progress. On Unix,

@@ -206,6 +206,7 @@ fn a_subject_is_prepared_before_every_counted_run() {
         counters: true,
         allocations: false,
         ok_exit_codes: vec![0],
+        metrics: std::collections::BTreeMap::new(),
     };
     let c = measure::subject_instructions(&s, &Settings::default())
         .expect("cachegrind invocation failed")
@@ -254,6 +255,7 @@ fn ok_exit_codes_apply_under_valgrind() {
         counters: true,
         allocations: false,
         ok_exit_codes: ok,
+        metrics: std::collections::BTreeMap::new(),
     };
     let c = measure::subject_instructions(&subject(vec![0, 1]), &Settings::default())
         .expect("exit 1 is allowed")
@@ -289,6 +291,7 @@ fn allocating(cmd: &[&str]) -> tak_cli::config::Subject {
         warmup: 0,
         counters: false,
         allocations: true,
+        metrics: std::collections::BTreeMap::new(),
         ok_exit_codes: vec![0],
     }
 }
@@ -456,13 +459,14 @@ fn a_subject_cannot_reach_valgrinds_log() {
     );
 }
 
-/// `vet` is asked before every DHAT run, after that run's `prepare`, as it
-/// is before every counted cachegrind run: `backfill --commits` re-checks
-/// that a subject still runs from inside its checkout there. A refusal stops
-/// the measurement before valgrind starts the subject.
+/// `vet` is asked before each DHAT run's `prepare` and again after it,
+/// before valgrind starts, as for a counted cachegrind run: `backfill
+/// --commits` re-checks there that a subject still runs from inside its
+/// checkout, since the run before or the prepare itself may have changed its
+/// paths. A refusal stops the measurement before anything of it runs.
 #[cfg(unix)]
 #[test]
-fn allocation_runs_are_vetted_after_each_prepare() {
+fn allocation_runs_are_vetted_around_each_prepare() {
     if !valgrind_available() {
         eprintln!("skipping: valgrind not installed");
         return;
@@ -485,19 +489,18 @@ fn allocation_runs_are_vetted_after_each_prepare() {
     let a = measure::subject_allocations_vetted(&s, &Settings::default(), &vet)
         .expect("DHAT invocation failed")
         .expect("no DHAT summary parsed");
-    // Each vet sees its run's prepare and none of its run: 1, 3, 5 lines.
-    let expected: Vec<usize> = (0..a.runs as usize).map(|i| 2 * i + 1).collect();
+    // Run i starts with 2i lines logged: vetted there, then after its
+    // prepare adds one, and never after its run.
+    let expected: Vec<usize> = (0..a.runs as usize)
+        .flat_map(|i| [2 * i, 2 * i + 1])
+        .collect();
     assert_eq!(*vetted.borrow(), expected);
 
     std::fs::remove_file(&log).unwrap();
     let refuse = || anyhow::bail!("dir leads out of the checkout");
     let err = measure::subject_allocations_vetted(&s, &Settings::default(), &refuse).unwrap_err();
     assert!(format!("{err:#}").contains("leads out"), "{err:#}");
-    assert_eq!(
-        std::fs::read_to_string(&log).unwrap(),
-        "prep\n",
-        "never run"
-    );
+    assert!(!log.exists(), "neither the prepare nor the subject ran");
 }
 
 /// End to end: `--allocations` on an ad-hoc command prints the counts and
