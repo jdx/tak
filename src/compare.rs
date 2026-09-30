@@ -575,7 +575,7 @@ fn table(c: &Comparison, trend: &Trend, gates: &Gates) -> String {
     for (key, (ins, wall)) in &series {
         let (bench, tool, _runner) = key;
         let gate = gates.get(bench, tool);
-        let mut cells = vec![name(bench, tool)];
+        let mut cells = vec![cell(&name(bench, tool))];
         if any_trend {
             cells.push(
                 trend
@@ -791,6 +791,20 @@ pub(crate) fn code(text: &str) -> String {
     } else {
         format!("{fence}{text}{fence}")
     }
+}
+
+/// `text` made safe for one Markdown table cell: an unescaped `|` in a name
+/// from `tak.toml` or a note ends the cell early and shifts every column after
+/// it.
+///
+/// Backslashes first. GFM's row scanner reads `\\` as one escaped character,
+/// so a name's own `\|` escaped only for the pipe would become `\\|`, an
+/// escaped backslash and then a bare pipe that ends the cell anyway. Inside a
+/// code span the doubled backslashes are shown as written, since code spans
+/// process no escapes; that is the cost of keeping the row intact, and it only
+/// shows on a name that holds a backslash.
+pub(crate) fn cell(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('|', "\\|")
 }
 
 /// One line naming trailers that were ignored, so an author whose trailer did
@@ -1695,6 +1709,32 @@ mod tests {
         assert_ne!(code(" startup "), code("startup"));
         // A span of only spaces is not stripped, so it needs no padding.
         assert_eq!(code("  "), "`  `");
+    }
+
+    #[test]
+    fn a_cell_escapes_backslashes_before_pipes() {
+        assert_eq!(cell("startup"), "startup");
+        assert_eq!(cell("a|b"), r"a\|b");
+        // Pipe-only escaping would give `a\\|b`: an escaped backslash, then
+        // a bare pipe that still ends the cell.
+        assert_eq!(cell(r"a\|b"), r"a\\\|b");
+        assert_eq!(cell(r"a\b"), r"a\\b");
+    }
+
+    /// A name with a pipe in it stays in its own cell, so every row keeps the
+    /// header's column count — the baseline report renders through here too.
+    #[test]
+    fn a_pipe_in_a_name_does_not_split_the_row() {
+        let mut base = rec("a|b", "gha", 100.0, 1.0);
+        let mut head = rec("a|b", "gha", 101.0, 1.0);
+        base.tool = "x|y".into();
+        head.tool = "x|y".into();
+        let md = markdown(&compare(&[base], &[head]), &Trend::new(), &g(1.0), false);
+        assert!(md.contains(r"| a\|b (x\|y) |"), "{md}");
+        let columns = |l: &str| l.replace(r"\|", "").matches('|').count();
+        let rows: Vec<&str> = md.lines().filter(|l| l.starts_with('|')).collect();
+        assert_eq!(rows.len(), 3, "{md}");
+        assert!(rows.iter().all(|r| columns(r) == columns(rows[0])), "{md}");
     }
 
     /// Two runner classes of one accepted benchmark are two entries, and the
