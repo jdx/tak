@@ -204,19 +204,30 @@ jobs:
       # Deliberately not `continue-on-error`. That would hide a compare that
       # died for an unrelated reason behind a green check.
       #
-      # `--no-gate`, so the exit code means only "did the comparison run": a
-      # plain `tak compare` exits 1 for a regression and for an error alike,
-      # and here a rise is reported while an error must still fail. Whether
-      # counts rose comes from the report's own gate line instead. `--no-gate`
-      # also passes a comparison that found no series on both sides, so that
-      # is read from the report too, and fails like one that never ran. Status:
-      # 0 clean, 1 rose beyond the gate (reported), 2 the comparison failed.
+      # Classified from signals the pull request's text cannot reach, as
+      # jdx/tak-action does. The report echoes text from the pull request —
+      # benchmark names, `Tak-Accept` trailer values — so on its own the
+      # report is not evidence of anything; the exit status is, and so is the
+      # report's first line, which tak writes before any name. Status:
+      # 0 clean, 1 rose beyond the gate (reported, not failed), 2 the
+      # comparison failed or compared nothing.
       #
-      # Both verdict forms: `above the 1% gate` when every row is held to
-      # `[gate]`, `above their gate` when any row has its own — which a
-      # report-only benchmark always does. An accepted regression counts as a
-      # rise too, so an acceptance can only ever turn this check neutral,
-      # never green.
+      # - Exit 0: nothing gated rose. A report-only benchmark or an accepted
+      #   regression that rose is still worth a neutral check rather than a
+      #   green one, so an acceptance can only ever turn this check neutral.
+      # - Non-zero, and the first line says nothing was compared: 2. No
+      #   `--allow-empty`, so an empty comparison fails like one that never
+      #   ran.
+      # - Non-zero, with the gate's own verdict line: 1, a regression. For
+      #   tak itself that is reported, not failed; see the note at the top.
+      # - Anything else non-zero: 2, an error.
+      #
+      # Text patterns are anchored to the start of a line, where tak writes its
+      # verdicts. tak rejects control characters in names when tak.toml
+      # loads and escapes them in reports, so no echoed name can start a line;
+      # the exit status is what keeps even that from mattering. Both verdict
+      # forms match: `above the 1% gate` when every row is held to `[gate]`,
+      # `above their gate` when any row has its own.
       #
       # The gate policy comes from the merge base's tak.toml, which the fetch
       # above makes available, so a pull request cannot loosen it or set
@@ -230,17 +241,21 @@ jobs:
           TAK_ACCEPT_TRAILERS: "0"
         run: |
           set +e
-          ./target/release/tak compare --no-gate "$BASE_SHA" > /tmp/tak-report.md
+          ./target/release/tak compare "$BASE_SHA" > /tmp/tak-report.md
           ran=$?
           set -e
-          if [ "$ran" -ne 0 ]; then
+          if [ "$ran" -eq 0 ]; then
+            if grep -Eq '^\*\*[0-9]+ (report-only benchmark|accepted regression)\(s\) above (the .*% gate|their gate)' /tmp/tak-report.md; then
+              echo 1 > /tmp/tak-gate-status
+            else
+              echo 0 > /tmp/tak-gate-status
+            fi
+          elif head -n 1 /tmp/tak-report.md | grep -q '^\*\*Nothing was compared'; then
             echo 2 > /tmp/tak-gate-status
-          elif grep -Fq '**Nothing was compared' /tmp/tak-report.md; then
-            echo 2 > /tmp/tak-gate-status
-          elif grep -Eq '(benchmark|accepted regression)\(s\) above (the .*% gate|their gate)' /tmp/tak-report.md; then
+          elif grep -Eq '^\*\*[0-9]+ benchmark\(s\) above (the .*% gate|their gate)' /tmp/tak-report.md; then
             echo 1 > /tmp/tak-gate-status
           else
-            echo 0 > /tmp/tak-gate-status
+            echo 2 > /tmp/tak-gate-status
           fi
           cat /tmp/tak-report.md
           cat /tmp/tak-report.md >> "$GITHUB_STEP_SUMMARY"

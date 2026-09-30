@@ -35,6 +35,13 @@ warmup = 2
 `cmd` may be an argument list or a whitespace-split string. tak deliberately never starts a
 shell because shell startup would add work and variance to the subject.
 
+A benchmark or subject name can be any text except control characters, newlines included.
+Names are printed in reports that CI reads line by line, and a newline in a name could make
+part of it read as one of tak's verdicts. tak rejects such a name when `tak.toml` loads, before
+anything is measured. The same rule applies to `--bench` and the runner class. It also applies
+to `TAK_TOOL` where that becomes the recorded tool name: a single-command benchmark or
+`tak run -- CMD`.
+
 Command-line values override the file:
 
 ```sh
@@ -561,7 +568,8 @@ TAK_GATE_PCT=2 tak compare origin/main
 ```
 
 Only instruction counts are gated. Wall-clock changes are displayed but never fail the
-comparison. Use `tak compare --no-gate` when a report must always exit successfully. To let
+comparison. Use `tak compare --no-gate` when a report must not fail on the comparison; errors, such as an
+invalid `tak.toml`, still fail it. To let
 one benchmark regress on purpose while the others still gate, pass `--accept BENCH`; see
 [accepting an intentional regression](/guide/ci#accept-an-intentional-regression).
 
@@ -659,8 +667,8 @@ environment variables still override the base's file. `[report] credit` still co
 working tree.
 
 **A gate change takes effect once it is merged.** A pull request that loosens, tightens or adds
-a gate is compared under the base's gate, and the report opens with a line saying the change
-takes effect once it is merged. This is a change from tak 0.0.13 and earlier, which read
+a gate is compared under the base's gate, and the report adds a line below the verdict saying
+the change takes effect once it is merged. This is a change from tak 0.0.13 and earlier, which read
 `[gate]` from the working tree. To let a specific regression through on the pull request
 itself, use [`--accept BENCH`](/guide/ci#accept-an-intentional-regression) from the workflow
 rather than editing the gate.
@@ -668,7 +676,9 @@ rather than editing the gate.
 BASE's file is found by searching upward from the current directory through BASE's tree. With
 none there, every series is held to tak's defaults plus any flags and environment variables,
 never to the working tree's file, and the report says so. A BASE `tak.toml` that doesn't parse
-is an error: fix it on the base branch. The working tree's `tak.toml` has to parse as well. The
+is an error: fix it on the base branch. It is one of the errors `--no-gate` does not waive:
+`--no-gate` never fails on the comparison, but errors still fail. The working tree's `tak.toml`
+has to parse as well. The
 [CI guide](/guide/ci#where-the-gate-comes-from) covers the git objects this needs.
 
 A series in the notes whose benchmark `tak.toml` no longer declares is held to `[gate]`. A

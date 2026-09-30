@@ -210,10 +210,14 @@ impl Gates {
     /// request that only added a benchmark its gate takes effect later. A
     /// series that merely follows `[gate]` on both sides is covered by
     /// `[gate]` and not named again.
+    ///
+    /// Each entry is a code span, escaped by [`code`] like every other name in
+    /// the report: a benchmark name comes from the change under review, and one
+    /// holding a newline must not start a line of its own.
     pub fn changes_from(&self, base: &Gates, measured: &BTreeSet<(String, String)>) -> Vec<String> {
         let mut out = Vec::new();
         if self.global != base.global {
-            out.push("[gate]".to_string());
+            out.push(code("[gate]"));
         }
         let follows = |g: &Gates, gate: Gate| gate == g.global;
         let mut named = BTreeSet::new();
@@ -236,7 +240,7 @@ impl Gates {
                 named.insert(name(bench, tool));
             }
         }
-        out.extend(named);
+        out.extend(named.iter().map(|n| code(n)));
         out
     }
 }
@@ -263,6 +267,11 @@ pub struct Comparison {
     /// `Tak-Accept` trailers found in the range and deliberately not honoured,
     /// because `accept_trailers` is off. Kept only to say so in the report.
     pub ignored_trailers: Acceptances,
+    /// One Markdown line on where the gate came from, when that is worth
+    /// saying: the base had no `tak.toml`, or the head's would gate
+    /// differently. Rendered below the verdict rather than above it, because
+    /// scripts read the report's first line as its outcome.
+    pub gate_source: Option<String>,
 }
 
 impl Comparison {
@@ -394,6 +403,7 @@ pub fn compare(base: &[Record], head: &[Record]) -> Comparison {
         removed: base_keys.difference(&head_keys).cloned().collect(),
         accepted: Acceptances::default(),
         ignored_trailers: Acceptances::default(),
+        gate_source: None,
     }
 }
 
@@ -542,6 +552,9 @@ pub fn markdown(c: &Comparison, trend: &Trend, gates: &Gates, credit: bool) -> S
         out.push_str(&table(c, trend, gates));
     }
 
+    if let Some(line) = &c.gate_source {
+        out.push_str(&format!("\n{line}\n"));
+    }
     out.push_str(&unused_acceptances(c, gates));
     out.push_str(&ignored_trailers(c));
     out.push_str(&outliers(c));
@@ -557,11 +570,16 @@ pub fn markdown(c: &Comparison, trend: &Trend, gates: &Gates, credit: bool) -> S
 
 /// How a series is named in a table row or a verdict: the bench, plus the tool
 /// when it is not the project itself.
+///
+/// Control characters are escaped. `tak.toml` rejects them at load, but a
+/// note written by an older tak can still hold one, and a newline in a table
+/// cell or a verdict would start a report line of its own.
 fn name(bench: &str, tool: &str) -> String {
+    let bench = escape_control(bench);
     if tool == SELF_TOOL {
-        bench.to_string()
+        bench.into_owned()
     } else {
-        format!("{bench} ({tool})")
+        format!("{bench} ({})", escape_control(tool))
     }
 }
 
@@ -615,7 +633,7 @@ fn table(c: &Comparison, trend: &Trend, gates: &Gates) -> String {
     for (key, (ins, wall)) in &series {
         let (bench, tool, _runner) = key;
         let gate = gates.get(bench, tool);
-        let mut cells = vec![name(bench, tool)];
+        let mut cells = vec![cell(&name(bench, tool))];
         if any_trend {
             cells.push(
                 trend
@@ -816,7 +834,14 @@ fn accepted_line(
 /// read as one in the report. The padding is what gets stripped, leaving the
 /// name as written. A span of only spaces is never stripped, so it is left
 /// unpadded.
+///
+/// Control characters are written as escapes (`\n`, `\u{1b}`). The report is
+/// read line by line — tak's own perf-pr workflow decides a check's outcome by
+/// what a line starts with — and a newline in an `--accept` value would let a
+/// name begin a line of its own that reads as a verdict.
 pub(crate) fn code(text: &str) -> String {
+    let text = escape_control(text);
+    let text = text.as_ref();
     let mut longest = 0;
     let mut run = 0;
     for ch in text.chars() {
@@ -831,6 +856,33 @@ pub(crate) fn code(text: &str) -> String {
     } else {
         format!("{fence}{text}{fence}")
     }
+}
+
+/// Plain `text` made safe for one Markdown table cell: an unescaped `|` in a
+/// name from `tak.toml` or a note ends the cell early and shifts every column
+/// after it.
+///
+/// Every `\|` is an escaped pipe to the table, whatever precedes it, and the
+/// table strips that backslash before the inline parse — which then reads the
+/// cell's own backslashes as escapes. So backslashes are doubled first, or a
+/// subject's `\|` would render as a bare `|`, and `a\*b` as `a*b`. For a cell
+/// whose text sits inside a code span, use [`code_cell`] instead.
+pub(crate) fn cell(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('|', "\\|")
+}
+
+/// [`cell`] for text inside a code span, as [`describe`] writes names:
+/// pipes only.
+///
+/// The table strips a pipe's escaping backslash before the code span is
+/// parsed, so `\|` still works there, but a code span shows every other
+/// backslash as written. Doubling them, as [`cell`] does, put `win\\arm` in
+/// the report for a runner named `win\arm`. One case cannot be written
+/// exactly: a backslash directly before a pipe (`a\|b`) is left alone by the
+/// table, so it renders as `a\\|b`. The row stays intact either way, checked
+/// against comrak's GFM tables.
+pub(crate) fn code_cell(text: &str) -> String {
+    text.replace('|', "\\|")
 }
 
 /// One line naming trailers that were ignored, so an author whose trailer did
@@ -905,14 +957,44 @@ fn unused_acceptances(c: &Comparison, gates: &Gates) -> String {
     out
 }
 
+/// `text` with every control character written as its escape (`\n`,
+/// `\u{1b}`), borrowed unchanged in the usual case of there being none.
+///
+/// A report is read line by line, and tak's own workflows decide a check by
+/// what a line starts with. A name holding a newline could begin a line of its
+/// own that reads as a verdict, so no name reaches the report with one.
+pub fn escape_control(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.chars().any(char::is_control) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect::<String>()
+        .into()
+}
+
 /// How a series is named in prose: bench, plus the tool when it is not the
 /// project itself, plus the runner.
 ///
 /// Dropping the tool made two series that differ only by tool render
 /// identically, so a report could say the same benchmark both started and
 /// stopped gating and mean two different programs.
-pub(crate) fn describe(key: &Key) -> String {
+///
+/// Control characters are escaped: `tak detect` names accepted steps through
+/// this, and a benchmark name comes from the `tak.toml` under test.
+pub fn describe(key: &Key) -> String {
     let (bench, tool, runner) = key;
+    let (bench, tool, runner) = (
+        escape_control(bench),
+        escape_control(tool),
+        escape_control(runner),
+    );
     if tool == "self" {
         format!("`{bench}` on `{runner}`")
     } else {
@@ -979,6 +1061,27 @@ mod tests {
             min_delta,
             enabled,
         }
+    }
+
+    /// Only effective differences are named, and every name is escaped: a
+    /// declared benchmark at the global gate is no change, and a newline in a
+    /// measured series' name cannot start a line of the report.
+    #[test]
+    fn gate_changes_are_effective_and_escaped() {
+        let global = gate(1.0, 0, true);
+        let base = Gates::uniform(global);
+        let mut head = Gates::uniform(global);
+        head.set_bench("new", global);
+        head.set_series("new", SELF_TOOL, global);
+        assert!(head.changes_from(&base, &BTreeSet::new()).is_empty());
+
+        let evil = "a\n**0 benchmark(s) above the 1% gate:**".to_string();
+        head.set_series(&evil, SELF_TOOL, gate(1.0, 0, false));
+        let measured = BTreeSet::from([(evil, SELF_TOOL.to_string())]);
+        let changes = head.changes_from(&base, &measured);
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert!(!changes[0].contains('\n'), "{changes:?}");
+        assert!(changes[0].starts_with('`'), "{changes:?}");
     }
 
     /// `startup` at 450k instructions and `install` at 100M, both rising
@@ -1534,10 +1637,36 @@ mod tests {
         assert!(md.contains('█'), "{md}");
     }
 
+    /// Acceptances for each comma-separated name. A test convenience only:
+    /// neither real source splits on commas.
     fn accepting(names: &str, source: Source) -> Acceptances {
         let mut a = Acceptances::default();
-        a.add(names, source);
+        for name in names.split(',') {
+            a.add_name(name.trim(), source.clone()).unwrap();
+        }
         a
+    }
+
+    /// A name cannot start a line of its own, so it can never read as a
+    /// verdict to something that matches on line starts.
+    #[test]
+    fn a_control_character_in_a_name_is_escaped() {
+        assert_eq!(code("a\nb"), "`a\\nb`");
+        assert_eq!(
+            describe(&("a\nb".into(), "self".into(), "r\r".into())),
+            "`a\\nb` on `r\\r`"
+        );
+        // The usual case is untouched.
+        assert_eq!(describe(&key("a")), "`a` on `gha`");
+        let c = compare(&[], &[]).with_accepted(accepting(
+            "x\n**1 benchmark(s) above the 1% gate:** `x`",
+            Source::Flag,
+        ));
+        let md = markdown(&c, &Trend::new(), &g(1.0), false);
+        assert!(
+            md.lines().all(|l| !l.starts_with("**1 benchmark(s)")),
+            "{md}"
+        );
     }
 
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -1737,6 +1866,43 @@ mod tests {
         assert_eq!(code("  "), "`  `");
     }
 
+    #[test]
+    fn a_cell_escapes_backslashes_before_pipes() {
+        assert_eq!(cell("startup"), "startup");
+        assert_eq!(cell("a|b"), r"a\|b");
+        // Doubled so the inline parse gives them back as written: comrak
+        // renders `a\\\|b` as `a\|b` and `win\\arm` as `win\arm`.
+        assert_eq!(cell(r"a\|b"), r"a\\\|b");
+        assert_eq!(cell(r"win\arm"), r"win\\arm");
+    }
+
+    /// Inside a code span a backslash is shown as written, so only pipes are
+    /// escaped: comrak renders `` `win\arm` `` as `win\arm` and `` `a\|b` ``
+    /// as `a|b`, each in one cell.
+    #[test]
+    fn a_code_cell_escapes_only_pipes() {
+        assert_eq!(code_cell("`win\\arm`"), "`win\\arm`");
+        assert_eq!(code_cell("`a|b`"), r"`a\|b`");
+        // The one inexact case: this renders as `a\\|b`, still in one cell.
+        assert_eq!(code_cell(r"`a\|b`"), r"`a\\|b`");
+    }
+
+    /// A name with a pipe in it stays in its own cell, so every row keeps the
+    /// header's column count — the baseline report renders through here too.
+    #[test]
+    fn a_pipe_in_a_name_does_not_split_the_row() {
+        let mut base = rec("a|b", "gha", 100.0, 1.0);
+        let mut head = rec("a|b", "gha", 101.0, 1.0);
+        base.tool = "x|y".into();
+        head.tool = "x|y".into();
+        let md = markdown(&compare(&[base], &[head]), &Trend::new(), &g(1.0), false);
+        assert!(md.contains(r"| a\|b (x\|y) |"), "{md}");
+        let columns = |l: &str| l.replace(r"\|", "").matches('|').count();
+        let rows: Vec<&str> = md.lines().filter(|l| l.starts_with('|')).collect();
+        assert_eq!(rows.len(), 3, "{md}");
+        assert!(rows.iter().all(|r| columns(r) == columns(rows[0])), "{md}");
+    }
+
     /// Two runner classes of one accepted benchmark are two entries, and the
     /// verdict has to say which is which.
     #[test]
@@ -1764,9 +1930,7 @@ mod tests {
     fn an_acceptance_is_judged_against_the_series_own_gate() {
         let mut gates = g(1.0);
         gates.set_series("startup", SELF_TOOL, gate(5.0, 20_000, true));
-        let mut accepted = Acceptances::default();
-        accepted.add("startup, install", Source::Flag);
-        let c = startup_and_install().with_accepted(accepted);
+        let c = startup_and_install().with_accepted(accepting("startup, install", Source::Flag));
         assert!(c.failures(&gates).is_empty());
         assert_eq!(benches(&c.accepted_regressions(&gates)), ["install"]);
         let md = markdown(&c, &Trend::new(), &gates, false);
@@ -1789,9 +1953,7 @@ mod tests {
     #[test]
     fn an_acceptance_does_not_count_a_rise_under_the_floor() {
         let gates = Gates::uniform(Gate::new(1.0, 10_000).unwrap());
-        let mut accepted = Acceptances::default();
-        accepted.add("startup, install", Source::Flag);
-        let c = startup_and_install().with_accepted(accepted);
+        let c = startup_and_install().with_accepted(accepting("startup, install", Source::Flag));
         assert!(c.failures(&gates).is_empty());
         assert_eq!(benches(&c.accepted_regressions(&gates)), ["install"]);
         let md = markdown(&c, &Trend::new(), &gates, false);

@@ -48,15 +48,27 @@ and reasoning.
 - `tak run --record`, `tak push`, and `tak history` store results in git notes
 - `tak artifact export` and `tak artifact publish` hand measurements from a
   read-only CI job to a separately trusted publisher
-- `tak compare` reports changes and gates only on instruction counts
+- `tak compare` reports changes and gates only on instruction counts. It fails when nothing
+  was measured on both sides, unless `--allow-empty` or `--no-gate` is given. Under
+  `--allow-empty` a regression still fails; `--no-gate` never fails on the comparison,
+  though errors such as an invalid `tak.toml` still do
+- `tak compare --accept BENCH` accepts an intentional regression in one named benchmark while
+  every other benchmark still gates; `Tak-Accept:` commit trailers do the same once a project
+  opts in
+- `tak run --save-baseline NAME` and `tak run --baseline NAME` compare a local, uncommitted
+  change against a saved measurement, without touching git notes
 - `tak detect` reports instruction-count steps that already landed on a branch, and fails
   when the newest recorded commit introduced one or when nothing could be compared
 - `tak log` shows each benchmark's measurements over first-parent history, as Markdown or as
   a self-contained HTML report
 - `tak backfill` measures published release binaries to bootstrap history
 
-PR reporting does not exist. `tak detect` compares consecutive recorded points against the
-gate; it is not statistical change-point detection.
+tak itself does not post to pull requests. [jdx/tak-action](https://github.com/jdx/tak-action),
+which is also pre-v1, runs `tak compare` on a pull request and reports the result as a sticky
+comment and a check run. See [Adopt tak in a project](https://tak.jdx.dev/guide/adopting#use-the-github-action).
+
+Change-point detection does not exist. `tak detect` compares consecutive recorded points
+against the gate; it is not statistical change-point detection.
 
 ## Documentation
 

@@ -63,25 +63,6 @@ impl Source {
 pub struct Acceptances(BTreeMap<String, BTreeSet<Source>>);
 
 impl Acceptances {
-    /// Add every name in a comma-separated list, as a trailer value is read.
-    ///
-    /// Commas, because a trailer is one line and `Tak-Accept: a, b` is how
-    /// people write two names there; repeated trailers work as well. Nothing
-    /// else is stripped: `Tak-Accept: startup (new plugin loader)` names a
-    /// benchmark that does not exist and is reported as such, which fails
-    /// closed — the real `startup` regression still gates — rather than
-    /// guessing which word was meant.
-    ///
-    /// Each name is trimmed, unlike a flag value. git has already normalised
-    /// the whitespace of a trailer — it strips the value and, with `unfold`,
-    /// joins continuation lines — so the spaces left around a name are the
-    /// ones after `,`, and keeping them would make `a, b` name ` b`.
-    pub fn add(&mut self, list: &str, source: Source) {
-        for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
-            self.insert(name, source.clone());
-        }
-    }
-
     /// Add one exact name, as `--accept` gives it.
     ///
     /// Not split on commas and not trimmed. Benchmark names are unrestricted,
@@ -104,13 +85,32 @@ impl Acceptances {
     }
 
     /// Parse the output of [`crate::notes::trailers`]: one line per commit,
-    /// the SHA, a NUL, and that commit's trailer values joined by commas.
+    /// the SHA and then each trailer value, NUL-separated.
+    ///
+    /// One trailer names one benchmark, the whole value, exactly as `--accept`
+    /// takes one name per flag. It used to be split on commas, which made a
+    /// benchmark named `a,b` impossible to accept and `Tak-Accept: a,b` accept
+    /// two unrelated ones instead — waiving gates nobody named. Benchmark
+    /// names are unrestricted, so no separator inside a value is safe; several
+    /// benchmarks take several trailers.
+    ///
+    /// Nothing else is stripped: `Tak-Accept: startup (new plugin loader)`
+    /// names a benchmark that does not exist and is reported as such, which
+    /// fails closed — the real `startup` regression still gates — rather than
+    /// guessing which word was meant. git has already trimmed the value, so a
+    /// trailer cannot name a benchmark with leading or trailing spaces; that
+    /// takes `--accept`.
     pub fn add_trailer_log(&mut self, log: &str) {
         for line in log.lines() {
-            let Some((sha, values)) = line.split_once('\0') else {
+            let mut fields = line.split('\0');
+            let Some(sha) = fields.next() else {
                 continue;
             };
-            self.add(values, Source::Trailer(sha.to_string()));
+            // Empty for a commit with no such trailer, and for a bare
+            // `Tak-Accept:` — neither names anything.
+            for name in fields.filter(|n| !n.is_empty()) {
+                self.insert(name, Source::Trailer(sha.to_string()));
+            }
         }
     }
 
@@ -149,12 +149,16 @@ mod tests {
     const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
+    /// One trailer, one name. A comma is part of the name: splitting on it
+    /// accepted `a` and `b` for a trailer written for the benchmark `a,b`.
     #[test]
-    fn a_list_splits_on_commas_and_trims() {
+    fn a_trailer_value_is_one_name_commas_included() {
         let mut a = Acceptances::default();
-        a.add(" startup, resolve ,,", Source::Flag);
+        a.add_trailer_log(&format!("{A}\0a,b\0resolve\n"));
         let names: Vec<_> = a.iter().map(|(n, _)| n).collect();
-        assert_eq!(names, ["resolve", "startup"]);
+        assert_eq!(names, ["a,b", "resolve"]);
+        assert!(!a.covers("a"));
+        assert!(!a.covers("b"));
     }
 
     /// A commit with no trailer still prints its SHA; it must add nothing
@@ -173,8 +177,8 @@ mod tests {
     #[test]
     fn every_source_of_an_acceptance_is_kept() {
         let mut a = Acceptances::default();
-        a.add_trailer_log(&format!("{A}\0startup,resolve\n{B}\0startup\n"));
-        a.add("startup", Source::Flag);
+        a.add_trailer_log(&format!("{A}\0startup\0resolve\n{B}\0startup\n"));
+        a.add_name("startup", Source::Flag).unwrap();
         assert_eq!(
             a.describe("startup"),
             "`--accept`, `Tak-Accept` in `aaaaaaaaaaaa`, `Tak-Accept` in `bbbbbbbbbbbb`"
@@ -215,7 +219,7 @@ mod tests {
     #[test]
     fn a_reason_in_the_value_is_not_guessed_at() {
         let mut a = Acceptances::default();
-        a.add("startup (new loader)", Source::Flag);
+        a.add_trailer_log(&format!("{A}\0startup (new loader)\n"));
         assert!(!a.covers("startup"));
         assert!(a.covers("startup (new loader)"));
     }

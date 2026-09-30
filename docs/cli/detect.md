@@ -19,7 +19,7 @@ Meant for the main-branch workflow, after recording. Walks REV's first-parent hi
 - **`--remote <REMOTE>`** — Remote to refresh notes from.
 
   **Default:** `origin`
-- **`--no-gate`** — Report without ever failing: neither a step nor an empty comparison fails the command.
+- **`--no-gate`** — Report without failing on the result: neither a step nor an empty comparison fails the command. Errors, such as an invalid `tak.toml`, still fail.
 - **`--accept <BENCH>`** — Accept a step onto REV in this benchmark: report it, but do not fail on it. Repeatable; each value is one exact benchmark name. Honoured whatever `accept_trailers` says.
 - **`--allow-empty`** — Succeed when nothing could be compared: REV has no instruction counts, or none of its series has an earlier point in the window. Without it that fails, because a check that examined nothing otherwise looks like a pass. Needed on a first recording or the first on a new runner class. A step onto REV still fails.
 - **`-h --help`** — Print help

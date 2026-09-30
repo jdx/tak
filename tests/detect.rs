@@ -477,6 +477,12 @@ fn a_history_of_exactly_the_limit_is_not_cut_short() {
 /// c0 recorded at 1000, c1 unrecorded with a `Tak-Accept: startup` trailer,
 /// c2 recorded at 1100: a 10% step whose range, c0..c2, holds the trailer.
 fn accepted_repo() -> (tempfile::TempDir, Vec<String>) {
+    accepted_repo_with("Tak-Accept: startup")
+}
+
+/// As [`accepted_repo`], with `trailer` as c1's trailer paragraph.
+fn accepted_repo_with(trailer: &str) -> (tempfile::TempDir, Vec<String>) {
+    let c1 = format!("c1\n\n{trailer}");
     let dir = tempfile::Builder::new()
         .prefix("tak-detect-accept-")
         .tempdir()
@@ -484,11 +490,7 @@ fn accepted_repo() -> (tempfile::TempDir, Vec<String>) {
     let d = dir.path();
     git(d, &["init", "--quiet", "-b", "main"]);
     let mut shas = Vec::new();
-    for (msg, value) in [
-        ("c0", Some(1000)),
-        ("c1\n\nTak-Accept: startup", None),
-        ("c2", Some(1100)),
-    ] {
+    for (msg, value) in [("c0", Some(1000)), (c1.as_str(), None), ("c2", Some(1100))] {
         git(d, &["commit", "--quiet", "--allow-empty", "-m", msg]);
         if let Some(v) = value {
             git(
@@ -527,6 +529,28 @@ fn a_trailer_in_the_steps_range_accepts_it_when_enabled() {
         md.contains(&format!("(accepted by `Tak-Accept` in `{}`)", short(&c[1]))),
         "{md}"
     );
+}
+
+/// One trailer names one benchmark, commas included, as in `tak compare`:
+/// `Tak-Accept: startup,other` does not accept `startup`, and the step fails.
+/// Repeated trailers are how to name several.
+#[test]
+fn a_comma_trailer_does_not_split_into_names() {
+    let (dir, _) = accepted_repo_with("Tak-Accept: startup,other");
+    let out = tak_env(dir.path(), &["detect"], &[("TAK_ACCEPT_TRAILERS", "1")]);
+    let md = stdout(&out);
+    assert!(!out.status.success(), "`startup` was not named: {md}");
+    assert!(!md.contains("(accepted"), "{md}");
+    assert!(
+        md.contains("so nothing was accepted: `startup,other`"),
+        "{md}"
+    );
+
+    let (dir, _) = accepted_repo_with("Tak-Accept: other\nTak-Accept: startup");
+    let out = tak_env(dir.path(), &["detect"], &[("TAK_ACCEPT_TRAILERS", "1")]);
+    let md = stdout(&out);
+    assert!(out.status.success(), "{md}");
+    assert!(md.contains("**+10.00%** (accepted)"), "{md}");
 }
 
 /// On the nothing-compared path, a misspelt acceptance is still named, so

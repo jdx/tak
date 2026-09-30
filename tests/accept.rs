@@ -149,11 +149,12 @@ fn a_trailer_accepts_only_the_benchmark_it_names() {
     );
 }
 
-/// Comma-separated and repeated trailers both count, and git matches the
-/// key case-insensitively.
+/// Repeated trailers each name one benchmark, and git matches the key
+/// case-insensitively.
 #[test]
-fn trailers_may_be_repeated_or_listed() {
-    let (dir, base, _) = regressed("slower\n\nTak-Accept: startup\ntak-accept: resolve, other");
+fn trailers_may_be_repeated() {
+    let (dir, base, _) =
+        regressed("slower\n\nTak-Accept: startup\ntak-accept: resolve\nTak-Accept: other");
     let (ok, stdout, _) = compare_trusting(dir.path(), &[&base]);
     assert!(ok, "{stdout}");
     assert!(stdout.contains("**2 accepted regression(s)"), "{stdout}");
@@ -161,6 +162,404 @@ fn trailers_may_be_repeated_or_listed() {
         stdout.contains("no benchmark by that name was compared on both sides: `other`"),
         "{stdout}"
     );
+}
+
+/// A trailer's whole value is one name. Splitting on commas made
+/// `Tak-Accept: a,b`, written for the benchmark `a,b`, accept `a` and `b`
+/// instead — two gates nobody named — while `a,b` itself still failed.
+#[test]
+fn a_comma_in_a_trailer_is_part_of_the_name() {
+    let dir = repo();
+    let base = commit(dir.path(), "base");
+    note(dir.path(), &base, &[("a,b", 1e6), ("a", 1e6), ("b", 1e6)]);
+    let head = commit(dir.path(), "slower a,b\n\nTak-Accept: a,b");
+    note(
+        dir.path(),
+        &head,
+        &[("a,b", 1.1e6), ("a", 1.1e6), ("b", 1.1e6)],
+    );
+    let (ok, stdout, stderr) = compare_trusting(dir.path(), &[&base]);
+    assert!(!ok, "`a` and `b` were not accepted: {stdout}");
+    assert!(stderr.contains("2 benchmark(s) regressed"), "{stderr}");
+    assert!(
+        stdout.contains("**1 accepted regression(s) above the 1% gate, not failing it:** `a,b`"),
+        "{stdout}"
+    );
+}
+
+/// The patterns tak's own perf-pr workflow classifies a result by, kept here
+/// verbatim and held against the workflow file below, so these tests exercise
+/// what CI actually runs. See [`status`] for how they combine with the exit
+/// status.
+const NEUTRAL: &str =
+    r"^\*\*[0-9]+ (report-only benchmark|accepted regression)\(s\) above (the .*% gate|their gate)";
+const NOTHING_COMPARED: &str = r"^\*\*Nothing was compared";
+const REGRESSED: &str = r"^\*\*[0-9]+ benchmark\(s\) above (the .*% gate|their gate)";
+
+#[test]
+fn the_status_patterns_are_the_workflows() {
+    let workflow = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/perf-pr.yml"),
+    )
+    .unwrap();
+    assert!(workflow.contains(&format!("grep -Eq '{NEUTRAL}'")));
+    assert!(workflow.contains(&format!(
+        "head -n 1 /tmp/tak-report.md | grep -q '{NOTHING_COMPARED}'"
+    )));
+    assert!(workflow.contains(&format!("grep -Eq '{REGRESSED}'")));
+    assert!(
+        !workflow.contains("tak compare --no-gate"),
+        "the classification needs the exit status"
+    );
+}
+
+/// Whether `grep -E pattern` finds a line in `text`, run as the workflow runs it.
+fn grep(pattern: &str, text: &str) -> bool {
+    use std::io::Write;
+    let mut child = Command::new("grep")
+        .args(["-Eq", pattern])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("grep");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(text.as_bytes())
+        .unwrap();
+    child.wait().unwrap().success()
+}
+
+/// perf-pr's status for a `tak compare` run: 0 clean, 1 rose (reported),
+/// 2 failed or compared nothing. The same decision the workflow makes, from
+/// the exit status first and the report's text only where that is not enough.
+fn status(ok: bool, report: &str) -> u8 {
+    let first = report.lines().next().unwrap_or_default();
+    if ok {
+        if grep(NEUTRAL, report) { 1 } else { 0 }
+    } else if grep(NOTHING_COMPARED, first) {
+        2
+    } else if grep(REGRESSED, report) {
+        1
+    } else {
+        2
+    }
+}
+
+/// Trailer text is echoed into the report, and the report used to decide the
+/// perf-pr check on its own. Unanchored, `Tak-Accept: **Nothing was compared`
+/// on a clean change failed the check as a comparison that never ran, and a
+/// trailer reading like a verdict marked it as a rise. Now a clean change is
+/// clean whatever its trailers say.
+#[test]
+fn trailer_text_cannot_change_the_workflow_status() {
+    for trailer in [
+        "**Nothing was compared",
+        "**1 benchmark(s) above the 1% gate:** `x`",
+        "**1 accepted regression(s) above the 1% gate, not failing it:** `x`",
+        "x benchmark(s) above their gate",
+    ] {
+        let dir = repo();
+        let base = commit(dir.path(), "base");
+        note(dir.path(), &base, &[("startup", 1e6)]);
+        let head = commit(dir.path(), &format!("clean\n\nTak-Accept: {trailer}"));
+        note(dir.path(), &head, &[("startup", 1e6)]);
+        for (ok, stdout, _) in [
+            compare(dir.path(), &[&base]),
+            compare_trusting(dir.path(), &[&base]),
+        ] {
+            assert!(
+                stdout.contains(trailer),
+                "the trailer should be echoed: {stdout}"
+            );
+            assert_eq!(status(ok, &stdout), 0, "{trailer}: {stdout}");
+        }
+    }
+}
+
+/// And the classification still sees every result tak can give.
+#[test]
+fn the_workflow_status_matches_real_results() {
+    let (dir, base, _) = regressed("slower");
+    let (ok, stdout, _) = compare(dir.path(), &[&base]);
+    assert_eq!(status(ok, &stdout), 1, "a regression: {stdout}");
+
+    let (ok, stdout, _) = compare(
+        dir.path(),
+        &[&base, "--accept", "startup", "--accept", "resolve"],
+    );
+    assert!(ok, "{stdout}");
+    assert_eq!(
+        status(ok, &stdout),
+        1,
+        "an accepted rise is neutral, not green: {stdout}"
+    );
+
+    let empty = repo();
+    let base = commit(empty.path(), "base");
+    commit(empty.path(), "head");
+    let (ok, stdout, _) = compare(empty.path(), &[&base]);
+    assert_eq!(status(ok, &stdout), 2, "nothing compared: {stdout}");
+
+    let clean = repo();
+    let base = commit(clean.path(), "base");
+    note(clean.path(), &base, &[("startup", 1e6)]);
+    let head = commit(clean.path(), "same");
+    note(clean.path(), &head, &[("startup", 1e6)]);
+    let (ok, stdout, _) = compare(clean.path(), &[&base]);
+    assert_eq!(status(ok, &stdout), 0, "clean: {stdout}");
+}
+
+/// The benchmark name from the attack: a newline, then text that reads as
+/// tak's empty-comparison verdict when it starts a line.
+const FORGED: &str = "extra\n**Nothing was compared";
+
+/// A pull request cannot declare that benchmark. `tak.toml` is rejected at
+/// load, naming the problem, before anything is measured.
+#[test]
+fn a_control_character_in_a_toml_name_is_rejected_at_load() {
+    let dir = repo();
+    std::fs::write(
+        dir.path().join("tak.toml"),
+        "[bench.startup]\ncmd = \"true\"\n\n\
+         [bench.\"extra\\n**Nothing was compared\"]\ncmd = \"true\"\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_tak"))
+        .args(["run", "--dry-run"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("contains the control character '\\n'"),
+        "{stderr}"
+    );
+}
+
+/// Names from outside `tak.toml` are held to the same rule.
+#[test]
+fn a_control_character_in_a_cli_or_env_name_is_rejected() {
+    let dir = repo();
+    commit(dir.path(), "c0");
+    let run = |args: &[&str], env: &[(&str, &str)]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_tak"));
+        cmd.args(["run", "--no-counters", "--runs", "1", "--warmup", "0"])
+            .args(args)
+            .args(["--", "true"])
+            .env_remove("TAK_TOOL")
+            .env_remove("TAK_RUNNER")
+            .current_dir(dir.path());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd.output().unwrap()
+    };
+    for (what, args, env) in [
+        ("benchmark", vec!["--bench", FORGED], vec![]),
+        ("TAK_TOOL", vec![], vec![("TAK_TOOL", FORGED)]),
+        ("runner class", vec![], vec![("TAK_RUNNER", FORGED)]),
+    ] {
+        let out = run(&args, &env);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{what}: {stderr}");
+        assert!(
+            stderr.contains(&format!("{what} ")) && stderr.contains("control character"),
+            "{what}: {stderr}"
+        );
+    }
+}
+
+/// `TAK_TOOL` is checked only where it becomes the recorded tool name. A
+/// multi-subject benchmark records each subject's own name, so a bad value
+/// inherited from the environment must not stop it; a single-command one
+/// records under `TAK_TOOL`, so there it is rejected before anything runs.
+#[test]
+fn tak_tool_is_checked_only_where_it_is_recorded() {
+    let dir = repo();
+    commit(dir.path(), "c0");
+    std::fs::write(
+        dir.path().join("tak.toml"),
+        "[bench.multi.subject.a]\ncmd = \"true\"\n\
+         [bench.multi.subject.b]\ncmd = \"true\"\n\n\
+         [bench.single]\ncmd = \"touch ran\"\n",
+    )
+    .unwrap();
+    let run_with = |bench: &str, tool: Option<&str>| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_tak"));
+        cmd.args([
+            "run",
+            "--no-counters",
+            "--no-progress",
+            "--runs",
+            "1",
+            "--warmup",
+            "0",
+            "--bench",
+            bench,
+        ])
+        .env_remove("TAK_TOOL")
+        .env_remove("TAK_RUNNER")
+        .current_dir(dir.path());
+        if let Some(tool) = tool {
+            cmd.env("TAK_TOOL", tool);
+        }
+        cmd.output().unwrap()
+    };
+    let run = |bench: &str| run_with(bench, Some(FORGED));
+
+    let out = run("multi");
+    assert!(
+        out.status.success(),
+        "a multi-subject run never records TAK_TOOL: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = run("single");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(stderr.contains("TAK_TOOL "), "{stderr}");
+    assert!(
+        !dir.path().join("ran").exists(),
+        "rejected before measuring: {stderr}"
+    );
+    // The marker is real: with a clean TAK_TOOL the same benchmark runs.
+    let out = run_with("single", None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.path().join("ran").exists());
+}
+
+/// Attach records to `sha` through the real line format, so a name holding a
+/// newline is written as JSON escapes it — the way an older tak would have.
+fn note_records(dir: &Path, sha: &str, series: &[(&str, f64)]) {
+    let lines: Vec<String> = series
+        .iter()
+        .map(|(bench, ins)| {
+            tak_cli::record::Record {
+                v: 1,
+                bench: bench.to_string(),
+                tool: "self".into(),
+                version: None,
+                runner: "test".into(),
+                ts: "2026-01-01T00:00:00Z".into(),
+                metrics: std::collections::BTreeMap::from([
+                    ("instructions".to_string(), *ins),
+                    ("wall_min_ms".to_string(), 1.0),
+                ]),
+            }
+            .to_line()
+            .unwrap()
+        })
+        .collect();
+    git(
+        dir,
+        &[
+            "notes",
+            "--ref=tak",
+            "add",
+            "-f",
+            "-m",
+            &lines.join("\n"),
+            sha,
+        ],
+    );
+}
+
+/// Notes can still hold such a name — written by a tak from before the load
+/// check, or put there by hand. Every report escapes it, so it cannot start a
+/// line: not in the table, a verdict, or the lists of added and removed
+/// series. The workflow reads a clean run as clean, and a real regression as a
+/// regression rather than as nothing compared.
+#[test]
+fn a_forged_name_in_the_notes_renders_escaped() {
+    let escaped = "extra\\n**Nothing was compared";
+    let dir = repo();
+    let base = commit(dir.path(), "base");
+    note_records(
+        dir.path(),
+        &base,
+        &[
+            ("startup", 1e6),
+            (FORGED, 1e6),
+            ("gone\n**Nothing was compared", 1e6),
+        ],
+    );
+    let head = commit(dir.path(), "same");
+    note_records(
+        dir.path(),
+        &head,
+        &[
+            ("startup", 1e6),
+            (FORGED, 1e6),
+            ("new\n**Nothing was compared", 1e6),
+        ],
+    );
+
+    let (ok, stdout, _) = compare(dir.path(), &[&base, "--allow-empty"]);
+    // A table cell doubles the escape's backslash (#167), so the rendered row
+    // shows `\n` as the verdicts do.
+    assert!(
+        stdout.contains(&format!("| {} |", escaped.replace('\\', "\\\\"))),
+        "the table row: {stdout}"
+    );
+    assert!(
+        stdout.contains("new\\n**Nothing"),
+        "the added list: {stdout}"
+    );
+    assert!(
+        stdout.contains("gone\\n**Nothing"),
+        "the removed list: {stdout}"
+    );
+    assert!(
+        stdout.lines().all(|l| !l.starts_with("**Nothing")),
+        "{stdout}"
+    );
+    assert_eq!(status(ok, &stdout), 0, "{stdout}");
+
+    // The forged series regresses: its name is now in the failure verdict.
+    note_records(dir.path(), &head, &[("startup", 1e6), (FORGED, 2e6)]);
+    let (ok, stdout, _) = compare(dir.path(), &[&base]);
+    assert!(!ok, "{stdout}");
+    assert!(
+        stdout.contains(&format!("above the 1% gate:** `{escaped}`")),
+        "{stdout}"
+    );
+    assert!(
+        stdout.lines().all(|l| !l.starts_with("**Nothing")),
+        "{stdout}"
+    );
+    assert_eq!(
+        status(ok, &stdout),
+        1,
+        "a regression, not nothing compared: {stdout}"
+    );
+
+    // The other readers of the same notes.
+    for args in [
+        vec!["log", "--remote", "no-such-remote"],
+        vec!["detect", "--allow-empty", "--remote", "no-such-remote"],
+        vec!["history", "--remote", "no-such-remote"],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_tak"))
+            .args(&args)
+            .env_remove("TAK_GATE_PCT")
+            .env_remove("TAK_ACCEPT_TRAILERS")
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("extra\\n"), "{args:?}: {text}");
+        assert!(
+            text.lines()
+                .all(|l| !l.trim_start().starts_with("**Nothing")),
+            "{args:?}: {text}"
+        );
+    }
 }
 
 /// The default. A pull request's own commits are the change being gated, so
@@ -198,7 +597,7 @@ fn no_trailers_means_no_note() {
 fn the_config_opts_in_and_the_environment_overrides_it() {
     let (dir, base, _) = regressed_under(
         Some("[gate]\naccept_trailers = true\n"),
-        "slower\n\nTak-Accept: startup, resolve",
+        "slower\n\nTak-Accept: startup\nTak-Accept: resolve",
     );
     let (ok, stdout, _) = compare(dir.path(), &[&base]);
     assert!(ok, "tak.toml opted in: {stdout}");

@@ -19,7 +19,7 @@ use tak_cli::detect;
 use tak_cli::export::{self, ExportResult};
 use tak_cli::measure::{self, Plan};
 use tak_cli::notes;
-use tak_cli::record::{Record, SCHEMA_VERSION};
+use tak_cli::record::{self, Record, SCHEMA_VERSION};
 use tak_cli::settings::{CliLayer, EnvLayer, Settings, TakConfigLayer, config_source};
 
 #[derive(Cli)]
@@ -225,7 +225,8 @@ enum Cmd {
         #[usage(long, default = "origin")]
         remote: String,
         /// Report without failing, whatever the numbers say. Takes precedence
-        /// over `--allow-empty`: an empty comparison passes too.
+        /// over `--allow-empty`: an empty comparison passes too. Errors, such as
+        /// an invalid `tak.toml`, still fail.
         #[usage(long)]
         no_gate: bool,
         /// Accept a regression in this benchmark: report it, but do not fail
@@ -261,8 +262,9 @@ enum Cmd {
         /// Remote to refresh notes from.
         #[usage(long, default = "origin")]
         remote: String,
-        /// Report without ever failing: neither a step nor an empty comparison
-        /// fails the command.
+        /// Report without failing on the result: neither a step nor an empty
+        /// comparison fails the command. Errors, such as an invalid `tak.toml`,
+        /// still fail.
         #[usage(long)]
         no_gate: bool,
         /// Accept a step onto REV in this benchmark: report it, but do not fail
@@ -479,14 +481,42 @@ struct Measured {
     record: Record,
 }
 
+/// Reject the recorded names that come from outside `tak.toml` — the runner
+/// class and `--bench` — before anything is measured, for the reason
+/// `record::check_name` gives. `tak.toml`'s own names are checked when it
+/// loads, and `TAK_TOOL` by [`check_tak_tool`] where it is used.
+fn check_recorded_names(settings: &Settings, bench: Option<&str>) -> Result<()> {
+    record::check_name("runner class", &runner_class(settings))?;
+    if let Some(bench) = bench {
+        record::check_name("benchmark", bench)?;
+    }
+    Ok(())
+}
+
+/// Reject a `TAK_TOOL` that would be recorded with a control character in it.
+///
+/// Only called where it would be recorded: it names the series of a
+/// single-command benchmark or an ad-hoc `tak run -- CMD`, and nothing else.
+/// A multi-subject run records each subject's own name and backfill records
+/// the release binary's, so checking it there let a stray inherited value
+/// block work that would never have used it.
+fn check_tak_tool() -> Result<()> {
+    if let Ok(tool) = std::env::var("TAK_TOOL") {
+        record::check_name("TAK_TOOL", &tool)?;
+    }
+    Ok(())
+}
+
 fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
     global_gate(settings)?;
+    check_recorded_names(settings, opts.bench.as_deref())?;
     let local = open_local(&opts, settings, !cmd.is_empty())?;
     // An explicit command always wins; tak.toml is only consulted when none is
     // given, so ad-hoc measurement never depends on repository state.
     if cmd.is_empty() {
         return run_declared(opts, settings, &local);
     }
+    check_tak_tool()?;
     if !opts.subjects.is_empty() {
         bail!(
             "--subject selects subjects declared in tak.toml; it cannot be used with a command after `--`"
@@ -697,6 +727,11 @@ fn run_declared(opts: RunOpts, settings: &Settings, local: &Local) -> Result<()>
             "no subject `{missing}` in the selected benchmarks (found: {})",
             seen.into_iter().collect::<Vec<_>>().join(", ")
         );
+    }
+    // Before measuring anything, and only when a benchmark that will run
+    // records under TAK_TOOL: one without subjects.
+    if plans.iter().any(|(_, multi, _)| !multi) {
+        check_tak_tool()?;
     }
 
     for (bench, subject, when) in &skipped {
@@ -1124,19 +1159,15 @@ fn describe_gaps(gaps: &[(compare::Key, baseline::Gap)]) -> String {
 fn quoted(names: &BTreeSet<&str>) -> String {
     names
         .iter()
-        .map(|n| format!("`{n}`"))
+        .map(|n| format!("`{}`", compare::escape_control(n)))
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-/// A series for a message, spelled as the comparison report spells one.
+/// A series for a message, spelled — and escaped — as the comparison report
+/// spells one.
 fn describe_series(key: &compare::Key) -> String {
-    let (bench, tool, runner) = key;
-    if tool == SELF_TOOL {
-        format!("`{bench}` on `{runner}`")
-    } else {
-        format!("`{bench}` ({tool}) on `{runner}`")
-    }
+    compare::describe(key)
 }
 
 /// Fail on a regression against a baseline, for `--gate`.
@@ -1475,9 +1506,16 @@ fn cmd_history(rev: String, remote: String) -> Result<()> {
             .get("wall_min_ms")
             .map(|v| format!("{v:.2}ms"))
             .unwrap_or_else(|| "-".into());
+        // Escaped: the main-branch workflow reads this output line by line to
+        // prove a commit's counts were recorded, and a name holding a newline
+        // could forge a line of its own.
         println!(
             "  {:<16} {:<10} {:<22} instructions={:<14} wall_min={}",
-            r.bench, r.tool, r.runner, ins, wall
+            compare::escape_control(&r.bench),
+            compare::escape_control(&r.tool),
+            compare::escape_control(&r.runner),
+            ins,
+            wall
         );
     }
     Ok(())
@@ -1632,14 +1670,14 @@ fn cmd_compare(
     let base_records = notes::read(Some(&remote), &base_sha)?;
     let head_records = notes::read(None, &head_sha)?;
 
-    let comparison = compare::compare(&base_records, &head_records)
+    let mut comparison = compare::compare(&base_records, &head_records)
         .with_accepted(accepted)
         .with_ignored_trailers(ignored);
     // Never fatal: a shallow checkout has no history to walk, and a missing
     // sparkline is a smaller loss than a failed gate.
     let trend = gather_trend(&base_sha, &head_sha, &head_records).unwrap_or_default();
-    // Ahead of the table, where a pull request that edits a gate on purpose
-    // looks first when the gate it wrote did not apply.
+    // Beside the verdict, where a pull request that edits a gate on purpose
+    // looks when the gate it wrote did not apply.
     let at = detect::short(&base_sha);
     let measured = base_records
         .iter()
@@ -1651,25 +1689,22 @@ fn cmd_compare(
         format!(
             " This revision changes the gate policy ({}), and the change takes effect \
              once it is merged.",
-            changed
-                .iter()
-                .map(|c| format!("`{c}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            changed.join(", ")
         )
     });
-    match (&from, later) {
-        (None, later) => println!(
+    comparison.gate_source = match (&from, later) {
+        (None, later) => Some(format!(
             "No `{}` at the base, `{at}`, so the gate is tak's defaults plus any flags \
-             and environment variables.{}\n",
+             and environment variables.{}",
             config::FILE_NAME,
             later.unwrap_or_default()
-        ),
-        (Some(path), Some(later)) => {
-            println!("The gate comes from `{path}` at the base, `{at}`.{later}\n")
-        }
-        (Some(_), None) => {}
-    }
+        )),
+        (Some(path), Some(later)) => Some(format!(
+            "The gate comes from `{}` at the base, `{at}`.{later}",
+            compare::escape_control(path)
+        )),
+        (Some(_), None) => None,
+    };
     print!(
         "{}",
         compare::markdown(&comparison, &trend, gates, settings.credit)
@@ -1852,7 +1887,7 @@ impl Policy {
     fn changes_from(&self, base: &Policy, measured: &BTreeSet<(String, String)>) -> Vec<String> {
         let mut out = self.gates.changes_from(&base.gates, measured);
         if self.accept_trailers != base.accept_trailers {
-            out.push("accept_trailers".to_string());
+            out.push("`accept_trailers`".to_string());
         }
         out
     }
@@ -2046,6 +2081,7 @@ fn cmd_backfill(
     dry_run: bool,
     settings: &Settings,
 ) -> Result<()> {
+    check_recorded_names(settings, Some(&bench))?;
     let repo = repo
         .or_else(repo_from_origin)
         .context("could not infer the repository — pass --repo owner/name")?;

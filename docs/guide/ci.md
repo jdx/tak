@@ -78,11 +78,14 @@ says `**Nothing was compared` and the command exits non-zero after printing it. 
 means the base was never recorded, its notes were not fetched, or the two were measured on
 different runner classes. Pass `--allow-empty` when that is expected: on the first pull request
 after adopting tak, or while a runner-class migration has left the base on the old class.
-`--no-gate` also passes an empty comparison, since it never fails.
+`--no-gate` also passes an empty comparison, since it never fails on the comparison. Errors,
+such as an invalid `tak.toml`, still fail.
 
 Older tak releases print the same report and exit 0. A workflow that may run one should also
-fail when the report contains `**Nothing was compared`, as the
-[pull-request example](/guide/adopting#gate-pull-requests) does.
+fail when the report's first line starts with `**Nothing was compared`, as the
+[pull-request example](/guide/adopting#gate-pull-requests) does. Check only the first line.
+tak writes that verdict before any benchmark name, and the rest of the report echoes text from
+the change under test.
 
 Each benchmark can have its own gate in `tak.toml`: a different percentage, an absolute
 `min_delta` floor, or `enabled = false` to report a benchmark without failing on it. See
@@ -93,9 +96,21 @@ like the rest of its gate, from the base revision's `tak.toml`; see
 When some benchmark's gate differs from `[gate]`, the verdict says
 `N benchmark(s) above their gate` instead of `N benchmark(s) above the 1% gate`, and a
 report-only benchmark that rose is listed as `N report-only benchmark(s) above their gate`.
-A script that greps the report for a regression should match both forms. The exit status is
-simpler to rely on: `tak compare` exits non-zero only for a regression in a gated benchmark, for
-an empty comparison without `--allow-empty`, or for an error.
+Classify a result by its exit status first. `tak compare` exits non-zero only for a regression
+in a gated benchmark, for an empty comparison without `--allow-empty`, or for an error. The
+report echoes text from the change under test, such as benchmark names and trailer values, so
+use it only to tell those non-zero cases apart:
+
+- **Nothing compared:** the report's first line starts with `**Nothing was compared`. tak writes
+  that line before any name.
+- **Regression:** a line matching `^\*\*[0-9]+ benchmark\(s\) above (the .*% gate|their gate)`.
+  Anchor the pattern to the start of a line, and match both forms.
+- **Anything else** is an error.
+
+tak rejects control characters in names and escapes them in reports, so echoed text cannot
+start a line. The exit status still keeps a check correct even if it did. tak's own
+[`perf-pr.yml`](https://github.com/jdx/tak/blob/main/.github/workflows/perf-pr.yml) classifies
+its check this way.
 
 Always keep measurements partitioned by runner class. Comparing numbers across runner classes
 turns an infrastructure change into an apparent code regression.
@@ -119,16 +134,20 @@ base has already been reviewed and merged.
   a symlink is followed within BASE's tree. A link that is absolute, leads outside the
   repository, or names a file BASE does not have is an error.
 - **No `tak.toml` at BASE** means tak's defaults plus any flags and environment variables. The
-  working tree's file is never used instead. The report opens with a line saying so.
+  working tree's file is never used instead. The report says so in a line below the verdict.
 - **A BASE `tak.toml` that does not parse** fails the comparison, naming the base. Fix it on the
   base branch. This includes a file an older tak accepted and the running tak does not.
+- **These failures are errors.** An unparseable BASE `tak.toml`, a bad symlink, and missing
+  BASE objects (below) fail before any report is printed. `--no-gate` never fails on the
+  comparison, but errors still fail, and these are errors.
 - **Everything else still comes from the working tree.** `[report] credit` only changes the
   footer, and nothing else in `tak.toml` affects a comparison: the benchmarks were already
   measured by `tak run` on each side.
 
 When the working tree's `tak.toml` would gate some series differently from BASE's, under the
-same flags and environment, the report opens with a line saying which file applied, what
-changed, and that the change takes effect once it is merged. Only effective values count:
+same flags and environment, the report adds a line below the verdict saying which file applied,
+what changed, and that the change takes effect once it is merged. It never comes first, so the
+first-line check for `**Nothing was compared` still holds. Only effective values count:
 adding a benchmark with no `gate` table, which is held to `[gate]` either way, is not a change.
 
 ```text
@@ -196,7 +215,7 @@ When the newest commit has no instruction counts, or no series on it has an earl
 the window, the report says **Nothing was compared** and the command fails, because a check
 that examined nothing would otherwise look like a pass. `--allow-empty` waives this case
 only, so a step onto the newest commit still fails. `--no-gate` makes the command report
-without ever failing, covering both, as it does for `tak compare`.
+without failing on either, as it does for `tak compare`. Errors still fail.
 
 On the first recording, or the first on a new runner class, there is nothing earlier to
 compare with. Pass `--allow-empty` for that run, or seed the history first by recording an
@@ -216,8 +235,9 @@ detection. It does not model noise and does not look at timing metrics.
 ### Accepted steps on main
 
 `tak detect` understands [acceptances](#accept-an-intentional-regression) the same way
-`tak compare` does. `--accept BENCH` is repeatable and takes exact names, and `Tak-Accept:`
-trailers are honoured only when `accept_trailers` is on. An accepted step onto the newest
+`tak compare` does. `--accept BENCH` is repeatable and takes exact names. `Tak-Accept:`
+trailers are honoured only when `accept_trailers` is on, and each names one benchmark, commas
+included; repeat the trailer to accept several. An accepted step onto the newest
 commit is marked `(accepted)`, listed with where the acceptance came from, and does not fail
 the command. Acceptances that waived nothing are listed too.
 
@@ -340,9 +360,18 @@ trailers. That line names them and states that they were not honoured, so an aut
 their trailer had no effect.
 
 With trailers on, `tak compare BASE --rev REV` reads trailers from every commit in `BASE..REV`,
-including commits reached through a merge commit's second parent. List several benchmarks with
-commas (`Tak-Accept: startup, resolve`) or repeat the trailer. Put the reason in the commit
-body; the trailer value contains only names. The comparison needs every commit in
+including commits reached through a merge commit's second parent. Each trailer names exactly
+one benchmark: its whole value is the name, commas included, because benchmark names are
+unrestricted and `a,b` is a valid one. To accept several benchmarks, repeat the trailer:
+
+```text
+Tak-Accept: startup
+Tak-Accept: resolve
+```
+
+git trims a trailer's value, so a benchmark whose name starts or ends with a space can only be
+accepted with `--accept`. Put the reason in the commit body; the trailer value contains only
+the name. The comparison needs every commit in
 `BASE..REV`. A shallow checkout that omits some commits also omits their trailers, and the
 regression then fails the gate.
 

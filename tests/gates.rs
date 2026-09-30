@@ -366,7 +366,7 @@ fn later(changed: &str) -> String {
 /// The note names what the head changed, by effective value.
 #[test]
 fn a_head_cannot_loosen_the_gate_it_is_held_to() {
-    let trailer = "head\n\nTak-Accept: startup, install";
+    let trailer = "head\n\nTak-Accept: startup\nTak-Accept: install";
     for (label, head, message, changed) in [
         ("a higher [gate] pct", Some(LOOSE), "head", Some("`[gate]`")),
         (
@@ -404,6 +404,8 @@ fn a_head_cannot_loosen_the_gate_it_is_held_to() {
             report.contains("**2 benchmark(s) above the 1% gate:**"),
             "{label}: {report}"
         );
+        // The note sits below the table: scripts read the first line.
+        assert!(report.starts_with('|'), "{label}: {report}");
         match changed {
             Some(changed) => assert!(
                 report.contains(&format!(
@@ -539,7 +541,7 @@ fn flags_and_the_environment_still_override_the_base() {
     let (dir, base) = repo_with(
         Some(STRICT),
         Some(LOOSE),
-        "head\n\nTak-Accept: startup, install",
+        "head\n\nTak-Accept: startup\nTak-Accept: install",
     );
     let out = compare(dir.path(), &base, &["--gate-pct", "3"]);
     assert!(out.status.success(), "--gate-pct: {}", stdout(&out));

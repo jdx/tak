@@ -21,8 +21,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::accept::{Acceptances, TRAILER};
 use crate::compare::{
-    CREDIT, Change, GATED_METRIC, Gate, Gates, Key, Trend, WALL_METRIC, code, describe, signed_pct,
-    sparkline, thousands,
+    CREDIT, Change, GATED_METRIC, Gate, Gates, Key, Trend, WALL_METRIC, code, code_cell, describe,
+    signed_pct, sparkline, thousands,
 };
 use crate::notes;
 use crate::record::Record;
@@ -690,7 +690,7 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
             };
             out.push_str(&format!(
                 "| {} | {spark} | {} | {ins} | {ins_delta} |{gate_cell} {wall} | {wall_delta} |\n",
-                describe(&s.key),
+                code_cell(&describe(&s.key)),
                 span(s),
             ));
         }
@@ -807,7 +807,7 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
             };
             out.push_str(&format!(
                 "| {} | {} | {ins} | {delta} |{gate_cell}\n",
-                describe(&s.key),
+                code_cell(&describe(&s.key)),
                 span(s)
             ));
         }
@@ -931,6 +931,26 @@ mod tests {
         assert_eq!((f[0].from.as_str(), f[0].to.as_str()), ("c1", "c2"));
         assert_eq!(f[0].commits, 1);
         assert!(d.earlier.is_empty());
+    }
+
+    /// Both tables name a series in their first cell, inside code spans; a
+    /// pipe in the name must not add a column to either, and a backslash must
+    /// show as recorded rather than doubled.
+    #[test]
+    fn a_pipe_in_a_name_does_not_split_the_row() {
+        let named = |v: f64| vec![rec("a|b", r"win\arm", v)];
+        let d = analyze(
+            &[
+                ("c0".to_string(), named(1000.0)),
+                ("c1".to_string(), named(1100.0)),
+                ("c2".to_string(), named(1100.0)),
+                ("c3".to_string(), named(1210.0)),
+            ],
+            &pct(1.0),
+        );
+        assert_eq!((d.latest.len(), d.earlier.len()), (1, 1));
+        let md = markdown(&d, false);
+        assert_eq!(md.matches(r"| `a\|b` on `win\arm` |").count(), 2, "{md}");
     }
 
     #[test]
@@ -1408,9 +1428,10 @@ mod tests {
         let mut d = analyze(&w, &pct(1.0));
         let a = d.latest.iter().find(|s| s.key.0 == "a").unwrap();
         assert_eq!(a.from, "c0");
-        // `Tak-Accept: a, b` on c1, which is in c0..c2 but not in c1..c2.
+        // `Tak-Accept: a` and `Tak-Accept: b` on c1, which is in c0..c2 but
+        // not in c1..c2. The log joins a commit's trailers with NUL.
         let logs = BTreeMap::from([
-            ("c0".to_string(), "c2\0\nc1\0a,b\n".to_string()),
+            ("c0".to_string(), "c2\0\nc1\0a\0b\n".to_string()),
             ("c1".to_string(), "c2\0\n".to_string()),
         ]);
         d.accept(&Acceptances::default(), &logs);
@@ -1464,6 +1485,46 @@ mod tests {
         let md = markdown(&d, false);
         assert!(!md.contains("(accepted)"), "{md}");
         assert!(md.contains("**+10.00%** ⚠️"), "{md}");
+    }
+
+    /// The trailer parser is shared with `tak compare`: one trailer names one
+    /// benchmark, commas included. `Tak-Accept: a,b` names neither `a` nor `b`,
+    /// so both steps still fail and `a,b` is reported as waiving nothing.
+    #[test]
+    fn a_comma_trailer_names_one_benchmark() {
+        let mut d = analyze(&two_series_step(), &pct(1.0));
+        let logs = BTreeMap::from([
+            ("c0".to_string(), "c1\0a,b\n".to_string()),
+            ("c1".to_string(), "c1\0a,b\n".to_string()),
+        ]);
+        d.accept(&Acceptances::default(), &logs);
+        assert_eq!(d.failures().len(), 2, "neither `a` nor `b` was named");
+        let md = markdown(&d, false);
+        assert!(!md.contains("(accepted"), "{md}");
+        assert!(md.contains("so nothing was accepted: `a,b`"), "{md}");
+    }
+
+    /// Names in the acceptance lines cannot start a report line of their own:
+    /// a newline is written as `\n`, so no echoed name reads as a verdict to a
+    /// check that matches on line starts.
+    #[test]
+    fn a_control_character_in_an_acceptance_is_escaped() {
+        let mut d = analyze(&two_series_step(), &pct(1.0));
+        d.accept(
+            &flags(&["x\n**1 benchmark(s) stepped above"]),
+            &BTreeMap::new(),
+        );
+        d.ignored_trailers.add_trailer_log("c1\0y\u{1b}z\n");
+        let md = markdown(&d, false);
+        assert!(md.contains("`x\\n**1 benchmark(s) stepped above`"), "{md}");
+        assert!(md.contains("`y\\u{1b}z`"), "{md}");
+        assert_eq!(
+            md.lines()
+                .filter(|l| l.starts_with("**1 benchmark(s) stepped above"))
+                .count(),
+            0,
+            "{md}"
+        );
     }
 
     #[test]
