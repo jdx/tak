@@ -118,6 +118,38 @@ pub struct Settings {
     )]
     pub gate_pct: f64,
 
+    /// Whether `tak compare` honours `Tak-Accept:` trailers on the commits it compares.
+    ///
+    /// Off by default, because of who writes those trailers. A trailer is part of a
+    /// commit message, and the commits `tak compare` reads are the change being gated —
+    /// on a pull request, the author's own. Honouring them by default would let any
+    /// change waive its own gate by adding one line, which makes the gate advisory for
+    /// exactly the changes it exists to stop. The acceptance would be visible in the
+    /// report, but visible is not the same as approved.
+    ///
+    /// With this off, trailers are ignored entirely; if the compared range carries any,
+    /// the report says so in one line, so an author is not left wondering why theirs did
+    /// nothing. `tak compare --accept BENCH` works either way, and is the recommended
+    /// route in CI: pass it from a workflow step driven by something only maintainers
+    /// can do, such as applying a pull-request label.
+    ///
+    /// Turn it on where every commit in the compared range has already been reviewed by
+    /// the time the result matters, or where everyone who can push is trusted to waive
+    /// the gate — a solo project, or comparisons along an already-reviewed main branch.
+    ///
+    /// `tak.toml` is read from the checkout being measured, so a pull request can change
+    /// this key just as it can change `gate.pct`. Where the gate is enforced against
+    /// changes you do not trust, set `TAK_ACCEPT_TRAILERS=0` in the workflow: the
+    /// environment takes precedence over the file.
+    #[usage(
+        default = false,
+        env = "TAK_ACCEPT_TRAILERS",
+        source("config", "gate.accept_trailers"),
+        example("TAK_ACCEPT_TRAILERS=1 tak compare origin/main"),
+        since = "0.0.14"
+    )]
+    pub accept_trailers: bool,
+
     /// How many instructions a count may rise by before `tak compare` fails, whatever
     /// the percentage.
     ///
@@ -456,6 +488,7 @@ impl Settings {
             "env_allow" => Some(format!("{:?}", self.env_allow)),
             "env_deny" => Some(format!("{:?}", self.env_deny)),
             "credit" => Some(format!("{}", self.credit)),
+            "accept_trailers" => Some(format!("{}", self.accept_trailers)),
             "runner_class" => Some(if self.runner_class.is_empty() {
                 "(derived)".to_string()
             } else {
@@ -615,22 +648,24 @@ mod tests {
     /// The drift guard, half one: every declared environment variable actually
     /// changes the resolved settings. A sentinel that differs from every
     /// default and parses as every declared type — a list sees `["12345"]`, a
-    /// float sees `12345`; booleans get the opposite of their default.
+    /// float sees `12345`; booleans are tried both ways, since defaults differ
+    /// and one of the two must move it.
     #[test]
     fn every_declared_env_var_is_honoured() {
         for meta in Settings::SETTINGS_PROPS {
             for var in meta.envs {
-                let sentinel = if meta.ty == Ty::Bool {
-                    "false"
+                let sentinels: &[&str] = if meta.ty == Ty::Bool {
+                    &["false", "true"]
                 } else {
-                    "12345"
+                    &["12345"]
                 };
-                let with_env = env(&[(var, sentinel)]);
-                let got =
-                    Settings::resolve(&no_cli(), &with_env, &TakConfigLayer::empty()).unwrap();
-                assert_ne!(
-                    got,
-                    Settings::default(),
+                let moved = sentinels.iter().any(|sentinel| {
+                    let with_env = env(&[(var, sentinel)]);
+                    Settings::resolve(&no_cli(), &with_env, &TakConfigLayer::empty()).unwrap()
+                        != Settings::default()
+                });
+                assert!(
+                    moved,
                     "`{}` declares {var} but setting it changes nothing",
                     meta.key
                 );
@@ -638,15 +673,15 @@ mod tests {
         }
     }
 
-    /// The TOML literal for a sentinel of this registry type.
-    fn config_sentinel(ty: &Ty) -> String {
+    /// TOML literals for sentinels of this registry type. Booleans get both
+    /// values: defaults differ, and one of the two always moves the setting.
+    fn config_sentinels(ty: &Ty) -> Vec<String> {
         match ty {
-            Ty::List(_) => "[\"SENTINEL\"]".to_string(),
-            Ty::Float => "12345.0".to_string(),
-            Ty::Uint => "12345".to_string(),
-            // The opposite of every bool default, so flipping it always shows.
-            Ty::Bool => "false".to_string(),
-            Ty::String => "\"SENTINEL\"".to_string(),
+            Ty::List(_) => vec!["[\"SENTINEL\"]".to_string()],
+            Ty::Float => vec!["12345.0".to_string()],
+            Ty::Bool => vec!["false".to_string(), "true".to_string()],
+            Ty::Uint => vec!["12345".to_string()],
+            Ty::String => vec!["\"SENTINEL\"".to_string()],
             other => panic!(
                 "the drift check has no sentinel for type `{}`",
                 other.name()
@@ -665,12 +700,12 @@ mod tests {
                 if *source != kind.name() {
                     continue;
                 }
-                let text = format!("{key} = {}\n", config_sentinel(&meta.ty));
-                let cfg = TakConfigLayer::from_text(&text);
-                let got = Settings::resolve(&no_cli(), &no_env(), &cfg).unwrap();
-                assert_ne!(
-                    got,
-                    Settings::default(),
+                let moved = config_sentinels(&meta.ty).iter().any(|sentinel| {
+                    let cfg = TakConfigLayer::from_text(&format!("{key} = {sentinel}\n"));
+                    Settings::resolve(&no_cli(), &no_env(), &cfg).unwrap() != Settings::default()
+                });
+                assert!(
+                    moved,
                     "`{}` declares config key `{key}` but setting it changes nothing",
                     meta.key
                 );
