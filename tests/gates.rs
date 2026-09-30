@@ -68,17 +68,29 @@ fn repo_with(
     head_toml: Option<&str>,
     message: &str,
 ) -> (tempfile::TempDir, String) {
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path();
-    let toml = p.join("tak.toml");
-    let set = |contents: Option<&str>| match contents {
-        Some(text) => std::fs::write(&toml, text).unwrap(),
-        None => {
-            let _ = std::fs::remove_file(&toml);
+    let set = |p: &Path, contents: Option<&str>| {
+        let toml = p.join("tak.toml");
+        match contents {
+            Some(text) => std::fs::write(&toml, text).unwrap(),
+            None => {
+                let _ = std::fs::remove_file(&toml);
+            }
         }
     };
+    repo_from(|p| set(p, base_toml), |p| set(p, head_toml), message)
+}
+
+/// The same measurements, with the base's files laid out by `base` and the
+/// head's by `head`: for trees that are more than one `tak.toml`.
+fn repo_from(
+    base: impl Fn(&Path),
+    head: impl Fn(&Path),
+    message: &str,
+) -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path();
     git(p, &["init", "--quiet", "-b", "main"]);
-    set(base_toml);
+    base(p);
     git(p, &["add", "--all"]);
     git(p, &["commit", "--quiet", "--allow-empty", "-m", "base"]);
     let base = git(p, &["rev-parse", "HEAD"]);
@@ -95,7 +107,7 @@ fn repo_with(
             record("install", 100_000_000.0),
         ],
     );
-    set(head_toml);
+    head(p);
     git(p, &["add", "--all"]);
     git(p, &["commit", "--quiet", "--allow-empty", "-m", message]);
     note(
@@ -341,16 +353,22 @@ const STRICT: &str =
 const LOOSE: &str =
     "[gate]\npct = 50.0\n\n[bench.startup]\ncmd = \"x\"\n\n[bench.install]\ncmd = \"y\"\n";
 
-const LATER: &str =
-    "This revision changes the gate policy, and the change takes effect once it is merged.";
+/// The start of the note saying the head's own policy applies once merged.
+const LATER: &str = "This revision changes the gate policy";
+
+/// The whole note, naming what changed.
+fn later(changed: &str) -> String {
+    format!("{LATER} ({changed}), and the change takes effect once it is merged.")
+}
 
 /// The hole this closes: every way a head could loosen its own gate in
 /// `tak.toml`, committed as part of the change, and the 2% rises still fail.
+/// The note names what the head changed, by effective value.
 #[test]
 fn a_head_cannot_loosen_the_gate_it_is_held_to() {
     let trailer = "head\n\nTak-Accept: startup, install";
-    for (label, head, message) in [
-        ("a higher [gate] pct", Some(LOOSE), "head"),
+    for (label, head, message, changed) in [
+        ("a higher [gate] pct", Some(LOOSE), "head", Some("`[gate]`")),
         (
             "report-only benchmarks",
             Some(
@@ -358,6 +376,7 @@ fn a_head_cannot_loosen_the_gate_it_is_held_to() {
                  [bench.install]\ncmd = \"y\"\ngate = { enabled = false }\n",
             ),
             "head",
+            Some("`install`, `startup`"),
         ),
         (
             "per-benchmark gates",
@@ -366,13 +385,16 @@ fn a_head_cannot_loosen_the_gate_it_is_held_to() {
                  [bench.install]\ncmd = \"y\"\ngate = { min_delta = 5000000 }\n",
             ),
             "head",
+            Some("`install`, `startup`"),
         ),
         (
             "trailers turned on, with a trailer",
             Some("[gate]\naccept_trailers = true\n"),
             trailer,
+            Some("`accept_trailers`"),
         ),
-        ("tak.toml deleted", None, "head"),
+        // Every series is at 1% either way, so there is nothing to announce.
+        ("tak.toml deleted", None, "head", None),
     ] {
         let (dir, base) = repo_with(Some(STRICT), head, message);
         let out = compare(dir.path(), &base, &[]);
@@ -382,16 +404,86 @@ fn a_head_cannot_loosen_the_gate_it_is_held_to() {
             report.contains("**2 benchmark(s) above the 1% gate:**"),
             "{label}: {report}"
         );
-        assert!(
-            report.contains(&format!(
-                "The gate comes from `tak.toml` at the base, `{}`. {LATER}",
-                &base[..12]
-            )),
-            "{label}: {report}"
-        );
+        match changed {
+            Some(changed) => assert!(
+                report.contains(&format!(
+                    "The gate comes from `tak.toml` at the base, `{}`. {}",
+                    &base[..12],
+                    later(changed)
+                )),
+                "{label}: {report}"
+            ),
+            None => assert!(!report.contains(LATER), "{label}: {report}"),
+        }
         if message == trailer {
             assert!(report.contains("not honoured"), "{label}: {report}");
         }
+    }
+}
+
+/// A benchmark added without a `gate` is held to `[gate]` on both sides, so
+/// adding one changes no gate and gets no note.
+#[test]
+fn adding_a_benchmark_without_a_gate_is_not_a_policy_change() {
+    let head = format!("{STRICT}\n[bench.new]\ncmd = \"z\"\n");
+    let (dir, base) = repo_with(Some(STRICT), Some(&head), "head");
+    let report = stdout(&compare(dir.path(), &base, &[]));
+    assert!(!report.contains("at the base"), "{report}");
+    assert!(report.starts_with('|'), "{report}");
+}
+
+/// A `tak.toml` committed as a symlink is followed inside the base's tree,
+/// as the search on disk follows it, and never out of it.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_base_tak_toml_is_followed_inside_the_tree() {
+    use std::os::unix::fs::symlink;
+    let link = |target: &'static str| {
+        move |p: &Path| {
+            std::fs::create_dir_all(p.join("config")).unwrap();
+            std::fs::write(p.join("config/tak.toml"), STRICT).unwrap();
+            symlink(target, p.join("tak.toml")).unwrap();
+        }
+    };
+
+    // A valid link: the file it names gates, whatever the head's says.
+    let (dir, base) = repo_from(
+        link("config/tak.toml"),
+        |p: &Path| {
+            std::fs::remove_file(p.join("tak.toml")).unwrap();
+            std::fs::write(p.join("tak.toml"), LOOSE).unwrap();
+        },
+        "head",
+    );
+    let out = compare(dir.path(), &base, &[]);
+    let report = stdout(&out);
+    assert!(!out.status.success(), "{report}");
+    assert!(
+        report.contains("**2 benchmark(s) above the 1% gate:**"),
+        "{report}"
+    );
+    assert!(report.contains(&later("`[gate]`")), "{report}");
+
+    // Escaping the repository, or pointing at nothing, is an error naming the
+    // base rather than a fallback to the defaults.
+    for (target, why) in [
+        ("../outside.toml", "outside the repository"),
+        ("/etc/tak.toml", "outside the repository"),
+        ("config/missing.toml", "does not exist there"),
+    ] {
+        let (dir, base) = repo_from(link(target), |_: &Path| {}, "head");
+        let out = compare(dir.path(), &base, &["--no-gate"]);
+        assert!(!out.status.success(), "{target}: {}", stdout(&out));
+        assert!(stdout(&out).is_empty(), "{target}: {}", stdout(&out));
+        let err = stderr(&out);
+        assert!(
+            err.contains(&format!(
+                "cannot read the gate policy from the base, {}",
+                &base[..12]
+            )),
+            "{target}: {err}"
+        );
+        assert!(err.contains(why), "{target}: {err}");
     }
 }
 
@@ -426,8 +518,9 @@ fn without_a_tak_toml_at_the_base_the_defaults_apply() {
     assert!(
         report.contains(&format!(
             "No `tak.toml` at the base, `{}`, so the gate is tak's defaults plus any \
-             flags and environment variables. {LATER}",
-            &base[..12]
+             flags and environment variables. {}",
+            &base[..12],
+            later("`startup`")
         )),
         "{report}"
     );

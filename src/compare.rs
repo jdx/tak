@@ -199,6 +199,46 @@ impl Gates {
     fn of(&self, c: &Change) -> Gate {
         self.get(&c.bench, &c.tool)
     }
+
+    /// What these gates hold differently from `base`, by effective value: the
+    /// global gate as `[gate]`, then each series either side declares or
+    /// `measured` names whose resolved gate differs.
+    ///
+    /// Effective rather than structural. Declaring a benchmark with no `gate`
+    /// adds it to the maps at the global gate, which is what an undeclared
+    /// series gets anyway; reporting that as a change would tell a pull
+    /// request that only added a benchmark its gate takes effect later. A
+    /// series that merely follows `[gate]` on both sides is covered by
+    /// `[gate]` and not named again.
+    pub fn changes_from(&self, base: &Gates, measured: &BTreeSet<(String, String)>) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.global != base.global {
+            out.push("[gate]".to_string());
+        }
+        let follows = |g: &Gates, gate: Gate| gate == g.global;
+        let mut named = BTreeSet::new();
+        // A benchmark's own gate is what its undeclared subjects fall back to.
+        for bench in self.benches.keys().chain(base.benches.keys()) {
+            let of = |g: &Gates| g.benches.get(bench).copied().unwrap_or(g.global);
+            let (mine, theirs) = (of(self), of(base));
+            if mine != theirs && !(follows(self, mine) && follows(base, theirs)) {
+                named.insert(bench.clone());
+            }
+        }
+        let series = self
+            .series
+            .keys()
+            .chain(base.series.keys())
+            .chain(measured.iter());
+        for (bench, tool) in series {
+            let (mine, theirs) = (self.get(bench, tool), base.get(bench, tool));
+            if mine != theirs && !(follows(self, mine) && follows(base, theirs)) {
+                named.insert(name(bench, tool));
+            }
+        }
+        out.extend(named);
+        out
+    }
 }
 
 #[derive(Debug, Default, PartialEq)]

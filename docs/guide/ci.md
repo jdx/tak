@@ -115,7 +115,9 @@ base has already been reviewed and merged.
   the pull request.
 - **The file is found the way `tak run` finds its own:** searching upward from the current
   directory, but through BASE's tree, up to the repository root. Deleting, moving or adding a
-  `tak.toml` in the pull request does not change which file gates it.
+  `tak.toml` in the pull request does not change which file gates it. A `tak.toml` committed as
+  a symlink is followed within BASE's tree. A link that is absolute, leads outside the
+  repository, or names a file BASE does not have is an error.
 - **No `tak.toml` at BASE** means tak's defaults plus any flags and environment variables. The
   working tree's file is never used instead. The report opens with a line saying so.
 - **A BASE `tak.toml` that does not parse** fails the comparison, naming the base. Fix it on the
@@ -124,13 +126,17 @@ base has already been reviewed and merged.
   footer, and nothing else in `tak.toml` affects a comparison: the benchmarks were already
   measured by `tak run` on each side.
 
-When the working tree's `tak.toml` would gate differently from BASE's, under the same flags and
-environment, the report opens with a line saying which file applied and that the change takes
-effect once it is merged:
+When the working tree's `tak.toml` would gate some series differently from BASE's, under the
+same flags and environment, the report opens with a line saying which file applied, what
+changed, and that the change takes effect once it is merged. Only effective values count:
+adding a benchmark with no `gate` table, which is held to `[gate]` either way, is not a change.
 
 ```text
-The gate comes from `tak.toml` at the base, `a1b2c3d4e5f6`. This revision changes the gate policy, and the change takes effect once it is merged.
+The gate comes from `tak.toml` at the base, `a1b2c3d4e5f6`. This revision changes the gate policy (`startup`), and the change takes effect once it is merged.
 ```
+
+The list names `[gate]` when the global gate changed, `accept_trailers` when that did, and
+each benchmark or `benchmark (subject)` whose own gate changed.
 
 **This changes behaviour.** tak 0.0.13 and earlier read `[gate]` from the working tree. Now a
 pull request that loosens a gate is compared under the old gate until it merges. To let a

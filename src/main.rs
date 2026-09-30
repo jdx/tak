@@ -1641,24 +1641,34 @@ fn cmd_compare(
     // Ahead of the table, where a pull request that edits a gate on purpose
     // looks first when the gate it wrote did not apply.
     let at = detect::short(&base_sha);
-    let changed = proposed != policy;
-    let later = "This revision changes the gate policy, and the change takes effect once \
-                 it is merged.";
-    match &from {
-        None => println!(
+    let measured = base_records
+        .iter()
+        .chain(&head_records)
+        .map(|r| (r.bench.clone(), r.tool.clone()))
+        .collect();
+    let changed = proposed.changes_from(&policy, &measured);
+    let later = (!changed.is_empty()).then(|| {
+        format!(
+            " This revision changes the gate policy ({}), and the change takes effect \
+             once it is merged.",
+            changed
+                .iter()
+                .map(|c| format!("`{c}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
+    match (&from, later) {
+        (None, later) => println!(
             "No `{}` at the base, `{at}`, so the gate is tak's defaults plus any flags \
              and environment variables.{}\n",
             config::FILE_NAME,
-            if changed {
-                format!(" {later}")
-            } else {
-                String::new()
-            }
+            later.unwrap_or_default()
         ),
-        Some(path) if changed => {
-            println!("The gate comes from `{path}` at the base, `{at}`. {later}\n")
+        (Some(path), Some(later)) => {
+            println!("The gate comes from `{path}` at the base, `{at}`.{later}\n")
         }
-        Some(_) => {}
+        (Some(_), None) => {}
     }
     print!(
         "{}",
@@ -1827,15 +1837,25 @@ fn compare_gates(settings: &Settings, config: Option<&Path>) -> Result<compare::
 }
 
 /// Everything a `tak.toml` can say about whether `tak compare` fails.
-///
-/// Compared whole to decide whether a revision changes it. Both sides are
-/// resolved under the same flags and environment, so a difference an override
-/// masks is not reported: with the workflow unchanged, merging it changes
-/// nothing either.
-#[derive(PartialEq)]
 struct Policy {
     gates: compare::Gates,
     accept_trailers: bool,
+}
+
+impl Policy {
+    /// What this policy would enforce differently from `base`, named for the
+    /// report; empty when it would gate every series the same way.
+    ///
+    /// Both sides are resolved under the same flags and environment, so a
+    /// difference an override masks is not reported: with the workflow
+    /// unchanged, merging it changes nothing either.
+    fn changes_from(&self, base: &Policy, measured: &BTreeSet<(String, String)>) -> Vec<String> {
+        let mut out = self.gates.changes_from(&base.gates, measured);
+        if self.accept_trailers != base.accept_trailers {
+            out.push("accept_trailers".to_string());
+        }
+        out
+    }
 }
 
 /// The gate policy `tak compare` enforces, read from `tak.toml` in the base
