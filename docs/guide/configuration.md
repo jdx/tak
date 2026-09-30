@@ -680,6 +680,9 @@ subject the benchmark no longer declares is held to the benchmark's gate. `tak c
 without a `tak.toml` and holds every series to `[gate]`. A `tak.toml` that doesn't parse is an
 error.
 
+`tak detect` reads gates the same way and applies each series' gate to its steps and its
+drift. A report-only benchmark never fails it.
+
 ## Environment filtering
 
 tak removes known sources of non-determinism from the measured command's environment. The
