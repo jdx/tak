@@ -479,14 +479,25 @@ struct Measured {
 }
 
 /// Reject the recorded names that come from outside `tak.toml` — the runner
-/// class, `--bench`, `TAK_TOOL` — before anything is measured, for the reason
+/// class and `--bench` — before anything is measured, for the reason
 /// `record::check_name` gives. `tak.toml`'s own names are checked when it
-/// loads.
+/// loads, and `TAK_TOOL` by [`check_tak_tool`] where it is used.
 fn check_recorded_names(settings: &Settings, bench: Option<&str>) -> Result<()> {
     record::check_name("runner class", &runner_class(settings))?;
     if let Some(bench) = bench {
         record::check_name("benchmark", bench)?;
     }
+    Ok(())
+}
+
+/// Reject a `TAK_TOOL` that would be recorded with a control character in it.
+///
+/// Only called where it would be recorded: it names the series of a
+/// single-command benchmark or an ad-hoc `tak run -- CMD`, and nothing else.
+/// A multi-subject run records each subject's own name and backfill records
+/// the release binary's, so checking it there let a stray inherited value
+/// block work that would never have used it.
+fn check_tak_tool() -> Result<()> {
     if let Ok(tool) = std::env::var("TAK_TOOL") {
         record::check_name("TAK_TOOL", &tool)?;
     }
@@ -502,6 +513,7 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
     if cmd.is_empty() {
         return run_declared(opts, settings, &local);
     }
+    check_tak_tool()?;
     if !opts.subjects.is_empty() {
         bail!(
             "--subject selects subjects declared in tak.toml; it cannot be used with a command after `--`"
@@ -712,6 +724,11 @@ fn run_declared(opts: RunOpts, settings: &Settings, local: &Local) -> Result<()>
             "no subject `{missing}` in the selected benchmarks (found: {})",
             seen.into_iter().collect::<Vec<_>>().join(", ")
         );
+    }
+    // Before measuring anything, and only when a benchmark that will run
+    // records under TAK_TOOL: one without subjects.
+    if plans.iter().any(|(_, multi, _)| !multi) {
+        check_tak_tool()?;
     }
 
     for (bench, subject, when) in &skipped {

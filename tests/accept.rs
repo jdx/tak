@@ -361,6 +361,69 @@ fn a_control_character_in_a_cli_or_env_name_is_rejected() {
     }
 }
 
+/// `TAK_TOOL` is checked only where it becomes the recorded tool name. A
+/// multi-subject benchmark records each subject's own name, so a bad value
+/// inherited from the environment must not stop it; a single-command one
+/// records under `TAK_TOOL`, so there it is rejected before anything runs.
+#[test]
+fn tak_tool_is_checked_only_where_it_is_recorded() {
+    let dir = repo();
+    commit(dir.path(), "c0");
+    std::fs::write(
+        dir.path().join("tak.toml"),
+        "[bench.multi.subject.a]\ncmd = \"true\"\n\
+         [bench.multi.subject.b]\ncmd = \"true\"\n\n\
+         [bench.single]\ncmd = \"touch ran\"\n",
+    )
+    .unwrap();
+    let run_with = |bench: &str, tool: Option<&str>| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_tak"));
+        cmd.args([
+            "run",
+            "--no-counters",
+            "--no-progress",
+            "--runs",
+            "1",
+            "--warmup",
+            "0",
+            "--bench",
+            bench,
+        ])
+        .env_remove("TAK_TOOL")
+        .env_remove("TAK_RUNNER")
+        .current_dir(dir.path());
+        if let Some(tool) = tool {
+            cmd.env("TAK_TOOL", tool);
+        }
+        cmd.output().unwrap()
+    };
+    let run = |bench: &str| run_with(bench, Some(FORGED));
+
+    let out = run("multi");
+    assert!(
+        out.status.success(),
+        "a multi-subject run never records TAK_TOOL: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = run("single");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(stderr.contains("TAK_TOOL "), "{stderr}");
+    assert!(
+        !dir.path().join("ran").exists(),
+        "rejected before measuring: {stderr}"
+    );
+    // The marker is real: with a clean TAK_TOOL the same benchmark runs.
+    let out = run_with("single", None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.path().join("ran").exists());
+}
+
 /// Attach records to `sha` through the real line format, so a name holding a
 /// newline is written as JSON escapes it — the way an older tak would have.
 fn note_records(dir: &Path, sha: &str, series: &[(&str, f64)]) {
