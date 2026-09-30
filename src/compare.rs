@@ -115,7 +115,7 @@ impl Gate {
     }
 
     /// The threshold, short enough for a table cell: `5%`, `5%, floor 20,000`.
-    fn threshold(&self) -> String {
+    pub(crate) fn threshold(&self) -> String {
         if self.min_delta == 0 {
             format!("{}%", self.pct)
         } else {
@@ -124,7 +124,7 @@ impl Gate {
     }
 
     /// The threshold, and whether crossing it fails.
-    fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         if self.enabled {
             self.threshold()
         } else {
@@ -781,23 +781,9 @@ fn accepted_line(
 /// read line by line — tak's own perf-pr workflow decides a check's outcome by
 /// what a line starts with — and a newline in an `--accept` value would let a
 /// name begin a line of its own that reads as a verdict.
-fn code(text: &str) -> String {
-    let escaped;
-    let text = if text.chars().any(char::is_control) {
-        escaped = text
-            .chars()
-            .map(|c| {
-                if c.is_control() {
-                    c.escape_default().to_string()
-                } else {
-                    c.to_string()
-                }
-            })
-            .collect::<String>();
-        escaped.as_str()
-    } else {
-        text
-    };
+pub(crate) fn code(text: &str) -> String {
+    let text = escape_control(text);
+    let text = text.as_ref();
     let mut longest = 0;
     let mut run = 0;
     for ch in text.chars() {
@@ -886,14 +872,44 @@ fn unused_acceptances(c: &Comparison, gates: &Gates) -> String {
     out
 }
 
+/// `text` with every control character written as its escape (`\n`,
+/// `\u{1b}`), borrowed unchanged in the usual case of there being none.
+///
+/// A report is read line by line, and tak's own workflows decide a check by
+/// what a line starts with. A name holding a newline could begin a line of its
+/// own that reads as a verdict, so no name reaches the report with one.
+fn escape_control(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.chars().any(char::is_control) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect::<String>()
+        .into()
+}
+
 /// How a series is named in prose: bench, plus the tool when it is not the
 /// project itself, plus the runner.
 ///
 /// Dropping the tool made two series that differ only by tool render
 /// identically, so a report could say the same benchmark both started and
 /// stopped gating and mean two different programs.
+///
+/// Control characters are escaped: `tak detect` names accepted steps through
+/// this, and a benchmark name comes from the `tak.toml` under test.
 pub(crate) fn describe(key: &Key) -> String {
     let (bench, tool, runner) = key;
+    let (bench, tool, runner) = (
+        escape_control(bench),
+        escape_control(tool),
+        escape_control(runner),
+    );
     if tool == "self" {
         format!("`{bench}` on `{runner}`")
     } else {
@@ -1530,6 +1546,12 @@ mod tests {
     #[test]
     fn a_control_character_in_a_name_is_escaped() {
         assert_eq!(code("a\nb"), "`a\\nb`");
+        assert_eq!(
+            describe(&("a\nb".into(), "self".into(), "r\r".into())),
+            "`a\\nb` on `r\\r`"
+        );
+        // The usual case is untouched.
+        assert_eq!(describe(&key("a")), "`a` on `gha`");
         let c = compare(&[], &[]).with_accepted(accepting(
             "x\n**1 benchmark(s) above the 1% gate:** `x`",
             Source::Flag,

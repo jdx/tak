@@ -3,7 +3,7 @@
 tak is most useful as a small loop rather than as a one-off timer:
 
 1. declare repeatable benchmarks in `tak.toml`;
-2. record the tip of every push to the main branch;
+2. record the tip of every push to the main branch, and check what landed;
 3. compare a pull request with the commit it branched from; and
 4. fail only when an instruction count crosses the configured gate.
 
@@ -149,6 +149,14 @@ build needs another action first, such as `jdx/mise-action`, run the action with
 [README](https://github.com/jdx/tak-action#readme) has the complete workflows, including the
 `workflow_run` reporting job, every input, and the security model and limitations.
 
+None of the three modes runs `tak detect`, which checks whether a push to main introduced an
+instruction-count step. `tak detect` needs a tak release that includes it, and tak 0.0.13,
+pinned in the examples above, does not. To add the check to the main-branch job, raise
+`version: 0.0.13` to such a release (`version: X.Y.Z`), give the checkout `fetch-depth: 0`,
+and add a later step that runs `tak detect` with that tak on `PATH`, as described under
+[Record the main branch](#record-the-main-branch). The manual workflow there already includes
+the step.
+
 Pin the action to the full commit SHA of a release you have reviewed; the tags above are for
 readability. The sections below show the same workflows without the action, for projects that
 cannot use it or need to change what it does.
@@ -156,7 +164,8 @@ cannot use it or need to change what it does.
 ## Record the main branch
 
 The main-branch workflow owns the history. It measures the tip of each push after it lands,
-appends the result to `refs/notes/tak`, and pushes that ref:
+appends the result to `refs/notes/tak`, pushes that ref, and then checks whether the push
+introduced an instruction-count step:
 
 ```yaml
 name: perf
@@ -180,6 +189,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # tak detect walks the commits between recorded points.
+          fetch-depth: 0
           persist-credentials: false
 
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
@@ -203,6 +214,11 @@ jobs:
 
       - name: Summary
         run: tak history >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Detect regressions that landed
+        run: |
+          set -o pipefail
+          tak detect | tee -a "$GITHUB_STEP_SUMMARY"
 ```
 
 Keep one runner class for the series and serialise writers. `tak push` retries by fetching and
@@ -211,8 +227,40 @@ cancel an in-progress main run: that would leave a hole in the push-tip history.
 contains multiple commits records only its final commit; use one commit per push if every
 intermediate commit must have a measurement.
 
+`tak detect` needs a tak release that includes it. The `tak = "0.0.5"` pin in the mise example
+above does not, so pin such a release (`tak = "X.Y.Z"`) before adding the step.
+
+`tak detect` runs after `tak push` so the measurement is published even when the check fails.
+It fails when the step onto the commit being measured exceeds the gate, including a step
+spread over earlier pushes that were not recorded. The run for the next push passes again.
+Older steps and sub-threshold drift are listed in the job summary without failing. A failed
+run on the main branch is the notification: GitHub marks the commit with a failed check and,
+subject to their notification settings, notifies whoever triggered the run, which for a push
+is the person who pushed or merged it. A team that wants more can add an `if: failure()` step
+that opens an issue or posts to chat. See
+[CI and git notes](/guide/ci#detect-regressions-that-landed) for exactly what is reported.
+
+`tak detect` also fails when it has nothing to compare: the commit has no instruction counts,
+or none of its series has an earlier recorded point. On the first recording, and on the first
+run after changing `[runner].class`, that is expected. Either seed the history first, by
+adding the recording workflow in one push and the `tak detect` step in a later one, or run
+that one push with `tak detect --allow-empty` and remove the flag afterwards. Leaving
+`--allow-empty` in place means a checkout without history or a recording that stopped
+producing instruction counts also passes.
+
+A regression accepted on its pull request through a label is not recorded anywhere
+`tak detect` can see, so the main-branch check fails once on the commit that merged it. To
+avoid that, have the merged commit carry a `Tak-Accept:` trailer and set
+`TAK_ACCEPT_TRAILERS: "1"` on the detect step, or re-run that one check with
+`tak detect --accept BENCH`. See
+[accepted steps on main](/guide/ci#accepted-steps-on-main).
+
+`fetch-depth: 0` gives the walk the commits between recorded points. A bounded depth works if
+it reaches back past the oldest of the 20 recorded commits the check examines by default.
+
 The hosted runner label alone does not capture every input. If its image, compiler, standard
-library, build profile, or CPU class changes, update `[runner].class` to start a new series.
+library, build profile, or CPU class changes, update `[runner].class` to start a new series,
+and pass `--allow-empty` to `tak detect` for the push that makes the change.
 
 See mise's [main-branch workflow](https://github.com/jdx/mise/blob/main/.github/workflows/perf.yml)
 for a pinned, cache-aware example.
@@ -408,6 +456,7 @@ Before treating the comparison as a required check:
 - every measured command succeeds with its network pointed at a dead port;
 - setup and cache warming happen before `tak run` or in an untimed `setup` or `prepare`;
 - only main push tips are pushed into `refs/notes/tak`;
+- the main-branch workflow runs `tak detect` after `tak push`, from a checkout with history;
 - main and pull requests use the same build inputs and runner class; and
 - only instruction counts gate CI; timing remains report-only.
 
