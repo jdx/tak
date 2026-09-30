@@ -155,44 +155,26 @@ fn kill_build() {
 }
 
 /// How a remembered commit failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {
-    /// The build failed, or the tree it would run in could not be used.
+    /// The build failed, or the tree it would run in could not be used. The
+    /// whole commit is passed over.
     Build,
-    /// It built, and measuring it failed: a benchmark errored, a subject was
-    /// dropped, a check or an instruction count failed.
-    Measure,
+    /// It built, and measuring this benchmark failed: it errored, a subject
+    /// was dropped, a check or an instruction count failed. Only this
+    /// benchmark is passed over; the commit's others are still measured.
+    Measure(String),
 }
 
-impl Failure {
-    fn word(self) -> &'static str {
-        match self {
-            Failure::Build => "build-failed",
-            Failure::Measure => "measure-failed",
-        }
-    }
-}
-
-/// Stop the measured commands — subjects, their setup, prepare and check,
-/// and valgrind — which run in tak's own process group, unlike the build.
-///
-/// A terminal's Ctrl-C reaches them directly, but a SIGTERM sent to tak
-/// alone, as when CI cancels a job, does not, and they would carry on in a
-/// checkout that is being deleted. Only when tak leads its group: then every
-/// other member is something tak started, and SIGTERM to the group reaches
-/// exactly those, and tak, whose handler has nothing more to do. When tak
-/// shares a group with whatever launched it, such as a script without job
-/// control, signalling the group would stop that too, so nothing is sent
-/// and a command that was running finishes its one sample on its own.
+/// Stop the measured command — a subject, its setup, prepare or check, or
+/// valgrind — that is running now, and any the main thread starts from here
+/// on. Each runs in a process group of its own during a backfill (see
+/// [`crate::measure::use_own_groups`]), so this reaches exactly it and what
+/// it started. Never tak's own group, which may hold other commands, such as
+/// the rest of a shell pipeline.
 #[cfg(unix)]
 fn kill_measured() {
-    // SAFETY: getpgrp, getpid and killpg have no memory-safety preconditions.
-    unsafe {
-        let group = libc::getpgrp();
-        if group == libc::getpid() {
-            libc::killpg(group, libc::SIGTERM);
-        }
-    }
+    crate::measure::stop_running();
 }
 
 /// Commits that failed in an earlier run, with how and under what.
@@ -205,21 +187,34 @@ fn kill_measured() {
 /// a point `--force` can recover, where not remembering it cost every older
 /// commit behind it.
 ///
-/// A build failure is keyed on the runner class and `[build]`, so changing
-/// the build — usually to fix exactly that failure — or moving to a new
-/// toolchain tries the commit again. A measurement failure is keyed on those
-/// and on the contents of tak.toml as well, since editing a benchmark is how
-/// one of those gets fixed. Kept in git's common directory: shared by the
-/// repository's worktrees, never committed, and local to this clone, since a
-/// failure says as much about this machine as about the commit.
+/// A build failure is per commit, and keyed on the runner class and
+/// `[build]`, so changing the build — usually to fix exactly that failure —
+/// or moving to a new toolchain tries the commit again. A measurement failure
+/// is per benchmark, so a run of other benchmarks (`--bench B` after `--bench
+/// A` failed) still measures them, and it is keyed on those and on the
+/// contents of tak.toml as well, since editing a benchmark is how one of
+/// those gets fixed. Not on `--runs`: a benchmark that errors at five runs
+/// errors at ten, and one that only fails sometimes is what `--force` is for.
+/// Kept in git's common directory: shared by the repository's worktrees,
+/// never committed, and local to this clone, since a failure says as much
+/// about this machine as about the commit.
 ///
-/// One line per commit: `SHA \t REASON \t KEY`. A line written before the
-/// reason was recorded, `SHA \t KEY`, is a build failure.
+/// One line per failure: `SHA \t build-failed \t KEY`, or `SHA \t
+/// measure-failed \t BENCH \t KEY` with the benchmark's name as a JSON
+/// string, which cannot hold a tab. A line written before reasons were
+/// recorded, `SHA \t KEY`, is a build failure.
 pub struct FailedCommits {
     path: PathBuf,
     build_key: String,
     measure_key: String,
-    known: BTreeMap<String, Failure>,
+    known: BTreeMap<String, Known>,
+}
+
+/// What is remembered about one commit under this run's keys.
+#[derive(Debug, Default)]
+struct Known {
+    build: bool,
+    measure: std::collections::BTreeSet<String>,
 }
 
 impl FailedCommits {
@@ -236,10 +231,16 @@ impl FailedCommits {
             .with_context(|| format!("could not resolve {}", common.display()))?;
         let path = common.join("tak").join("backfill-build-failed");
         let text = std::fs::read_to_string(&path).unwrap_or_default();
-        let mut known = BTreeMap::new();
+        let mut known: BTreeMap<String, Known> = BTreeMap::new();
         for line in text.lines() {
             if let Some((sha, failure)) = parse_failure(line, &build_key, &measure_key) {
-                known.insert(sha.to_string(), failure);
+                let k = known.entry(sha.to_string()).or_default();
+                match failure {
+                    Failure::Build => k.build = true,
+                    Failure::Measure(bench) => {
+                        k.measure.insert(bench);
+                    }
+                }
             }
         }
         Ok(FailedCommits {
@@ -250,44 +251,64 @@ impl FailedCommits {
         })
     }
 
-    /// How `sha` failed before under these keys, if it did.
-    pub fn get(&self, sha: &str) -> Option<Failure> {
-        self.known.get(sha).copied()
+    /// Whether `sha`'s build failed before under these keys.
+    pub fn build_failed(&self, sha: &str) -> bool {
+        self.known.get(sha).is_some_and(|k| k.build)
     }
 
-    /// Remember that `sha` failed, replacing whatever was known about it.
+    /// Whether measuring `bench` at `sha` failed before under these keys.
+    pub fn measure_failed(&self, sha: &str, bench: &str) -> bool {
+        self.known
+            .get(sha)
+            .is_some_and(|k| k.measure.contains(bench))
+    }
+
+    /// Remember a failure at `sha`.
     pub fn add(&mut self, sha: &str, failure: Failure) -> Result<()> {
-        if self.known.get(sha) == Some(&failure) {
+        let k = self.known.entry(sha.to_string()).or_default();
+        let new = match &failure {
+            Failure::Build => !std::mem::replace(&mut k.build, true),
+            Failure::Measure(bench) => k.measure.insert(bench.clone()),
+        };
+        if !new {
             return Ok(());
         }
-        self.known.insert(sha.to_string(), failure);
-        let line = self.line(sha, failure);
+        let line = self.line(sha, &failure)?;
+        self.rewrite(|lines, _| lines.push(line))
+    }
+
+    /// `benches` were recorded at `sha`: forget its build failure and theirs.
+    /// Failures of benchmarks this run passed over stay.
+    pub fn recorded(&mut self, sha: &str, benches: &[String]) -> Result<()> {
+        let Some(k) = self.known.get_mut(sha) else {
+            return Ok(());
+        };
+        let before = (k.build, k.measure.len());
+        k.build = false;
+        k.measure.retain(|b| !benches.contains(b));
+        if before == (k.build, k.measure.len()) {
+            return Ok(());
+        }
         self.rewrite(|lines, this| {
-            lines.retain(|l| !this.is_ours(l, sha));
-            lines.push(line);
+            lines.retain(
+                |l| match parse_failure(l, &this.build_key, &this.measure_key) {
+                    Some((s, Failure::Build)) => s != sha,
+                    Some((s, Failure::Measure(b))) => s != sha || !benches.contains(&b),
+                    None => true,
+                },
+            )
         })
     }
 
-    /// Forget `sha` under these keys, once it has been recorded.
-    pub fn remove(&mut self, sha: &str) -> Result<()> {
-        if self.known.remove(sha).is_none() {
-            return Ok(());
-        }
-        self.rewrite(|lines, this| lines.retain(|l| !this.is_ours(l, sha)))
-    }
-
-    fn line(&self, sha: &str, failure: Failure) -> String {
-        let key = match failure {
-            Failure::Build => &self.build_key,
-            Failure::Measure => &self.measure_key,
-        };
-        format!("{sha}\t{}\t{key}", failure.word())
-    }
-
-    /// Whether `line` is about `sha` under this run's keys. Lines about the
-    /// same commit under another build or runner class are left alone.
-    fn is_ours(&self, line: &str, sha: &str) -> bool {
-        parse_failure(line, &self.build_key, &self.measure_key).is_some_and(|(s, _)| s == sha)
+    fn line(&self, sha: &str, failure: &Failure) -> Result<String> {
+        Ok(match failure {
+            Failure::Build => format!("{sha}\tbuild-failed\t{}", self.build_key),
+            Failure::Measure(bench) => format!(
+                "{sha}\tmeasure-failed\t{}\t{}",
+                serde_json::to_string(bench)?,
+                self.measure_key
+            ),
+        })
     }
 
     /// Re-read, change and replace the file.
@@ -324,18 +345,15 @@ fn parse_failure<'a>(
     build_key: &str,
     measure_key: &str,
 ) -> Option<(&'a str, Failure)> {
-    let mut fields = line.splitn(3, '\t');
-    let sha = fields.next()?;
-    let (reason, key) = match (fields.next()?, fields.next()) {
-        (reason, Some(key)) => (reason, key),
-        // Written before failures had a reason: only builds were kept.
-        (key, None) => ("build-failed", key),
-    };
-    match reason {
-        "build-failed" if key == build_key => Some((sha, Failure::Build)),
-        "measure-failed" if key == measure_key => Some((sha, Failure::Measure)),
-        _ => None,
+    let (sha, rest) = line.split_once('\t')?;
+    if let Some(rest) = rest.strip_prefix("measure-failed\t") {
+        let (bench, key) = rest.split_once('\t')?;
+        let bench: String = serde_json::from_str(bench).ok()?;
+        return (key == measure_key).then_some((sha, Failure::Measure(bench)));
     }
+    // Written before failures had a reason, only builds were kept.
+    let key = rest.strip_prefix("build-failed\t").unwrap_or(rest);
+    (key == build_key).then_some((sha, Failure::Build))
 }
 
 /// A 64-bit FNV-1a hash, as lowercase hex: a stable fingerprint of
@@ -487,6 +505,10 @@ pub fn clean_up_on_interrupt(scratch: &Path) -> Result<()> {
     // either end.
     let (mut rx, tx) = UnixStream::pair().context("could not set up interrupt handling")?;
     WRITE_FD.store(tx.into_raw_fd(), Ordering::SeqCst);
+    // Measured commands leave tak's group from here, so the handler can stop
+    // them without signalling anything else in it; a terminal's Ctrl-C no
+    // longer reaches them directly, which is why the handler must.
+    crate::measure::use_own_groups();
     let scratch = scratch.to_path_buf();
     std::thread::spawn(move || {
         let mut sig = [0u8; 1];
@@ -503,8 +525,6 @@ pub fn clean_up_on_interrupt(scratch: &Path) -> Result<()> {
             remove(p);
         }
         let _ = std::fs::remove_dir_all(&scratch);
-        // Again, for a sample the main thread started while the sweep ran.
-        kill_measured();
         eprintln!("\n  interrupted — removed backfill worktrees");
         std::process::exit(128 + i32::from(sig[0]));
     });
@@ -544,14 +564,23 @@ mod tests {
             Some(("abc", Failure::Build))
         );
         assert_eq!(
-            parse_failure("abc\tmeasure-failed\tB f00d", b, m),
-            Some(("abc", Failure::Measure))
+            parse_failure("abc\tmeasure-failed\t\"startup\"\tB f00d", b, m),
+            Some(("abc", Failure::Measure("startup".into())))
+        );
+        // A name JSON escapes, which is how a tab in it cannot split the line.
+        assert_eq!(
+            parse_failure("abc\tmeasure-failed\t\"a\\tb\"\tB f00d", b, m),
+            Some(("abc", Failure::Measure("a\tb".into())))
         );
         assert_eq!(parse_failure("abc\tB", b, m), Some(("abc", Failure::Build)));
-        // Another build, another tak.toml, or a reason from the future.
+        // Another build, another tak.toml, no benchmark, or a reason from the
+        // future.
         assert_eq!(parse_failure("abc\tbuild-failed\tC", b, m), None);
-        assert_eq!(parse_failure("abc\tmeasure-failed\tB beef", b, m), None);
-        assert_eq!(parse_failure("abc\tmeasure-failed\tB", b, m), None);
+        assert_eq!(
+            parse_failure("abc\tmeasure-failed\t\"startup\"\tB beef", b, m),
+            None
+        );
+        assert_eq!(parse_failure("abc\tmeasure-failed\tB f00d", b, m), None);
         assert_eq!(parse_failure("abc\tflaky\tB", b, m), None);
         assert_eq!(parse_failure("", b, m), None);
     }

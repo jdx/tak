@@ -503,46 +503,52 @@ that CI already recorded are skipped rather than measured twice.
 continues where the last run stopped. `--bench NAME` limits the backfill to one declared
 benchmark, and `--runs N` overrides the file's run count.
 
-Each commit is recorded whole or not at all, and the rest of the range continues whatever
-happens to one commit. A commit is left unrecorded and reported in two cases:
+Each run of a commit is recorded whole or not at all, and the rest of the range continues
+whatever happens to one commit. A commit is left unrecorded and reported in two cases:
 
 - its build fails, or a `[build].dir` is missing from its tree or leads out of it;
-- it builds, but measuring it fails: a benchmark errors, a subject is dropped, a check fails,
+- it builds, but measuring a benchmark fails: it errors, a subject is dropped, a check fails,
   an instruction count that was asked for fails with Valgrind present, or a path the current
   `tak.toml` names is missing or leads out of the checkout.
 
-In either case nothing is written for that commit, not even the benchmarks that did measure.
-Old commits that no longer build or run are normal.
+In either case nothing from that run is written for the commit, not even the benchmarks that
+did measure. Old commits that no longer build or run are normal.
 
-tak remembers each such commit in git's directory (`.git/tak/backfill-build-failed`), with
-whether its build or its measurement failed, and later runs pass over it. Without that, a
-commit that can never be recorded would be tried first on every run, and with `--limit` the
-backfill would never reach older commits. A build failure is tried again when the runner class
-or `[build]` (its `cmd`, `dir` or `env`) changes. A measurement failure is also tried again
-when `tak.toml` changes at all, since editing a benchmark is how one gets fixed. `--force`
-retries both kinds, and so does deleting the file. The file is local to the clone and never
-pushed. `--dry-run` shows such a commit as `build failed before` or `measure failed before`.
-A measurement that failed for a reason that does not repeat, such as a flaky `check`, is
-passed over too until one of those happens. The command fails only when the range ends with
-no record at all.
+tak remembers each failure in git's directory (`.git/tak/backfill-build-failed`), and later
+runs pass over it. Without that, a commit that can never be recorded would be tried first on
+every run, and with `--limit` the backfill would never reach older commits.
+
+- A build failure covers the whole commit. It is tried again when the runner class or `[build]`
+  (its `cmd`, `dir` or `env`) changes.
+- A measurement failure covers only the benchmark that failed. The next run measures the
+  commit's other benchmarks without it, and a run with `--bench` for another benchmark is not
+  affected. It is tried again when anything in `tak.toml` changes, since editing a benchmark is
+  how one gets fixed. `--runs` is not part of it: a benchmark that fails at five runs fails at
+  ten.
+
+`--force` retries both kinds, and so does deleting the file. The file is local to the clone
+and never pushed. `--dry-run` shows a commit as `build failed before` or `measure failed
+before` when nothing is left to try, and as `would build (…; B failed before)` when only some
+benchmarks are. A measurement that failed for a reason that does not repeat, such as a flaky
+`check`, is passed over too until one of those happens. The command fails only when the range
+ends with no record at all.
 
 Build output goes to a file in the temporary directory, and a failed build shows its last 20
 lines. `[build].dir`, and a benchmark's `dir` or program inside the checkout, must resolve
-inside the checkout once symlinks are followed. Where a benchmark has a `setup`, which is the
-old tree's own code, they are checked again after it runs and before anything else of that
-benchmark does. A commit with a symlink at one of those paths that points elsewhere is
-reported and not recorded.
+inside the checkout once symlinks are followed. The old tree's own code runs during
+measurement, so they are checked again after every `setup` of a benchmark has run and before
+every sample, after its `prepare`. A commit with a symlink at one of those paths that points
+elsewhere is reported and not recorded. The check before each sample is untimed and took
+about 17µs on a Linux host.
 
 The checkouts are removed when tak finishes, fails, or is stopped with Ctrl-C, SIGTERM or
-SIGHUP, and nothing is recorded or remembered for the commit that was in progress. On Unix the
-build runs in its own process group, and tak kills that group before removing the checkout,
-which also covers a signal sent to tak alone, as when CI cancels a job. The measured commands
-run in tak's own group. A terminal's Ctrl-C reaches them directly. For a signal sent to tak
-alone, tak stops them itself when it leads its process group, as it does when started from an
-interactive shell. When it shares a group with whatever started it, such as a script without
-job control, a command already running finishes its one sample. On Windows, and if a
-subject's `version_cmd` is running when the signal arrives, an interrupted run can leave its
-checkout in the temporary directory. Once that directory is deleted, the next backfill runs
+SIGHUP, and nothing is recorded or remembered for the commit that was in progress. On Unix,
+during a backfill, the build and each measured command run in a process group of their own,
+and tak kills the one running before it removes the checkout. That covers a terminal's Ctrl-C
+and a signal sent to tak alone, as when CI cancels a job, and it never signals anything else,
+such as the rest of a `tak backfill … | tee log` pipeline. On Windows, and if a subject's
+`version_cmd` is running when the signal arrives, an interrupted run can leave its checkout in
+the temporary directory. Once that directory is deleted, the next backfill runs
 `git worktree prune`, which clears git's record of it.
 
 The benchmarks come from the current `tak.toml`, not each commit's own copy, so a series keeps

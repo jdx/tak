@@ -669,6 +669,18 @@ fn start_slow_measurement(repo: &Repo) -> (std::process::Child, i32) {
 /// `toml` is given a shell snippet that records its pid and then sleeps, and
 /// wait until that snippet is running.
 fn start_slow(repo: &Repo, toml: impl Fn(&str) -> String) -> (std::process::Child, i32) {
+    let (child, pid, _) = start_slow_piped(repo, toml, false);
+    (child, pid)
+}
+
+/// [`start_slow`], optionally as the first command of a pipeline: tak's
+/// stdout feeds a `cat` in tak's own process group, as a shell puts
+/// `tak … | tee log` in one job. Returns the reader too.
+fn start_slow_piped(
+    repo: &Repo,
+    toml: impl Fn(&str) -> String,
+    piped: bool,
+) -> (std::process::Child, i32, Option<std::process::Child>) {
     use std::os::unix::process::CommandExt;
 
     history(repo);
@@ -679,13 +691,26 @@ fn start_slow(repo: &Repo, toml: impl Fn(&str) -> String) -> (std::process::Chil
     );
     repo.write("tak.toml", &toml(&snippet));
     // Its own group, standing in for a terminal's foreground job.
-    let child = repo
+    let mut child = repo
         .tak_cmd(&["--commits", "main~1..main"])
         .process_group(0)
-        .stdout(std::process::Stdio::null())
+        .stdout(if piped {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
+    let reader = child.stdout.take().map(|out| {
+        let log = std::fs::File::create(repo.tmp.parent().unwrap().join("tee.log")).unwrap();
+        Command::new("cat")
+            .process_group(child.id() as i32)
+            .stdin(out)
+            .stdout(log)
+            .spawn()
+            .unwrap()
+    });
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     let pid = loop {
         if let Ok(text) = std::fs::read_to_string(&pidfile) {
@@ -697,7 +722,7 @@ fn start_slow(repo: &Repo, toml: impl Fn(&str) -> String) -> (std::process::Chil
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
-    (child, pid)
+    (child, pid, reader)
 }
 
 /// A build or measurement tak killed on the way out is not the commit's
@@ -920,5 +945,134 @@ fn a_failed_instruction_count_records_nothing() {
         stdout(&dry).contains("measure failed before"),
         "{}",
         stdout(&dry)
+    );
+}
+
+/// SIGTERM to tak alone while it is the first command of a pipeline, as in
+/// `tak backfill … | tee log`: the shell puts both in one process group, and
+/// stopping the measured command must not stop the reader, which finishes on
+/// its own once tak's output closes.
+#[test]
+fn a_sigterm_spares_the_rest_of_a_pipeline() {
+    let repo = Repo::new();
+    let (mut child, subject, reader) = start_slow_piped(
+        &repo,
+        |pid| {
+            format!(
+                "[build]\ncmd = [\"true\"]\n\
+                 [bench.startup]\ncmd = [\"sh\", \"-c\", \"{pid}\"]\nruns = 1\nwarmup = 0\n"
+            )
+        },
+        true,
+    );
+    let mut reader = reader.expect("a reader");
+    // SAFETY: signals the process this test spawned.
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    let status = wait_for(&mut child);
+    assert_eq!(status.code(), Some(143), "{status:?}");
+    assert!(wait_gone(subject), "the measured command outlived tak");
+    let read = wait_for(&mut reader);
+    assert!(read.success(), "the reader was stopped too: {read:?}");
+    assert_eq!(repo.worktrees(), 1);
+}
+
+/// A measurement failure is remembered for its benchmark only: a later run
+/// of another benchmark still measures that commit.
+#[test]
+fn a_failed_benchmark_does_not_pass_over_the_others() {
+    let repo = Repo::new();
+    history(&repo);
+    repo.write(
+        "tak.toml",
+        "[build]\ncmd = [\"true\"]\n\
+         [bench.broken]\ncmd = [\"sh\", \"-c\", \"exit 1\"]\nruns = 1\nwarmup = 0\n\
+         [bench.fine]\ncmd = [\"sh\", \"-c\", \"exit 0\"]\nruns = 1\nwarmup = 0\n",
+    );
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let range = "main~1..main";
+
+    let first = repo.tak(&["--commits", range, "--bench", "broken"]);
+    assert!(!first.status.success(), "{}", both(&first));
+    let second = repo.tak(&["--commits", range, "--bench", "fine"]);
+    assert!(second.status.success(), "{}", both(&second));
+    let benches: Vec<String> = repo.notes(&head).into_iter().map(|r| r.bench).collect();
+    assert_eq!(benches, ["fine"]);
+
+    // Without --bench: `fine` is recorded and `broken` failed before, so
+    // there is nothing to build.
+    let dry = repo.tak(&["--commits", range, "--dry-run"]);
+    assert!(
+        stdout(&dry).contains(&format!("{}  measure failed before", &head[..12])),
+        "{}",
+        stdout(&dry)
+    );
+}
+
+/// Every setup of a multi-subject benchmark runs before any sampling, so a
+/// later subject's setup can swap an earlier one's already-checked `dir` for
+/// a symlink. The check runs again once all of them have.
+#[test]
+fn a_later_setup_cannot_move_an_earlier_subjects_dir() {
+    let repo = Repo::new();
+    repo.write(".gitignore", "tool\ntak.toml\n");
+    repo.write("wx/keep", "");
+    repo.git(&["add", ".gitignore", "wx"]);
+    repo.commit_tool(Some("v1"));
+    repo.commit_tool(Some("v2"));
+    let outside = repo.tmp.parent().unwrap().join("outside-dir");
+    std::fs::create_dir_all(&outside).unwrap();
+    repo.write(
+        "tak.toml",
+        &format!(
+            "[build]\ncmd = [\"true\"]\n\
+             [bench.cmp]\nruns = 1\nwarmup = 0\n\
+             [bench.cmp.subject.x]\ncmd = [\"sh\", \"-c\", \"touch ran\"]\ndir = \"wx\"\n\
+             [bench.cmp.subject.y]\ncmd = [\"true\"]\n\
+             setup = [\"sh\", \"-c\", \"rm -rf wx && ln -s {} wx\"]\n",
+            outside.display()
+        ),
+    );
+    let out = repo.tak(&["--commits", "HEAD~1..HEAD"]);
+    assert!(
+        both(&out).contains("wx leads outside the checkout"),
+        "{}",
+        both(&out)
+    );
+    assert!(!outside.join("ran").exists(), "x ran outside the checkout");
+}
+
+/// `prepare` runs before every sample and can do the same, so the check
+/// also runs after it, before the sample is timed.
+#[test]
+fn a_prepare_cannot_move_its_dir_out_of_the_checkout() {
+    let repo = Repo::new();
+    repo.write(".gitignore", "tool\ntak.toml\n");
+    repo.write("wx/keep", "");
+    repo.git(&["add", ".gitignore", "wx"]);
+    repo.commit_tool(Some("v1"));
+    repo.commit_tool(Some("v2"));
+    let outside = repo.tmp.parent().unwrap().join("outside-dir");
+    std::fs::create_dir_all(&outside).unwrap();
+    repo.write(
+        "tak.toml",
+        &format!(
+            "[build]\ncmd = [\"true\"]\n\
+             [bench.fixture]\ncmd = [\"sh\", \"-c\", \"touch ran\"]\ndir = \"wx\"\n\
+             prepare = [\"sh\", \"-c\", \"d=$PWD && cd / && rm -rf \\\"$d\\\" && ln -s {} \\\"$d\\\"\"]\n\
+             runs = 1\nwarmup = 0\n",
+            outside.display()
+        ),
+    );
+    let out = repo.tak(&["--commits", "HEAD~1..HEAD"]);
+    assert!(
+        both(&out).contains("wx leads outside the checkout"),
+        "{}",
+        both(&out)
+    );
+    assert!(
+        !outside.join("ran").exists(),
+        "the sample ran outside the checkout"
     );
 }
