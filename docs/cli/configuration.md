@@ -8,7 +8,7 @@
 - **Since:** 0.0.14
 - **Set with:** `TAK_ACCEPT_TRAILERS`, config `gate.accept_trailers`
 
-Whether `tak compare` honours `Tak-Accept:` trailers on the commits it compares.
+Whether `tak compare` and `tak detect` honour `Tak-Accept:` trailers on the commits they compare.
 
 Off by default, because of who writes those trailers. A trailer is part of a commit message, and the commits `tak compare` reads are the change being gated — on a pull request, the author's own. Honouring them by default would let any change waive its own gate by adding one line, which makes the gate advisory for exactly the changes it exists to stop. The acceptance would be visible in the report, but visible is not the same as approved.
 
@@ -99,7 +99,7 @@ TAK_ENV_DENY=GITHUB_TOKEN,GH_TOKEN,NPM_TOKEN tak run
 - **Since:** 0.0.14
 - **Set with:** `--gate-min-delta`, `TAK_GATE_MIN_DELTA`, config `gate.min_delta`
 
-How many instructions a count may rise by before `tak compare` fails, whatever the percentage.
+How many instructions a count may rise by before `tak compare` or `tak detect` fails, whatever the percentage.
 
 A regression has to exceed both this and `gate_pct`. A percentage alone serves small benchmarks badly: on a 450k-instruction startup check, 1% is 4,500 instructions, which one new dependency's relocations in the dynamic loader can account for before `main` runs. A floor lets such a benchmark keep a tight percentage without failing on a handful of instructions.
 
@@ -117,7 +117,7 @@ tak compare origin/main --gate-min-delta 20000
 - **Since:** 0.0.4
 - **Set with:** `--gate-pct`, `TAK_GATE_PCT`, config `gate.pct`
 
-How much an instruction count may rise before `tak compare` fails.
+How much an instruction count may rise before `tak compare` or `tak detect` fails.
 
 A percentage of the base measurement. Only instruction counts are gated. Wall clock is reported and never gated: on the same hardware it moves 4-20% run to run, so a threshold tight enough to catch a real regression would fire constantly, and one loose enough to stay quiet would catch nothing.
 
