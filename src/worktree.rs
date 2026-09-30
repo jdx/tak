@@ -177,10 +177,15 @@ impl FailedBuilds {
     /// The commits that failed under `build`, a stable one-line description
     /// of the `[build]` definition.
     pub fn load(build: String) -> Result<FailedBuilds> {
-        let common = git_str(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
-        let path = PathBuf::from(common)
-            .join("tak")
-            .join("backfill-build-failed");
+        // Plain `--git-common-dir` and `std::path::absolute`, as the baseline
+        // store resolves it: `--path-format=absolute` would need git 2.31,
+        // newer than anything else tak asks of git. The output is relative
+        // to the current directory at the top of a checkout (`.git`) and
+        // absolute from inside a worktree; both resolve the same way here.
+        let common = PathBuf::from(git_str(&["rev-parse", "--git-common-dir"])?);
+        let common = std::path::absolute(&common)
+            .with_context(|| format!("could not resolve {}", common.display()))?;
+        let path = common.join("tak").join("backfill-build-failed");
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let shas = text
             .lines()
@@ -260,12 +265,13 @@ impl Worktree {
         }
         let mut hooks_cfg = std::ffi::OsString::from("core.hooksPath=");
         hooks_cfg.push(hooks);
+        // No `--quiet`: `worktree add` only gained it in git 2.25, and its
+        // output is captured and discarded anyway.
         git(&[
             "-c".as_ref(),
             &hooks_cfg,
             "worktree".as_ref(),
             "add".as_ref(),
-            "--quiet".as_ref(),
             "--detach".as_ref(),
             path.as_os_str(),
             sha.as_ref(),
