@@ -600,6 +600,65 @@ fn a_program_symlinked_out_of_the_checkout_is_not_measured() {
     assert!(repo.notes(&linked).is_empty());
 }
 
+/// A declared metric that cannot be taken at a commit — its file does not
+/// exist there — keeps that commit from being recorded, as `tak run
+/// --record` refuses it, instead of storing the run with the metric absent.
+/// A commit where it can be taken records it.
+#[test]
+fn a_commit_missing_a_metric_records_nothing() {
+    let repo = Repo::new();
+    config(
+        &repo,
+        "[bench.startup.metric.data_bytes]\nfile = \"data.bin\"\n",
+    );
+    repo.write(".gitignore", "tool\ntak.toml\n");
+    repo.git(&["add", ".gitignore"]);
+    let base = repo.commit_tool(Some("v1"));
+    let without = repo.commit_tool(Some("v2"));
+    repo.write("data.bin", "12345");
+    repo.git(&["add", "data.bin"]);
+    let with = repo.commit_tool(Some("v3"));
+
+    let out = repo.tak(&["--commits", &format!("{base}..main")]);
+    assert!(out.status.success(), "{}", both(&out));
+    assert!(repo.notes(&without).is_empty(), "{}", both(&out));
+    assert!(
+        stdout(&out).contains("1 metric(s) failed: startup `data_bytes`"),
+        "{}",
+        both(&out)
+    );
+    let recorded = repo.notes(&with);
+    assert_eq!(recorded.len(), 1, "{}", both(&out));
+    assert_eq!(recorded[0].metrics["data_bytes"], 5.0);
+}
+
+/// A metric's file symlinked out of the checkout would record the live
+/// tree's file at every commit, so that commit is not measured.
+#[test]
+fn a_metric_file_symlinked_out_of_the_checkout_is_not_measured() {
+    let repo = Repo::new();
+    config(
+        &repo,
+        "[bench.startup.metric.data_bytes]\nfile = \"data.bin\"\n",
+    );
+    repo.write(".gitignore", "tool\ntak.toml\n");
+    repo.git(&["add", ".gitignore"]);
+    let base = repo.commit_tool(Some("v1"));
+    let outside = repo.tmp.parent().unwrap().join("outside-data");
+    std::fs::write(&outside, "outside").unwrap();
+    std::os::unix::fs::symlink(&outside, repo.dir.join("data.bin")).unwrap();
+    repo.git(&["add", "data.bin"]);
+    let linked = repo.commit_tool(Some("v2"));
+
+    let out = repo.tak(&["--commits", &format!("{base}..main")]);
+    assert!(
+        stdout(&out).contains("data.bin leads outside the checkout"),
+        "{}",
+        both(&out)
+    );
+    assert!(repo.notes(&linked).is_empty());
+}
+
 /// A commit dated before 1970 is recorded with its own date, and does not
 /// stop the rest of the range.
 #[test]

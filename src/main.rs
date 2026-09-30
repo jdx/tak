@@ -1033,15 +1033,7 @@ fn finish(
     // missing file or a broken script is a broken benchmark — and storing the
     // rest, in git notes or as a baseline, would leave the metric silently
     // absent, which reads as it having been dropped rather than having failed.
-    let broken: Vec<String> = measured
-        .iter()
-        .flat_map(|m| {
-            m.custom
-                .iter()
-                .filter(|(_, v)| v.is_none())
-                .map(|(name, _)| format!("{} `{name}`", label(m)))
-        })
-        .collect();
+    let broken = failed_metrics(&measured);
     if !broken.is_empty() {
         if let Some(storing) = &storing {
             eprintln!(
@@ -1396,6 +1388,22 @@ fn save_baseline(store: &Store, name: &str, records: &[Record]) -> Result<()> {
     );
     println!("  compare against it with: tak run --baseline {name}");
     Ok(())
+}
+
+/// Each declared metric that could not be taken, as `bench (subject)
+/// \`name\``. One list for every path that stores a run, `tak run` and
+/// `tak backfill --commits` alike, so that none of them keeps a run with a
+/// declared metric silently missing.
+fn failed_metrics(measured: &[Measured]) -> Vec<String> {
+    measured
+        .iter()
+        .flat_map(|m| {
+            m.custom
+                .iter()
+                .filter(|(_, v)| v.is_none())
+                .map(|(name, _)| format!("{} `{name}`", label(m)))
+        })
+        .collect()
 }
 
 /// How a measured subject is named in messages: the benchmark, plus the
@@ -2689,11 +2697,22 @@ fn backfill_commit(
                 }
                 Ok((measured, _)) => {
                     let failing = failing_checks(&measured);
-                    if failing.is_empty() {
+                    // And a declared metric that could not be taken — its
+                    // file missing at this commit, say — as `tak run
+                    // --record` refuses it: the commit would count as
+                    // measured with the metric absent.
+                    let broken = failed_metrics(&measured);
+                    if !failing.is_empty() {
+                        Some(format!("check failed: {}", labels(&failing)))
+                    } else if !broken.is_empty() {
+                        Some(format!(
+                            "{} metric(s) failed: {}",
+                            broken.len(),
+                            broken.join(", ")
+                        ))
+                    } else {
                         records.extend(measured.into_iter().map(|m| m.record));
                         None
-                    } else {
-                        Some(format!("check failed: {}", labels(&failing)))
                     }
                 }
             },
@@ -2743,6 +2762,25 @@ fn check_inputs(subjects: &[Subject], wt: &tak_cli::worktree::Worktree) -> Optio
             && let Err(e) = wt.check_contains(&found)
         {
             return Some(format!("{e:#}"));
+        }
+        // A metric's file, or its command's program, the same way: a
+        // committed symlink to the live tree would record the live binary's
+        // size, or run the live script, at every commit. A file missing here
+        // is left for the metric itself to fail on, which names it.
+        for source in s.metrics.values() {
+            let path = match source {
+                config::MetricSource::File(p) => Some(p.clone()),
+                config::MetricSource::Cmd(argv) => {
+                    spawned_path(Path::new(&argv[0])).filter(|p| p.is_absolute())
+                }
+            };
+            if let Some(p) = path
+                && p.starts_with(wt.path())
+                && p.exists()
+                && let Err(e) = wt.check_contains(&p)
+            {
+                return Some(format!("{e:#}"));
+            }
         }
         if s.setup.is_some() {
             continue;
