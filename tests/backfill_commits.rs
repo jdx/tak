@@ -1264,16 +1264,19 @@ fn history_with_wx(repo: &Repo) -> PathBuf {
 fn a_prepare_does_not_run_through_a_dir_the_last_sample_moved() {
     let repo = Repo::new();
     let outside = history_with_wx(&repo);
+    // The path goes in as `$1`, not spliced into the script, so a TMPDIR
+    // with spaces cannot split it; `{:?}` quotes it for TOML.
     repo.write(
         "tak.toml",
         &format!(
             "[build]\ncmd = [\"true\"]\n\
              [bench.fixture]\n\
-             cmd = [\"sh\", \"-c\", \"d=$PWD && cd / && rm -rf \\\"$d\\\" && ln -s {} \\\"$d\\\"\"]\n\
+             cmd = [\"sh\", \"-c\", \"d=$PWD && cd / && rm -rf \\\"$d\\\" && ln -s \\\"$1\\\" \\\"$d\\\"\", \"sh\", {:?}]\n\
              dir = \"wx\"\nprepare = [\"sh\", \"-c\", \"touch prepared\"]\nruns = 2\nwarmup = 0\n",
-            outside.display()
+            outside.display().to_string()
         ),
     );
+    let head = repo.git(&["rev-parse", "HEAD"]);
     let out = repo.tak(&["--commits", "HEAD~1..HEAD"]);
     assert!(
         both(&out).contains("wx leads outside the checkout"),
@@ -1284,6 +1287,7 @@ fn a_prepare_does_not_run_through_a_dir_the_last_sample_moved() {
         !outside.join("prepared").exists(),
         "the second prepare ran outside the checkout"
     );
+    assert!(repo.notes(&head).is_empty(), "the commit was recorded");
 }
 
 /// Every subject's setup runs before any sample, so an earlier setup can
@@ -1299,12 +1303,13 @@ fn a_setup_does_not_run_through_a_dir_an_earlier_setup_moved() {
             "[build]\ncmd = [\"true\"]\n\
              [bench.cmp]\nruns = 1\nwarmup = 0\n\
              [bench.cmp.subject.x]\ncmd = [\"true\"]\n\
-             setup = [\"sh\", \"-c\", \"rm -rf wy && ln -s {} wy\"]\n\
+             setup = [\"sh\", \"-c\", \"rm -rf wy && ln -s \\\"$1\\\" wy\", \"sh\", {:?}]\n\
              [bench.cmp.subject.y]\ncmd = [\"true\"]\ndir = \"wy\"\n\
              setup = [\"sh\", \"-c\", \"touch wy/set-up\"]\n",
-            outside.display()
+            outside.display().to_string()
         ),
     );
+    let head = repo.git(&["rev-parse", "HEAD"]);
     let out = repo.tak(&["--commits", "HEAD~1..HEAD"]);
     assert!(
         both(&out).contains("wy leads outside the checkout"),
@@ -1315,4 +1320,5 @@ fn a_setup_does_not_run_through_a_dir_an_earlier_setup_moved() {
         !outside.join("set-up").exists(),
         "y's setup ran through the moved directory"
     );
+    assert!(repo.notes(&head).is_empty(), "the commit was recorded");
 }
