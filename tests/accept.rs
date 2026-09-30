@@ -101,7 +101,17 @@ fn run_compare(dir: &Path, args: &[&str], trailers: Option<&str>) -> (bool, Stri
 
 /// A base with two benchmarks, and a head `message` that regresses both by 10%.
 fn regressed(message: &str) -> (tempfile::TempDir, String, String) {
+    regressed_under(None, message)
+}
+
+/// As [`regressed`], with `tak.toml` committed on the base as `base_toml`:
+/// the file `tak compare` takes its gate policy from.
+fn regressed_under(base_toml: Option<&str>, message: &str) -> (tempfile::TempDir, String, String) {
     let dir = repo();
+    if let Some(text) = base_toml {
+        std::fs::write(dir.path().join("tak.toml"), text).unwrap();
+        git(dir.path(), &["add", "tak.toml"]);
+    }
     let base = commit(dir.path(), "base");
     note(dir.path(), &base, &[("startup", 1e6), ("resolve", 1e6)]);
     let head = commit(dir.path(), message);
@@ -182,17 +192,14 @@ fn no_trailers_means_no_note() {
     assert!(!stdout.contains("not honoured"), "{stdout}");
 }
 
-/// Opting in from `tak.toml`, and opting back out from the environment. The
-/// file is read from the checkout under test, so a workflow that does not
-/// trust the change needs a way to override it.
+/// Opting in from the base's `tak.toml`, and opting back out from the
+/// environment, which the workflow controls and the change does not.
 #[test]
 fn the_config_opts_in_and_the_environment_overrides_it() {
-    let (dir, base, _) = regressed("slower\n\nTak-Accept: startup, resolve");
-    std::fs::write(
-        dir.path().join("tak.toml"),
-        "[gate]\naccept_trailers = true\n",
-    )
-    .unwrap();
+    let (dir, base, _) = regressed_under(
+        Some("[gate]\naccept_trailers = true\n"),
+        "slower\n\nTak-Accept: startup, resolve",
+    );
     let (ok, stdout, _) = compare(dir.path(), &[&base]);
     assert!(ok, "tak.toml opted in: {stdout}");
     assert!(stdout.contains("**2 accepted regression(s)"), "{stdout}");
@@ -366,6 +373,8 @@ fn acceptance_uses_each_benchmarks_own_gate() {
          [bench.help]\ncmd = \"true\"\ngate = { enabled = false }\n",
     )
     .unwrap();
+    // Committed: the gates come from the base's tree, not the disk.
+    git(dir.path(), &["add", "tak.toml"]);
     let base = commit(dir.path(), "base");
     note(
         dir.path(),

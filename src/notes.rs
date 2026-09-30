@@ -232,6 +232,45 @@ pub fn rev_parse(rev: &str) -> Result<String> {
     git(&["rev-parse", &format!("{rev}^{{commit}}")])
 }
 
+/// The current directory relative to the repository root, as git spells it:
+/// `a/b/` in a subdirectory, empty at the root.
+pub fn prefix() -> Result<String> {
+    git(&["rev-parse", "--show-prefix"])
+}
+
+/// The contents of `path`, relative to the repository root, in `commit`'s
+/// tree, or `None` when that tree has no such file.
+///
+/// Absent and unreadable are told apart, which is why this asks `ls-tree`
+/// before reading: `cat-file` fails the same way for a path the commit does
+/// not have and for a tree this clone never fetched. A caller that falls back
+/// on absence must not fall back on the second, or a checkout missing the
+/// objects would quietly get a different answer from one that has them.
+///
+/// `cat-file blob` rather than `git show`: plumbing, so no pager, no textconv
+/// and nothing a user's config can put between the bytes and the parser.
+/// `--literal-pathspecs` because a directory name is data here, not a glob.
+pub fn file_at(commit: &str, path: &str) -> Result<Option<String>> {
+    let entry = git(&[
+        "--literal-pathspecs",
+        "ls-tree",
+        "-z",
+        "--full-tree",
+        commit,
+        "--",
+        path,
+    ])?;
+    let Some((meta, _)) = entry.split_once('\t') else {
+        return Ok(None);
+    };
+    // A symlink is a blob too, holding its target rather than the file. On
+    // disk the search follows it; in a tree there is nothing to follow into.
+    if !matches!(meta.split(' ').next(), Some("100644" | "100755")) {
+        bail!("{path} at {commit} is not a regular file");
+    }
+    git(&["cat-file", "blob", &format!("{commit}:{path}")]).map(Some)
+}
+
 /// The most recent `n` commits reachable from `rev`, newest first.
 ///
 /// First-parent only. A merge commit's second parent is the branch that was

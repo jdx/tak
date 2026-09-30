@@ -218,10 +218,12 @@ jobs:
       # rise too, so an acceptance can only ever turn this check neutral,
       # never green.
       #
-      # TAK_ACCEPT_TRAILERS=0 because tak.toml comes from the pull request's
-      # own checkout: a pull request could set `[gate] accept_trailers = true`
-      # and accept its own regression with a trailer. The environment takes
-      # precedence over the file.
+      # The gate policy comes from the merge base's tak.toml, which the fetch
+      # above makes available, so a pull request cannot loosen it or set
+      # `[gate] accept_trailers = true` for itself. TAK_ACCEPT_TRAILERS=0 keeps
+      # trailers off here even if main's tak.toml turns them on. The binary
+      # comparing is this pull request's own build, so for tak itself that
+      # is not a boundary; `authorize` is.
       - name: Compare against the base
         env:
           BASE_SHA: ${{ steps.base.outputs.sha }}
