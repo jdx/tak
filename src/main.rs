@@ -191,8 +191,8 @@ enum Cmd {
         #[usage(long, value_name = "RANGE")]
         commits: Option<String>,
         /// With --commits, measure every subject again even where this runner
-        /// class already has a record, and retry commits whose build failed
-        /// in an earlier run.
+        /// class already has a record, and retry commits whose build or
+        /// measurement failed in an earlier run.
         #[usage(long)]
         force: bool,
         /// Repository to pull releases from, as "owner/name". Defaults to the
@@ -1478,6 +1478,20 @@ fn measure_bench(
     opts: &RunOpts,
     settings: &Settings,
 ) -> Result<(Vec<Measured>, Vec<String>)> {
+    measure_bench_vetted(bench, subjects, multi, seed, opts, settings, &|_| Ok(()))
+}
+
+/// [`measure_bench`], with `vet` asked about each subject once its setup has
+/// succeeded; see [`measure::Observer::set_up`].
+fn measure_bench_vetted(
+    bench: &str,
+    subjects: &[Subject],
+    multi: bool,
+    seed: u64,
+    opts: &RunOpts,
+    settings: &Settings,
+    vet: &dyn Fn(&Subject) -> Result<()>,
+) -> Result<(Vec<Measured>, Vec<String>)> {
     if multi {
         println!(
             "  {bench}: {} subjects, interleaved (--seed {seed})",
@@ -1488,11 +1502,22 @@ fn measure_bench(
     // Each subject's version is asked for inside the run, after its setup
     // and before any warmup; see `measure::interleaved_with_versions`.
     let (results, versions) = if opts.no_progress {
-        measure::interleaved_with_versions(subjects, bench_seed, settings, &mut measure::Quiet)
+        let mut quiet = measure::Quiet;
+        let mut obs = Vetted {
+            inner: &mut quiet,
+            subjects,
+            vet,
+        };
+        measure::interleaved_with_versions(subjects, bench_seed, settings, &mut obs)
     } else {
         let names = subjects.iter().map(|s| s.name.clone()).collect();
         let mut bar = tak_cli::progress::Bar::new(bench, names);
-        let r = measure::interleaved_with_versions(subjects, bench_seed, settings, &mut bar);
+        let mut obs = Vetted {
+            inner: &mut bar,
+            subjects,
+            vet,
+        };
+        let r = measure::interleaved_with_versions(subjects, bench_seed, settings, &mut obs);
         bar.finish();
         r
     };
@@ -1572,8 +1597,13 @@ fn measure_bench(
             );
         }
         let (count_failed, profile) = if s.counters && !opts.no_counters {
-            let (counted, profile) =
-                count_into(&mut metrics, s, settings, opts.profile_dir.is_some());
+            let (counted, profile) = count_into(
+                &mut metrics,
+                s,
+                settings,
+                opts.profile_dir.is_some(),
+                &|| vet(s),
+            );
             (!counted, profile)
         } else {
             (false, None)
@@ -1640,6 +1670,40 @@ fn measure_bench(
     Ok((measured, failed))
 }
 
+/// An observer that passes everything on, and asks `vet` about a subject
+/// once every setup has run and again before each of its samples.
+struct Vetted<'a> {
+    inner: &'a mut dyn measure::Observer,
+    subjects: &'a [Subject],
+    vet: &'a dyn Fn(&Subject) -> Result<()>,
+}
+
+impl measure::Observer for Vetted<'_> {
+    fn planned(&mut self, remaining: &[u64]) {
+        self.inner.planned(remaining);
+    }
+    fn setting_up(&mut self, subject: usize) {
+        self.inner.setting_up(subject);
+    }
+    fn set_up(&mut self, subject: usize) -> Result<()> {
+        self.inner.set_up(subject)?;
+        (self.vet)(&self.subjects[subject])
+    }
+    fn before_run(&mut self, subject: usize) -> Result<()> {
+        self.inner.before_run(subject)?;
+        (self.vet)(&self.subjects[subject])
+    }
+    fn started(&mut self, subject: usize) {
+        self.inner.started(subject);
+    }
+    fn finished(&mut self, subject: usize, elapsed: std::time::Duration) {
+        self.inner.finished(subject, elapsed);
+    }
+    fn dropped(&mut self, subject: usize) {
+        self.inner.dropped(subject);
+    }
+}
+
 /// The `tool` a subject's records are stored under.
 ///
 /// TAK_TOOL only ever renames the single-command series. Keyed on the
@@ -1663,16 +1727,19 @@ fn record_tool(multi: bool, s: &Subject) -> String {
 /// `--gate` already has nothing to check then.
 ///
 /// With `profile`, also returns the cachegrind profile behind the count.
+/// `vet` is asked before each counted run; see
+/// [`measure::subject_instructions_vetted`].
 fn count_into(
     metrics: &mut BTreeMap<String, f64>,
     s: &Subject,
     settings: &Settings,
     profile: bool,
+    vet: &dyn Fn() -> Result<()>,
 ) -> (bool, Option<Vec<u8>>) {
     let counted = if profile {
-        measure::subject_profile(s, settings).map(|c| c.map(|(c, p)| (c, Some(p))))
+        measure::subject_profile_vetted(s, settings, vet).map(|c| c.map(|(c, p)| (c, Some(p))))
     } else {
-        measure::subject_instructions(s, settings).map(|c| c.map(|c| (c, None)))
+        measure::subject_instructions_vetted(s, settings, vet).map(|c| c.map(|c| (c, None)))
     };
     match counted {
         Ok(Some((c, profile))) => {
@@ -2475,13 +2542,23 @@ struct Pending {
     /// class yet, or every selected one under `--force`. Empty means nothing
     /// to do.
     needs: BTreeMap<String, Vec<String>>,
-    /// Its build failed in an earlier run, under the same `[build]`.
-    failed_before: bool,
+    /// Its build failed in an earlier run, under the same keys; see
+    /// [`tak_cli::worktree::FailedCommits`]. Always false under `--force`.
+    build_failed_before: bool,
+    /// Benchmarks it still needs whose measurement failed here in an earlier
+    /// run, and which `needs` therefore leaves out. Empty under `--force`.
+    measure_failed_before: Vec<String>,
 }
 
 impl Pending {
     fn wanted(&self) -> bool {
-        !self.needs.is_empty() && !self.failed_before
+        !self.needs.is_empty() && !self.build_failed_before
+    }
+
+    /// Nothing is still needed, and it is not because it was all recorded.
+    fn passed_over(&self) -> bool {
+        (self.build_failed_before && !self.needs.is_empty())
+            || (self.needs.is_empty() && !self.measure_failed_before.is_empty())
     }
 }
 
@@ -2533,7 +2610,14 @@ fn describe_needs(needs: &BTreeMap<String, Vec<String>>, plans: &[BenchPlan]) ->
 /// How far one commit got.
 enum Outcome {
     Recorded(usize),
+    /// The build failed, or its tree could not be used. Remembered.
     BuildFailed,
+    /// It built, and measuring this benchmark failed. Remembered too, for
+    /// that benchmark: at a fixed commit it almost always fails the same way
+    /// again.
+    MeasureFailed(String),
+    /// It could not be checked out, which says nothing about the commit.
+    /// Not remembered.
     NotRecorded,
 }
 
@@ -2648,7 +2732,14 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
         build.dir.as_ref().map(|d| d.to_string_lossy()),
         &build.env,
     ))?;
-    let mut failed_builds = tak_cli::worktree::FailedBuilds::load(build_key)?;
+    // A measurement failure also depends on the benchmarks, and editing
+    // tak.toml is how one gets fixed: the file's contents are part of its
+    // key, so any edit tries those commits again. Coarser than the
+    // benchmarks alone, and erring towards a retry.
+    let text =
+        std::fs::read(&path).with_context(|| format!("could not read {}", path.display()))?;
+    let measure_key = format!("{build_key} {}", tak_cli::worktree::fingerprint(&text));
+    let mut failures = tak_cli::worktree::FailedCommits::load(build_key, measure_key)?;
 
     let mut pending = Vec::with_capacity(commits.len());
     for c in commits {
@@ -2658,21 +2749,43 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
             .filter(|r| r.runner == runner)
             .map(|r| (r.bench, r.tool))
             .collect();
+        let mut needs = needs_for(&plans, &have, o.force);
+        // Only the benchmarks that failed here are passed over: another
+        // benchmark of the same commit, or one a later `--bench` selects,
+        // has not failed and is still measured.
+        let mut measure_failed_before = Vec::new();
+        if !o.force {
+            needs.retain(|bench, _| {
+                let failed = failures.measure_failed(&c.sha, bench);
+                if failed {
+                    measure_failed_before.push(bench.clone());
+                }
+                !failed
+            });
+        }
         pending.push(Pending {
-            failed_before: !o.force && failed_builds.contains(&c.sha),
-            needs: needs_for(&plans, &have, o.force),
+            build_failed_before: !o.force && failures.build_failed(&c.sha),
+            measure_failed_before,
+            needs,
             sha: c.sha,
             subject: c.subject,
         });
     }
-    let recorded_before = pending.iter().filter(|p| p.needs.is_empty()).count();
-    let failed_before = pending
+    let recorded_before = pending
         .iter()
-        .filter(|p| !p.needs.is_empty() && p.failed_before)
+        .filter(|p| p.needs.is_empty() && p.measure_failed_before.is_empty())
+        .count();
+    let build_failed_before = pending
+        .iter()
+        .filter(|p| p.passed_over() && p.build_failed_before)
+        .count();
+    let measure_failed_before = pending
+        .iter()
+        .filter(|p| p.passed_over() && !p.build_failed_before)
         .count();
     // Newest first, and `--limit` counts builds rather than commits. A
-    // commit whose build failed is remembered and passed over next time, so
-    // the same command run again carries on from where the last one stopped
+    // commit that failed is remembered and passed over next time, so the
+    // same command run again carries on from where the last one stopped
     // instead of retrying the same broken commit at the top of every run.
     let (todo, beyond): (Vec<&Pending>, Vec<&Pending>) = {
         let needed: Vec<&Pending> = pending.iter().filter(|p| p.wanted()).collect();
@@ -2691,18 +2804,26 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
         println!();
         let everything = needs_for(&plans, &Default::default(), true);
         for p in &pending {
-            let status = if p.needs.is_empty() {
-                "recorded".to_string()
-            } else if p.failed_before {
+            let status = if p.build_failed_before && p.passed_over() {
                 "build failed before".to_string()
+            } else if p.passed_over() {
+                "measure failed before".to_string()
+            } else if p.needs.is_empty() {
+                "recorded".to_string()
             } else if beyond.iter().any(|b| b.sha == p.sha) {
                 "beyond --limit".to_string()
             } else if p.needs == everything {
                 "would build".to_string()
-            } else {
+            } else if p.measure_failed_before.is_empty() {
                 format!("would build ({})", describe_needs(&p.needs, &plans))
+            } else {
+                format!(
+                    "would build ({}; {} failed before)",
+                    describe_needs(&p.needs, &plans),
+                    p.measure_failed_before.join(", ")
+                )
             };
-            println!("  {}  {status:<19}  {}", &p.sha[..12], p.subject);
+            println!("  {}  {status:<21}  {}", &p.sha[..12], p.subject);
         }
         println!("\n  dry run — nothing built or written");
         return Ok(());
@@ -2717,11 +2838,13 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
     tak_cli::worktree::clean_up_on_interrupt(scratch.path())?;
 
     let seed = random_seed();
-    let (mut recorded, mut build_failed, mut not_recorded) = (0usize, Vec::new(), Vec::new());
+    let mut recorded = 0usize;
+    let (mut build_failed, mut measure_failed, mut not_recorded) =
+        (Vec::new(), Vec::new(), Vec::new());
     for p in &todo {
         let short = &p.sha[..12];
         println!("\n{short}  {}", p.subject);
-        match backfill_commit(
+        let outcome = backfill_commit(
             p,
             &build,
             &plans,
@@ -2731,32 +2854,41 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
             seed,
             &opts,
             settings,
-        )? {
+        );
+        // A build or measurement the interrupt handler killed comes back as
+        // a failure; the handler exits the process, with the signal's
+        // status, and nothing here may write or return first.
+        tak_cli::worktree::wait_if_interrupted();
+        match outcome? {
             Outcome::Recorded(n) => {
                 println!("  recorded {n} measurement(s)");
                 recorded += 1;
-                failed_builds.remove(&p.sha)?;
+                let benches: Vec<String> = p.needs.keys().cloned().collect();
+                failures.recorded(&p.sha, &benches)?;
             }
+            // Never an interrupted one: a failure the handler caused by
+            // killing the build or the measured command says nothing about
+            // the commit, and `wait_if_interrupted` above stops here before
+            // one could be remembered and leave a cancelled job's commit out
+            // of every later run.
             Outcome::BuildFailed => {
                 build_failed.push(short);
-                // The interrupt handler kills the build before it removes
-                // anything, so a build that failed while it runs says
-                // nothing about the commit. Remembering it would leave a
-                // cancelled job's commit out of every later run. The flag
-                // is set before the kill, so it is always seen here.
-                if !tak_cli::worktree::stopping() {
-                    failed_builds.add(&p.sha)?;
-                }
+                failures.add(&p.sha, tak_cli::worktree::Failure::Build)?;
             }
-            Outcome::NotRecorded => {
-                not_recorded.push(short);
-                // Matters only for a remembered failure retried under
-                // --force: it built this time, so it is not passed over next
-                // time either.
-                failed_builds.remove(&p.sha)?;
+            Outcome::MeasureFailed(bench) => {
+                measure_failed.push(short);
+                // It built, so a build failure remembered from before — which
+                // `--force` retried — no longer holds. Kept, it would pass
+                // over every other benchmark of the commit from now on.
+                failures.recorded(&p.sha, &[])?;
+                failures.add(&p.sha, tak_cli::worktree::Failure::Measure(bench))?;
             }
+            Outcome::NotRecorded => not_recorded.push(short),
         }
     }
+    // A signal after the last commit still ends with its own status, and no
+    // summary that reads as if the run had finished.
+    tak_cli::worktree::wait_if_interrupted();
 
     println!(
         "\n  recorded {recorded} commit(s) → {}; {recorded_before} already recorded",
@@ -2765,14 +2897,19 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
     if !build_failed.is_empty() {
         println!("  build failed: {}", build_failed.join(", "));
     }
-    if failed_before > 0 {
-        println!(
-            "  {failed_before} commit(s) passed over: their build failed in an earlier run \
-             (--force retries them)"
-        );
+    if !measure_failed.is_empty() {
+        println!("  measurement failed: {}", measure_failed.join(", "));
     }
     if !not_recorded.is_empty() {
-        println!("  not recorded: {}", not_recorded.join(", "));
+        println!("  not checked out: {}", not_recorded.join(", "));
+    }
+    let failed_before = build_failed_before + measure_failed_before;
+    if failed_before > 0 {
+        println!(
+            "  {failed_before} commit(s) passed over: they failed in an earlier run \
+             ({build_failed_before} build, {measure_failed_before} measurement; \
+             --force retries them)"
+        );
     }
     if !beyond.is_empty() {
         println!(
@@ -2788,7 +2925,8 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
     // success, and so is a second run that only retries those. One that has
     // no record at all to show for the range is not: a CI job seeding
     // history must not pass having seeded none.
-    let failed = !(build_failed.is_empty() && not_recorded.is_empty()) || failed_before > 0;
+    let failed = !(build_failed.is_empty() && measure_failed.is_empty() && not_recorded.is_empty())
+        || failed_before > 0;
     if recorded == 0 && recorded_before == 0 && failed {
         bail!("no commit in {} was recorded", o.range);
     }
@@ -2841,11 +2979,15 @@ fn backfill_commit(
     // Counted as a failed build: which paths a commit's tree holds never
     // changes, so this would fail the same way next time, and retrying it
     // first on every run would stop `--limit` from reaching older commits.
-    for dir in [Some(&root), build.dir.as_ref()].into_iter().flatten() {
-        if let Err(e) = wt.check_contains(dir) {
-            println!("  build failed — skipped: {e:#}");
-            return Ok(Outcome::BuildFailed);
-        }
+    // The build's own program too, when it is one of the tree's files.
+    let contained = [Some(&root), build.dir.as_ref()]
+        .into_iter()
+        .flatten()
+        .try_for_each(|dir| wt.check_contains(dir))
+        .and_then(|()| check_program(&build.cmd, &wt));
+    if let Err(e) = contained {
+        println!("  build failed — skipped: {e:#}");
+        return Ok(Outcome::BuildFailed);
     }
     match backfill::run_build(&build, &scratch.join("build.log")) {
         Ok(took) => println!("  built in {:.1}s", took.as_secs_f64()),
@@ -2873,9 +3015,15 @@ fn backfill_commit(
         for s in &mut subjects {
             s.anchor(&root);
         }
+        // A subject with a `setup` is checked again once that has run: the
+        // setup is the old tree's own code, and can leave a symlink leading
+        // out of the checkout where `dir` or the program is, just as the
+        // tree itself can. Checked before anything else of it runs.
+        let vet = |s: &Subject| check_contained(s, &wt);
         let problem = match check_inputs(&subjects, &wt) {
             Some(missing) => Some(missing),
-            None => match measure_bench(name, &subjects, *multi, seed, opts, settings) {
+            None => match measure_bench_vetted(name, &subjects, *multi, seed, opts, settings, &vet)
+            {
                 Err(e) => Some(format!("{e:#}")),
                 // The same rules `tak run --record` applies: a missing
                 // subject or a failed check would leave a set in history
@@ -2885,21 +3033,44 @@ fn backfill_commit(
                 }
                 Ok((measured, _)) => {
                     let failing = failing_checks(&measured);
-                    if failing.is_empty() {
+                    // A count that was asked for and failed leaves a
+                    // timing-only record that looks like counters were off,
+                    // and a gate would pass over it without a word: the same
+                    // gap `tak run --baseline --gate` refuses.
+                    let uncounted: Vec<String> = measured
+                        .iter()
+                        .filter(|m| m.count_failed)
+                        .map(|m| {
+                            if *multi {
+                                format!("{name} ({})", m.subject.name)
+                            } else {
+                                name.clone()
+                            }
+                        })
+                        .collect();
+                    if !failing.is_empty() {
+                        Some(format!("check failed: {}", labels(&failing)))
+                    } else if !uncounted.is_empty() {
+                        Some(format!(
+                            "instruction counting failed: {}",
+                            uncounted.join(", ")
+                        ))
+                    } else {
                         records.extend(measured.into_iter().map(|m| m.record));
                         None
-                    } else {
-                        Some(format!("check failed: {}", labels(&failing)))
                     }
                 }
             },
         };
         if let Some(problem) = problem {
-            // Nothing from this commit is written, including benchmarks that
-            // did measure: a commit with half its benchmarks looks, later,
-            // exactly like one where the rest were never declared.
+            // Nothing from this run of the commit is written, including
+            // benchmarks that did measure: a run that stopped partway would
+            // leave a set nobody chose. Only this benchmark is remembered as
+            // failed, so the next run measures the others without it. That
+            // commit then lacks this benchmark by a decision the failure
+            // file records, rather than because a run broke off.
             println!("  not recorded — {name}: {problem}");
-            return Ok(Outcome::NotRecorded);
+            return Ok(Outcome::MeasureFailed(name.clone()));
         }
     }
     for r in &mut records {
@@ -2925,21 +3096,10 @@ fn backfill_commit(
 fn check_inputs(subjects: &[Subject], wt: &tak_cli::worktree::Worktree) -> Option<String> {
     let shown = |p: &Path| p.strip_prefix(wt.path()).unwrap_or(p).display().to_string();
     for s in subjects {
-        if let Some(d) = &s.dir
-            && d.starts_with(wt.path())
-            && d.exists()
-            && let Err(e) = wt.check_contains(d)
-        {
+        if let Err(e) = check_contained(s, wt) {
             return Some(format!("{e:#}"));
         }
         let program = Path::new(&s.cmd[0]);
-        if program.is_absolute()
-            && program.starts_with(wt.path())
-            && let Some(found) = spawned_path(program)
-            && let Err(e) = wt.check_contains(&found)
-        {
-            return Some(format!("{e:#}"));
-        }
         if s.setup.is_some() {
             continue;
         }
@@ -2962,6 +3122,46 @@ fn check_inputs(subjects: &[Subject], wt: &tak_cli::worktree::Worktree) -> Optio
         }
     }
     None
+}
+
+/// Whether a subject's `dir` and program, where they are inside the checkout
+/// and exist, still resolve inside it with symlinks followed.
+///
+/// Every program tak runs for the subject counts, not only `cmd`: `setup`,
+/// `prepare`, `check` and `version_cmd` are the old tree's code as much as
+/// the subject is, and a committed symlink at one of their paths would run
+/// something from outside the commit just the same.
+fn check_contained(s: &Subject, wt: &tak_cli::worktree::Worktree) -> Result<()> {
+    if let Some(d) = &s.dir
+        && d.starts_with(wt.path())
+        && d.exists()
+    {
+        wt.check_contains(d)?;
+    }
+    let programs = [
+        Some(&s.cmd),
+        s.setup.as_ref(),
+        s.prepare.as_ref(),
+        s.check.as_ref(),
+        s.version_cmd.as_ref(),
+    ];
+    for argv in programs.into_iter().flatten() {
+        check_program(argv, wt)?;
+    }
+    Ok(())
+}
+
+/// A program path inside the checkout that exists must resolve inside it.
+/// One on PATH, or named outside the checkout, is left alone.
+fn check_program(argv: &[String], wt: &tak_cli::worktree::Worktree) -> Result<()> {
+    let program = Path::new(&argv[0]);
+    if program.is_absolute()
+        && program.starts_with(wt.path())
+        && let Some(found) = spawned_path(program)
+    {
+        wt.check_contains(&found)?;
+    }
+    Ok(())
 }
 
 /// The file spawning `program` would run, if there is one. On Windows that

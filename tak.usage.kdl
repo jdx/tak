@@ -137,7 +137,7 @@ By default, downloads the release binaries a project already published and measu
     flag --commits help="Build and measure the first-parent commits in RANGE, such as `main~20..main`, instead of downloading releases." {
         arg <RANGE>
     }
-    flag --force help="With --commits, measure every subject again even where this runner class already has a record, and retry commits whose build failed in an earlier run."
+    flag --force help="With --commits, measure every subject again even where this runner class already has a record, and retry commits whose build or measurement failed in an earlier run."
     flag --repo help="Repository to pull releases from, as \"owner/name\". Defaults to the `origin` remote of the current repository." {
         arg <REPO>
     }
