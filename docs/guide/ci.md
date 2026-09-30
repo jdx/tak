@@ -70,7 +70,8 @@ tak compare origin/main
 ```
 
 An instruction-count increase beyond the configured gate fails the command. Wall-clock
-changes are displayed but never gate the result.
+changes are displayed but never gate the result. A deliberate increase can be
+[accepted](#accept-an-intentional-regression) for the benchmarks it affects.
 
 So does finding nothing to compare: when no series was measured on both revisions, the report
 says `**Nothing was compared` and the command exits non-zero after printing it. That usually
@@ -102,6 +103,123 @@ To see which functions a change came from, keep cachegrind's profiles on both si
 
 Always keep measurements partitioned by runner class. Comparing numbers across runner classes
 turns an infrastructure change into an apparent code regression.
+
+## Accept an intentional regression
+
+Some changes make a benchmark more expensive on purpose. Rather than raising the gate for
+every benchmark or reaching for `--no-gate`, name the benchmarks the change is allowed to
+regress:
+
+```sh
+tak compare "$BASE_SHA" --accept startup
+```
+
+`--accept` is repeatable. Each value is one exact benchmark name. It is neither split on
+commas nor trimmed, so it can accept any name, and an empty value is an error. It accepts only
+the benchmarks it names. Every other benchmark still gates. An acceptance names a benchmark and
+covers each of its tools and runner classes. It has no size limit.
+
+Each series is first judged against its own gate: the benchmark's
+[`gate`](/guide/configuration#per-benchmark-gates) if it has one, `[gate]` otherwise, including any
+`min_delta` floor. An acceptance only waives a change that crossed that gate and would
+otherwise fail.
+
+An accepted regression still appears in the report. Its row is marked `(accepted)`, and a
+separate line names its runner class, its gate when benchmarks have their own, and where the
+acceptance came from. It does not fail the command. The report also lists acceptances that
+accepted nothing, with the reason:
+
+- the benchmark did not rise above its gate;
+- the benchmark is report-only (`gate = { enabled = false }`), so it can never fail and needs no
+  acceptance; or
+- no benchmark by that name was compared.
+
+A misspelt name does not fail the command by itself, but the regression it was meant to cover
+still does.
+
+### Accept from a pull-request label
+
+The recommended CI path is a pull-request label that only maintainers can apply. The workflow
+maps the label onto `--accept`. The label names the benchmark, and a maintainer decides whether
+to accept the regression. For example, a GitHub Actions step can pass every
+`tak-accept:NAME` label on the pull request:
+
+```yaml
+      - name: Compare and gate
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          TAK_ACCEPT_TRAILERS: "0"
+        run: |
+          accept=()
+          while IFS= read -r label; do
+            case "$label" in
+              tak-accept:*) accept+=(--accept "${label#tak-accept:}") ;;
+            esac
+          done < <(jq -r '.[]' <<<"$LABELS")
+          tak compare "$BASE_SHA" "${accept[@]}"
+```
+
+The labels are passed as JSON and read one per line, so a label for a benchmark whose name
+contains a space stays whole. `TAK_ACCEPT_TRAILERS: "0"` stops a pull request from turning
+trailers on in its own `tak.toml`; see below.
+
+To re-run the gate when a label changes, add `labeled` and `unlabeled` to the workflow's
+`pull_request` types. Only people with triage or write access to the repository can apply
+labels.
+
+### Accept from a commit trailer
+
+A change can also carry its acceptance in a commit message. Put a `Tak-Accept` trailer in the
+final paragraph:
+
+```text
+feat: load plugins at startup
+
+Plugins now load eagerly so the first command does not pay for discovery.
+
+Tak-Accept: startup
+```
+
+**Trailers are ignored unless the project opts in.** The commits that `tak compare` reads are
+the change being gated. On a pull request, they are the author's own commits. If tak honoured
+trailers by default, any change could waive its own gate by adding one line. Enable trailers
+only when every commit in the compared range is reviewed before the result matters, or when
+everyone who can push may waive the gate:
+
+```toml
+[gate]
+accept_trailers = true
+```
+
+`TAK_ACCEPT_TRAILERS=1` enables trailers for one invocation. `tak.toml` is read from the
+checkout being measured, so a pull request can change `accept_trailers`, just as it can change
+`gate.pct`. Where the gate is enforced against changes you do not trust, set
+`TAK_ACCEPT_TRAILERS=0` in the workflow. The environment takes precedence over the file.
+
+With trailers off, the report still says when the compared range contains `Tak-Accept`
+trailers. That line names them and states that they were not honoured, so an author knows why
+their trailer had no effect.
+
+With trailers on, `tak compare BASE --rev REV` reads trailers from every commit in `BASE..REV`,
+including commits reached through a merge commit's second parent. List several benchmarks with
+commas (`Tak-Accept: startup, resolve`) or repeat the trailer. Put the reason in the commit
+body; the trailer value contains only names. The comparison needs every commit in
+`BASE..REV`. A shallow checkout that omits some commits also omits their trailers, and the
+regression then fails the gate.
+
+#### Squash merges
+
+A pull request gate reads the branch's own commits. After a squash merge, the only commit left
+in history is the squashed one. Keep the trailer in the final paragraph of that commit's
+message if later comparisons along the main branch should see the acceptance. git reads
+trailers only from the last paragraph. A squash message that concatenates each commit's
+message can leave `Tak-Accept:` in the middle of the body, where it is ordinary text. Check the
+merged commit with:
+
+```sh
+git log -1 --format='%(trailers:key=Tak-Accept)'
+```
 
 ## Browse history
 

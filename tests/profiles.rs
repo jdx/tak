@@ -336,6 +336,53 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(out.status.success(), "git {args:?}: {}", text(&out));
 }
 
+/// A local-baseline loop keeps its profiles: save a baseline, measure against
+/// it, and the two runs' profiles explain the comparison.
+#[cfg(unix)]
+#[test]
+fn profiles_are_kept_by_baseline_runs() {
+    if !valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["commit", "-q", "--allow-empty", "-m", "c"]);
+    for (flag, profiles, arg) in [
+        ("--save-baseline", "before", "/usr"),
+        ("--baseline", "after", "/"),
+    ] {
+        let out = tak(
+            dir.path(),
+            &[
+                "run",
+                "--no-progress",
+                "--runs",
+                "1",
+                "--warmup",
+                "0",
+                "--bench",
+                "list",
+                flag,
+                "good",
+                "--profile-dir",
+                profiles,
+                "--",
+                "/bin/ls",
+                "-l",
+                arg,
+            ],
+        );
+        assert!(out.status.success(), "{}", text(&out));
+        assert!(text(&out).contains("wrote 1 profile(s)"), "{}", text(&out));
+    }
+    let out = tak(dir.path(), &["explain", "before", "after"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let md = String::from_utf8_lossy(&out.stdout);
+    assert!(md.contains("### list\n"), "{md}");
+    assert!(md.contains(" function(s) changed"), "{md}");
+}
+
 /// Measure the same commit twice and the profile left behind is the second
 /// run's, while the notes' lowest count is the first's. `explain` says so
 /// instead of attributing a count the gate never used.

@@ -7,8 +7,42 @@
 
 #![cfg(unix)]
 
+use std::io::{Read, Seek};
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+
+/// `Command::output`, but with stdout and stderr captured in files, not pipes.
+///
+/// Several tests here have a step leave `sleep 30` running in the background,
+/// and the tests run in parallel threads. On macOS, std has no `pipe2`, so a
+/// pipe is created first and marked close-on-exec afterwards. A child spawned
+/// by another thread in that gap inherits the pipe's write end, passes it on
+/// to its own leftover `sleep 30`, and the thread that made the pipe then
+/// waits 30 s for an EOF that has nothing to do with its own test. That is
+/// how `a_failing_step_leaving_stderr_open_keeps_its_message` failed on the
+/// macOS runner after taking exactly 30.02 s. A file is opened close-on-exec
+/// atomically, and waiting for the exit status does not depend on EOF, so
+/// nothing in this binary can hold another test's output open.
+fn output(cmd: &mut Command) -> std::io::Result<Output> {
+    let out = tempfile::tempfile()?;
+    let err = tempfile::tempfile()?;
+    let status = cmd
+        .stdin(Stdio::null())
+        .stdout(out.try_clone()?)
+        .stderr(err.try_clone()?)
+        .status()?;
+    let read = |mut f: std::fs::File| -> std::io::Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        f.rewind()?;
+        f.read_to_end(&mut buf)?;
+        Ok(buf)
+    };
+    Ok(Output {
+        status,
+        stdout: read(out)?,
+        stderr: read(err)?,
+    })
+}
 
 /// A scratch project with a `tak.toml` and a log the subjects append to.
 struct Project {
@@ -29,14 +63,15 @@ impl Project {
     }
 
     fn run_env(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_tak"))
-            .arg("run")
-            .args(args)
-            .current_dir(&self.dir)
-            .env("GITHUB_TOKEN", "sentinel-must-not-leak")
-            .envs(env.iter().copied())
-            .output()
-            .expect("failed to run tak")
+        output(
+            Command::new(env!("CARGO_BIN_EXE_tak"))
+                .arg("run")
+                .args(args)
+                .current_dir(&self.dir)
+                .env("GITHUB_TOKEN", "sentinel-must-not-leak")
+                .envs(env.iter().copied()),
+        )
+        .expect("failed to run tak")
     }
 
     fn log(&self) -> Vec<String> {
@@ -471,11 +506,12 @@ fn config_names_the_file_to_read() {
         "[bench.rel]\nwarmup = 0\nruns = 1\ncmd = [\"./bin/probe\"]\n",
     )
     .unwrap();
-    let rel = Command::new(env!("CARGO_BIN_EXE_tak"))
-        .args(["run", "--no-progress", "--config", "rel.toml"])
-        .current_dir(p.path("sub"))
-        .output()
-        .unwrap();
+    let rel = output(
+        Command::new(env!("CARGO_BIN_EXE_tak"))
+            .args(["run", "--no-progress", "--config", "rel.toml"])
+            .current_dir(p.path("sub")),
+    )
+    .unwrap();
     assert!(rel.status.success(), "{}", stderr(&rel));
     assert!(p.path("sub/where2").exists());
 
@@ -699,11 +735,7 @@ fn running(pid: &str) -> bool {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let Ok(out) = Command::new("ps")
-            .args(["-o", "stat=", "-p", pid])
-            .stderr(std::process::Stdio::null())
-            .output()
-        else {
+        let Ok(out) = output(Command::new("ps").args(["-o", "stat=", "-p", pid])) else {
             return false;
         };
         let stat = String::from_utf8_lossy(&out.stdout);
@@ -732,7 +764,7 @@ fn a_subject_without_version_cmd_exports_no_version() {
 #[cfg(target_os = "linux")]
 #[test]
 fn the_exported_cpu_count_follows_the_affinity_mask() {
-    if Command::new("taskset").arg("-V").output().is_err() {
+    if output(Command::new("taskset").arg("-V")).is_err() {
         eprintln!("taskset not found; skipping");
         return;
     }
@@ -759,12 +791,13 @@ fn the_exported_cpu_count_follows_the_affinity_mask() {
         "export-affinity",
         "[bench.one]\ncmd = [\"true\"]\nruns = 1\nwarmup = 0\n",
     );
-    let out = Command::new("taskset")
-        .args(["-c", &cpu, env!("CARGO_BIN_EXE_tak"), "run"])
-        .args(["--no-progress", "--no-counters", "--export-json", "r.json"])
-        .current_dir(&p.dir)
-        .output()
-        .unwrap();
+    let out = output(
+        Command::new("taskset")
+            .args(["-c", &cpu, env!("CARGO_BIN_EXE_tak"), "run"])
+            .args(["--no-progress", "--no-counters", "--export-json", "r.json"])
+            .current_dir(&p.dir),
+    )
+    .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
     let json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(p.path("r.json")).unwrap()).unwrap();
@@ -1315,11 +1348,7 @@ check = ["false"]
 "#,
     );
     let git = |args: &[&str]| {
-        let out = Command::new("git")
-            .args(args)
-            .current_dir(&p.dir)
-            .output()
-            .unwrap();
+        let out = output(Command::new("git").args(args).current_dir(&p.dir)).unwrap();
         assert!(out.status.success(), "git {args:?}: {}", stderr(&out));
         String::from_utf8_lossy(&out.stdout).into_owned()
     };

@@ -244,6 +244,37 @@ pub fn rev_list(rev: &str, n: usize) -> Result<Vec<String>> {
     Ok(out.lines().map(str::to_string).collect())
 }
 
+/// The values of trailer `key` on every commit in `base..head`, one line per
+/// commit: its SHA, a NUL, then the values joined by commas.
+///
+/// Every commit in the range, not first-parent only — the opposite choice to
+/// [`rev_list`], for a different question. A trend follows the trunk; this asks
+/// what the change being measured declares, and under a merge-commit workflow
+/// the declaration sits on the branch commits, reachable only through the
+/// merge's second parent. Under squash-merge the range is the one squashed
+/// commit, and whatever trailers survived into its message.
+///
+/// `unfold` joins a value git wrapped onto continuation lines, and the comma
+/// separator keeps repeated trailers on one line, so a line is always exactly
+/// one commit. Commits with no such trailer still print their SHA; the parser
+/// skips the empty value.
+///
+/// `--no-show-signature` for the same reason [`log`] passes it: a user's
+/// `log.showSignature` would otherwise put GPG output on stdout, between the
+/// lines this parses. `--end-of-options` and `--` keep the range a revision
+/// whatever it looks like.
+pub fn trailers(base: &str, head: &str, key: &str) -> Result<String> {
+    let format = format!("--format=%H%x00%(trailers:key={key},valueonly,unfold,separator=%x2C)");
+    git(&[
+        "log",
+        "--no-show-signature",
+        &format,
+        "--end-of-options",
+        &format!("{base}..{head}"),
+        "--",
+    ])
+}
+
 /// One commit on a first-parent walk, with whatever tak recorded on it.
 #[derive(Debug, Clone)]
 pub struct Logged {

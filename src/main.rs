@@ -3,11 +3,13 @@
 //! Pre-v1: interfaces and behavior are not finalized and may change between releases.
 
 use anyhow::{Context, Result, bail};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use usage_rs::{Args, Cli, Subcommands};
 
+use tak_cli::accept::{self, Acceptances};
 use tak_cli::backfill;
+use tak_cli::baseline::{self, Baseline, Store};
 use tak_cli::compare;
 use tak_cli::config::{
     self, AutoRuns, Config, DEFAULT_BUDGET, DEFAULT_MAX_RUNS, DEFAULT_MIN_RUNS, DEFAULT_RUNS,
@@ -118,6 +120,21 @@ enum Cmd {
         /// `DIR/<bench>/<subject>.cachegrind.out`, for `tak explain`.
         #[usage(long, value_name = "DIR")]
         profile_dir: Option<std::path::PathBuf>,
+        /// Save the results as a named local baseline, kept in the git
+        /// directory rather than in refs/notes/tak. Replaces what NAME held
+        /// for the benchmarks measured and keeps the rest.
+        #[usage(long, value_name = "NAME")]
+        save_baseline: Option<String>,
+        /// Compare the results against a saved local baseline and print the
+        /// report `tak compare` prints. Reports only; add --gate to fail on a
+        /// regression.
+        #[usage(long, value_name = "NAME")]
+        baseline: Option<String>,
+        /// With --baseline, fail when an instruction count rose beyond its
+        /// gate — the one `tak compare` would apply — or when a gated benchmark
+        /// could not be compared.
+        #[usage(long)]
+        gate: bool,
         /// Command to benchmark, after `--`. Omit to run what tak.toml declares.
         #[usage(arg, double_dash = "required")]
         cmd: Vec<String>,
@@ -195,7 +212,10 @@ enum Cmd {
     /// Fails when an instruction count has risen by more than `gate_pct` and
     /// `gate_min_delta`, or by more than a benchmark's own `gate` in the
     /// working tree's tak.toml, or when no series was measured on both
-    /// sides. Wall clock is reported and never gated.
+    /// sides. Wall clock is reported and never gated. A regression in a
+    /// benchmark named by `--accept` is reported as accepted and does not
+    /// fail. So is one named by a `Tak-Accept:` trailer on a commit in
+    /// BASE..REV, but only when the `accept_trailers` setting is on.
     Compare {
         /// Revision to compare against.
         #[usage(arg, default = "origin/main")]
@@ -210,6 +230,11 @@ enum Cmd {
         /// over `--allow-empty`: an empty comparison passes too.
         #[usage(long)]
         no_gate: bool,
+        /// Accept a regression in this benchmark: report it, but do not fail
+        /// on it. Repeatable; each value is one exact benchmark name. Honoured
+        /// whatever `accept_trailers` says.
+        #[usage(long, value_name = "BENCH")]
+        accept: Vec<String>,
         /// Pass when no series was measured on both sides, instead of failing.
         /// For the first pull request after adopting tak, or a runner-class
         /// migration. A regression still fails.
@@ -345,6 +370,84 @@ struct RunOpts {
     profile_dir: Option<std::path::PathBuf>,
     config: Option<std::path::PathBuf>,
     dry_run: bool,
+    save_baseline: Option<String>,
+    baseline: Option<String>,
+    gate: bool,
+}
+
+/// What `--baseline` and `--save-baseline` resolved to, decided before
+/// anything is measured: a mistyped name or a missing repository should fail
+/// in a second, not after the whole run.
+#[derive(Default)]
+struct Local {
+    /// Present whenever either flag was given.
+    store: Option<Store>,
+    against: Option<Baseline>,
+    /// Each series' gate, with `--baseline`: the same lookup `tak compare`
+    /// makes, so a report-only benchmark or a `min_delta` floor means the same
+    /// thing against a baseline as against a commit.
+    gates: Option<compare::Gates>,
+}
+
+/// The gates a `--baseline` report and `--gate` use.
+///
+/// A declared run loads and validates `tak.toml` to run at all, so reading
+/// its per-benchmark gates adds no way to fail. An ad-hoc `tak run -- CMD`
+/// has never depended on the declared benchmarks — settings read only the
+/// `[gate]` and other registry keys — and a broken `[bench.x]` must not stop
+/// a report either. So an ad-hoc run without `--gate` holds everything to
+/// `[gate]` and never reads the benchmarks.
+///
+/// With `--gate` the verdict needs the real thresholds: a benchmark of the
+/// same name may be report-only or have its own `pct` or floor. A file that
+/// will not load is then an error, before anything is measured. Falling back
+/// to `[gate]` would gate silently harder or softer than the project asked,
+/// and a wrong verdict that exits 0 is worse than a loud failure.
+fn baseline_gates(opts: &RunOpts, settings: &Settings, adhoc: bool) -> Result<compare::Gates> {
+    if adhoc && !opts.gate {
+        return Ok(compare::Gates::uniform(global_gate(settings)?));
+    }
+    compare_gates(settings, opts.config.as_deref()).with_context(|| {
+        if adhoc {
+            "--gate needs a valid tak.toml to find per-benchmark gates; run without --gate \
+             to report only"
+        } else {
+            "could not read the gates in tak.toml"
+        }
+    })
+}
+
+fn open_local(opts: &RunOpts, settings: &Settings, adhoc: bool) -> Result<Local> {
+    if opts.gate && opts.baseline.is_none() {
+        bail!(
+            "--gate applies to --baseline; to gate against another commit's recorded \
+             measurements, use `tak compare`"
+        );
+    }
+    for name in [&opts.baseline, &opts.save_baseline].into_iter().flatten() {
+        baseline::validate_name(name)?;
+    }
+    if opts.baseline.is_none() && opts.save_baseline.is_none() {
+        return Ok(Local::default());
+    }
+    let store = Store::locate()?;
+    let against = opts
+        .baseline
+        .as_deref()
+        .map(|name| store.load(name))
+        .transpose()?;
+    // Read with the baseline, before measuring, so a bad `[gate]` fails in a
+    // second. From `--config` when it is given: that is the file whose
+    // benchmarks this run measures.
+    let gates = against
+        .is_some()
+        .then(|| baseline_gates(opts, settings, adhoc))
+        .transpose()?;
+    Ok(Local {
+        store: Some(store),
+        against,
+        gates,
+    })
 }
 
 /// One subject's successful measurement.
@@ -402,10 +505,11 @@ fn series_tool(multi: bool, s: &Subject) -> String {
 
 fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
     global_gate(settings)?;
+    let local = open_local(&opts, settings, !cmd.is_empty())?;
     // An explicit command always wins; tak.toml is only consulted when none is
     // given, so ad-hoc measurement never depends on repository state.
     if cmd.is_empty() {
-        return run_declared(opts, settings);
+        return run_declared(opts, settings, &local);
     }
     if !opts.subjects.is_empty() {
         bail!(
@@ -450,11 +554,11 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         return Ok(());
     }
     let (measured, _) = measure_bench(&bench, &[subject], false, seed, &opts, settings)?;
-    finish(measured, Vec::new(), &opts, seed, settings)
+    finish(measured, Vec::new(), &opts, seed, settings, &local)
 }
 
 /// Run the benchmarks declared in `tak.toml`.
-fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
+fn run_declared(opts: RunOpts, settings: &Settings, local: &Local) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let found = match &opts.config {
         // Absolute, so the directory commands are anchored to is too: a
@@ -631,6 +735,20 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
     }
 
     if plans.is_empty() {
+        // A gate that measured nothing has checked nothing, and exiting 0
+        // would mark the revision good: `git bisect run` would carry on past
+        // it. Same exemption as below: a dry run gates nothing either way.
+        if opts.gate && !opts.dry_run {
+            bail!(
+                "nothing to gate against baseline `{}`: {}",
+                opts.baseline.as_deref().unwrap_or_default(),
+                if skipped.is_empty() {
+                    format!("{} declares no benchmarks", path.display())
+                } else {
+                    "every selected benchmark or subject has a false `when`".to_string()
+                }
+            );
+        }
         if skipped.is_empty() {
             println!("{} declares no benchmarks", path.display());
             return Ok(());
@@ -639,10 +757,18 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
         // CI job recording or exporting must not look like it measured
         // something when every benchmark was switched off.
         // A dry run writes neither, so there is nothing for it to fail over.
-        if !opts.dry_run && (opts.record || opts.export_json.is_some()) {
+        if !opts.dry_run
+            && (opts.record || opts.export_json.is_some() || opts.save_baseline.is_some())
+        {
             bail!(
                 "nothing to {}: every selected benchmark or subject has a false `when`",
-                if opts.record { "record" } else { "export" }
+                if opts.record {
+                    "record"
+                } else if opts.save_baseline.is_some() {
+                    "save"
+                } else {
+                    "export"
+                }
             );
         }
         println!("nothing to run: every selected benchmark or subject has a false `when`");
@@ -671,7 +797,7 @@ fn run_declared(opts: RunOpts, settings: &Settings) -> Result<()> {
         measured.extend(m);
         failed.extend(f);
     }
-    finish(measured, failed, &opts, seed, settings)
+    finish(measured, failed, &opts, seed, settings, local)
 }
 
 /// A random seed below 2^53, so it survives any JSON reader — JavaScript and
@@ -763,6 +889,7 @@ fn finish(
     opts: &RunOpts,
     seed: u64,
     settings: &Settings,
+    local: &Local,
 ) -> Result<()> {
     // The export is written even when a subject failed: it is this run's
     // results, the failed subject is simply absent, and a consumer comparing
@@ -829,16 +956,48 @@ fn finish(
         }
         println!("\n  wrote {written} profile(s) to {}", dir.display());
     }
+    let failing = failing_checks(&measured);
+    // Reported before a failed subject stops the run: the question this
+    // answers is whether an edit helped, and the subjects that did measure
+    // answer it.
+    let compared = match (&local.against, &local.gates) {
+        (Some(b), Some(gates)) => Some(report_against(b, &measured, &failing, gates)),
+        _ => None,
+    };
+    // What a failure below keeps from being written, named so the message
+    // says which store was left untouched.
+    let storing = match (opts.record, &opts.save_baseline) {
+        (true, Some(name)) => Some(format!("recording or saving baseline `{name}`")),
+        (true, None) => Some("recording".to_string()),
+        (false, Some(name)) => Some(format!("saving baseline `{name}`")),
+        (false, None) => None,
+    };
     if !failed.is_empty() {
         // Everything is measured before anything is written, and that holds
         // here too: a run missing a subject is stored whole or not at all,
         // because a partial set left in history looks like a complete one.
-        if opts.record {
-            eprintln!("\n  not recording: a run with a failed subject would be stored incomplete");
+        if let Some(storing) = &storing {
+            eprintln!("\n  not {storing}: a run with a failed subject would be stored incomplete");
         }
         bail!("{} subject(s) failed: {}", failed.len(), failed.join(", "));
     }
-    if opts.record {
+    // Decided before anything is stored, reported after: a regression is
+    // exactly the measurement a `--record` run exists to keep, and failing
+    // before storing would throw it away. The one exception is a baseline
+    // saved over the one it was gated against. Replacing `good` with the run
+    // that just failed against it would make a retry — or the next `git
+    // bisect run` step — compare the regression with itself and pass.
+    let verdict = match (&local.against, &compared, &local.gates) {
+        (Some(against), Some(compared), Some(gates)) if opts.gate => {
+            gate_against(against, compared, &failing, gates)
+        }
+        _ => Ok(()),
+    };
+    let kept = match &opts.save_baseline {
+        Some(name) if verdict.is_err() && opts.baseline.as_ref() == Some(name) => Some(name),
+        _ => None,
+    };
+    if let Some(storing) = &storing {
         // Git notes keep the timings but not the check verdicts, which do not
         // fit how recorded metrics are read: `compare` keeps each metric's
         // minimum and treats lower as better. So a failed check has to stop
@@ -846,34 +1005,293 @@ fn finish(
         // that did the work wrong with nothing marking it. Only this run's
         // verdicts can vouch for this run's timings, so there is no way to
         // clear it but a run whose checks all pass. The export above is still
-        // written: it carries the verdicts.
-        let failing: Vec<String> = measured
-            .iter()
-            .filter(|m| m.samples.passed() < m.samples.checks.len())
-            .map(|m| {
-                let label = if m.subject.name == SELF_TOOL {
-                    m.bench.clone()
-                } else {
-                    format!("{} ({})", m.bench, m.subject.name)
-                };
-                format!(
-                    "{label} failed {} of {}",
-                    m.samples.checks.len() - m.samples.passed(),
-                    m.samples.checks.len()
-                )
-            })
-            .collect();
+        // written: it carries the verdicts. A baseline holds the same records
+        // and is read by the same `compare`, so the same rule applies to it.
         if !failing.is_empty() {
             eprintln!(
                 "
-  not recording: git notes keep timings without check verdicts, so a run \
-                 with a failed check would be stored as if it had passed"
+  not {storing}: stored measurements keep timings without check verdicts, so a \
+                 run with a failed check would be stored as if it had passed"
             );
-            bail!("check failed: {}", failing.join(", "));
+            bail!("check failed: {}", labels(&failing));
         }
         let records: Vec<Record> = measured.into_iter().map(|m| m.record).collect();
-        record_all(&records)?;
+        // The baseline first. Saving it replaces this run's series, so doing
+        // it twice leaves the same file, while appending to the notes twice
+        // leaves two records. With that order, a failed second write is
+        // fixed by re-running the same command; the other order would
+        // double-record every retry of a failed baseline save.
+        if let (Some(name), Some(store)) = (&opts.save_baseline, &local.store)
+            && kept.is_none()
+        {
+            save_baseline(store, name, &records)?;
+        }
+        if opts.record {
+            record_all(&records).with_context(|| match &opts.save_baseline {
+                Some(name) if kept.is_none() => format!(
+                    "baseline `{name}` was saved, but nothing was recorded to {}; \
+                     re-running the same command saves the baseline again and records",
+                    notes::NOTES_REF
+                ),
+                _ => format!("nothing was recorded to {}", notes::NOTES_REF),
+            })?;
+        }
     }
+    match kept {
+        Some(name) => verdict
+            .with_context(|| format!("baseline `{name}` was not replaced because the gate failed")),
+        None => verdict,
+    }
+}
+
+/// A subject whose check failed on at least one sample.
+struct FailedCheck {
+    bench: String,
+    /// As recorded, so its gate can be looked up the way the comparison's is.
+    tool: String,
+    /// `bench (subject) failed N of M`, for messages.
+    label: String,
+}
+
+/// Each subject whose check failed on any sample.
+fn failing_checks(measured: &[Measured]) -> Vec<FailedCheck> {
+    measured
+        .iter()
+        .filter(|m| m.samples.passed() < m.samples.checks.len())
+        .map(|m| {
+            let label = if m.subject.name == SELF_TOOL {
+                m.bench.clone()
+            } else {
+                format!("{} ({})", m.bench, m.subject.name)
+            };
+            FailedCheck {
+                bench: m.bench.clone(),
+                tool: m.record.tool.clone(),
+                label: format!(
+                    "{label} failed {} of {}",
+                    m.samples.checks.len() - m.samples.passed(),
+                    m.samples.checks.len()
+                ),
+            }
+        })
+        .collect()
+}
+
+fn labels<'a>(failing: impl IntoIterator<Item = &'a FailedCheck>) -> String {
+    failing
+        .into_iter()
+        .map(|f| f.label.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// What a baseline comparison found, kept for `--gate`.
+struct Against {
+    comparison: compare::Comparison,
+    /// Series this run measured that cannot be gated; see [`baseline::gaps`].
+    gaps: Vec<(compare::Key, baseline::Gap)>,
+}
+
+/// Print how this run compares with a saved baseline, and return the
+/// comparison for `--gate`.
+///
+/// The same [`compare::compare`] and [`compare::markdown`] as `tak compare`,
+/// so a local report and a pull request's read the same way and are kept
+/// correct in one place.
+fn report_against(
+    against: &Baseline,
+    measured: &[Measured],
+    failing: &[FailedCheck],
+    gates: &compare::Gates,
+) -> Against {
+    let current: Vec<Record> = measured.iter().map(|m| m.record.clone()).collect();
+    let base = baseline::relevant(&against.records, &current);
+    let comparison = compare::compare(&base, &current);
+    // A report-only series is never a reason to fail, so it cannot leave a
+    // gap in what the gate checked either.
+    let gaps: Vec<_> = baseline::gaps(&against.records, &current)
+        .into_iter()
+        .filter(|(k, _)| gates.get(&k.0, &k.1).enabled)
+        .collect();
+
+    // Series the baseline holds only for other runner classes. The table
+    // leaves them out, as it should, so this says why they are absent: a
+    // baseline saved with another `--runner`, or on the other side of a CI
+    // boundary, is the usual cause. Nothing is said when this run's class is
+    // in the baseline too; the other classes are simply not this run's.
+    let mut stranded: BTreeMap<Vec<String>, Vec<String>> = BTreeMap::new();
+    let keys: BTreeSet<compare::Key> = current
+        .iter()
+        .map(|r| (r.bench.clone(), r.tool.clone(), r.runner.clone()))
+        .collect();
+    for k in &keys {
+        if base.iter().any(|r| r.bench == k.0 && r.tool == k.1) {
+            continue;
+        }
+        let elsewhere = baseline::other_runners(&against.records, k);
+        if !elsewhere.is_empty() {
+            stranded
+                .entry(elsewhere)
+                .or_default()
+                .push(describe_series(k));
+        }
+    }
+    for (runners, series) in &stranded {
+        let runners: BTreeSet<&str> = runners.iter().map(String::as_str).collect();
+        eprintln!(
+            "  warning: baseline `{}` holds {} only for runner class {}. Runner classes are \
+             never compared with each other.",
+            against.name,
+            series.join(", "),
+            quoted(&runners)
+        );
+    }
+
+    println!(
+        "\n  compared against baseline `{}` ({})\n",
+        against.name,
+        against.path.display()
+    );
+    // No trend: a baseline is one point, not a history. No credit line
+    // either: it says the numbers live in git notes, which these do not, and
+    // a terminal report is not headed for a stranger's pull request.
+    print!(
+        "{}",
+        compare::markdown(&comparison, &compare::Trend::new(), gates, false)
+    );
+    // In the report itself, not only in the warning above it: the table has
+    // no way to mark a row whose samples did the wrong work, and a check
+    // that fails fast is exactly what reads as a large improvement.
+    if !failing.is_empty() {
+        println!(
+            "\n**Check failed, so this comparison is not evidence of an improvement:** {}. \
+             Those numbers come from samples that did the wrong work.",
+            labels(failing)
+        );
+    }
+    if !gaps.is_empty() {
+        println!("\nNot gated: {}", describe_gaps(&gaps));
+    }
+    Against { comparison, gaps }
+}
+
+fn describe_gaps(gaps: &[(compare::Key, baseline::Gap)]) -> String {
+    gaps.iter()
+        .map(|(k, why)| format!("{} ({why})", describe_series(k)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn quoted(names: &BTreeSet<&str>) -> String {
+    names
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A series for a message, spelled as the comparison report spells one.
+fn describe_series(key: &compare::Key) -> String {
+    let (bench, tool, runner) = key;
+    if tool == SELF_TOOL {
+        format!("`{bench}` on `{runner}`")
+    } else {
+        format!("`{bench}` ({tool}) on `{runner}`")
+    }
+}
+
+/// Fail on a regression against a baseline, for `--gate`.
+///
+/// Stricter than `tak compare` about comparing nothing. There, a base with no
+/// measurements is a normal state — a commit CI has not reached yet. Here the
+/// baseline was named and loaded, so nothing to compare means a runner or tool
+/// mismatch, or a run without valgrind, and a gate that passed then would pass
+/// every edit: `git bisect run` would blame the wrong commit.
+///
+/// The same holds for any one series: a gate that checked only some of what
+/// this run counted has not passed. And a failed check fails the gate, since
+/// a subject that stopped doing its work retires fewer instructions, which is
+/// the one direction the gate lets through.
+///
+/// Each series is held to its own gate, as `tak compare` holds it: the same
+/// [`compare::Gates`], so a `min_delta` floor applies and a report-only
+/// benchmark never fails this — not by regressing, not by a gap, and not by a
+/// failed check, which the report still flags.
+fn gate_against(
+    against: &Baseline,
+    compared: &Against,
+    failing: &[FailedCheck],
+    gates: &compare::Gates,
+) -> Result<()> {
+    let failing: Vec<&FailedCheck> = failing
+        .iter()
+        .filter(|f| gates.get(&f.bench, &f.tool).enabled)
+        .collect();
+    if !failing.is_empty() {
+        bail!(
+            "check failed, so nothing is gated against baseline `{}`: {}",
+            against.name,
+            labels(failing)
+        );
+    }
+    if !compared.gaps.is_empty() {
+        // Each series carries its own reason, because the remedy differs:
+        // install valgrind or turn counters back on for one, save the
+        // baseline on this runner class for another.
+        bail!(
+            "cannot gate against baseline `{}`: {}",
+            against.name,
+            describe_gaps(&compared.gaps)
+        );
+    }
+    let comparison = &compared.comparison;
+    if !comparison
+        .changes
+        .iter()
+        .any(|c| c.metric == compare::GATED_METRIC)
+    {
+        bail!(
+            "nothing to gate: no instruction count was measured both in this run and in \
+             baseline `{}`",
+            against.name
+        );
+    }
+    let regressions = comparison.regressions(gates);
+    if regressions.is_empty() {
+        return Ok(());
+    }
+    // Worded as `tak compare` words it, so one grep matches both.
+    if comparison.gated_uniformly(gates) {
+        let floor = match gates.global.min_delta {
+            0 => String::new(),
+            n => format!(" and {n} instructions"),
+        };
+        bail!(
+            "{} benchmark(s) regressed by more than {}%{floor} against baseline `{}`",
+            regressions.len(),
+            gates.global.pct,
+            against.name
+        );
+    }
+    bail!(
+        "{} benchmark(s) regressed beyond their gate against baseline `{}`",
+        regressions.len(),
+        against.name
+    )
+}
+
+/// Save records as a local baseline and say where they went.
+fn save_baseline(store: &Store, name: &str, records: &[Record]) -> Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let path = store.save(name, records)?;
+    println!(
+        "\n  saved {} measurement(s) to baseline `{name}` ({})",
+        records.len(),
+        path.display()
+    );
+    println!("  compare against it with: tak run --baseline {name}");
     Ok(())
 }
 
@@ -1234,19 +1652,48 @@ fn cmd_compare(
     rev: String,
     remote: String,
     no_gate: bool,
+    accept_flags: Vec<String>,
     allow_empty: bool,
     settings: &Settings,
 ) -> Result<()> {
-    let gates = compare_gates(settings)?;
+    let gates = compare_gates(settings, None)?;
     let base_sha = notes::rev_parse(&base).with_context(|| format!("cannot resolve {base}"))?;
     let head_sha = notes::rev_parse(&rev).with_context(|| format!("cannot resolve {rev}"))?;
+
+    let mut accepted = Acceptances::default();
+    for name in &accept_flags {
+        accepted.add_name(name, accept::Source::Flag)?;
+    }
+    // Read either way; only honoured when the setting says so. The commits
+    // under comparison are the change being gated, so by default their own
+    // trailers must not be able to waive the gate — but an author whose
+    // trailer was ignored should be told, not left guessing.
+    let log = notes::trailers(&base_sha, &head_sha, accept::TRAILER);
+    let mut ignored = Acceptances::default();
+    if settings.accept_trailers {
+        // Fatal when honoured, unlike the trend below. Carrying on would still
+        // fail closed, but on a regression the author accepted, with a report
+        // that says nothing about why the acceptance was not seen.
+        let log = log.with_context(|| {
+            format!(
+                "cannot read {} trailers from {base}..{rev}",
+                accept::TRAILER
+            )
+        })?;
+        accepted.add_trailer_log(&log);
+    } else if let Ok(log) = log {
+        // Not fatal: nothing the gate decides depends on it.
+        ignored.add_trailer_log(&log);
+    }
 
     // One fetch, not two: `read` refreshes from the remote, and doing it twice
     // doubles the round trip for the same ref.
     let base_records = notes::read(Some(&remote), &base_sha)?;
     let head_records = notes::read(None, &head_sha)?;
 
-    let comparison = compare::compare(&base_records, &head_records);
+    let comparison = compare::compare(&base_records, &head_records)
+        .with_accepted(accepted)
+        .with_ignored_trailers(ignored);
     // Never fatal: a shallow checkout has no history to walk, and a missing
     // sparkline is a smaller loss than a failed gate.
     let trend = gather_trend(&base_sha, &head_sha, &head_records).unwrap_or_default();
@@ -1272,7 +1719,8 @@ fn cmd_compare(
              pull request after adopting tak or across a runner-class migration"
         )
     }
-    let regressions = comparison.regressions(&gates);
+    // Accepted regressions are reported above and do not count here.
+    let regressions = comparison.failures(&gates);
     if regressions.is_empty() {
         return Ok(());
     }
@@ -1336,9 +1784,16 @@ fn cmd_explain(base: &Path, head: &Path, top: usize) -> Result<()> {
 /// has fetched anything. No `tak.toml` is fine — every series gets the global
 /// gate, as before per-benchmark gates existed — but one that does not parse
 /// is an error rather than a quiet fallback to a gate the file did not ask for.
-fn compare_gates(settings: &Settings) -> Result<compare::Gates> {
+///
+/// `config` is `tak run --config`, for `tak run --baseline`: the file that run
+/// measures from is the one whose gates apply to it.
+fn compare_gates(settings: &Settings, config: Option<&Path>) -> Result<compare::Gates> {
     let global = global_gate(settings)?;
-    Ok(match Config::find(&std::env::current_dir()?)? {
+    let found = match config {
+        Some(path) => Some((path.to_path_buf(), Config::load(path)?)),
+        None => Config::find(&std::env::current_dir()?)?,
+    };
+    Ok(match found {
         Some((_, cfg)) => cfg.gates(global),
         None => compare::Gates::uniform(global),
     })
@@ -1710,6 +2165,9 @@ fn main() -> Result<()> {
             profile_dir,
             config,
             dry_run,
+            save_baseline,
+            baseline,
+            gate,
             cmd,
         } => {
             let settings = Settings::from_process_at(&overrides, config.as_deref())?;
@@ -1733,6 +2191,9 @@ fn main() -> Result<()> {
                     profile_dir,
                     config,
                     dry_run,
+                    save_baseline,
+                    baseline,
+                    gate,
                 },
                 cmd,
                 &settings,
@@ -1818,12 +2279,14 @@ fn main() -> Result<()> {
             rev,
             remote,
             no_gate,
+            accept,
             allow_empty,
         } => cmd_compare(
             base,
             rev,
             remote,
             no_gate,
+            accept,
             allow_empty,
             &resolve_settings(&overrides)?,
         ),
