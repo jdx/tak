@@ -79,8 +79,9 @@ impl Record {
 /// `compare` reports the rest in a table of their own. `wall_` is reserved as
 /// a whole prefix rather than name by name, so a timing statistic added later
 /// cannot land on a name some project already records something else under.
+/// `alloc_` likewise, for the heap-allocation counts DHAT records.
 pub fn is_builtin_metric(name: &str) -> bool {
-    name == "instructions" || name.starts_with("wall_")
+    name == "instructions" || name.starts_with("wall_") || name.starts_with("alloc_")
 }
 
 /// Reject a name that will be recorded — benchmark, subject or tool, runner

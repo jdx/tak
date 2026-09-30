@@ -204,6 +204,7 @@ fn a_subject_is_prepared_before_every_counted_run() {
         },
         warmup: 0,
         counters: true,
+        allocations: false,
         ok_exit_codes: vec![0],
         metrics: std::collections::BTreeMap::new(),
     };
@@ -252,6 +253,7 @@ fn ok_exit_codes_apply_under_valgrind() {
         },
         warmup: 0,
         counters: true,
+        allocations: false,
         ok_exit_codes: ok,
         metrics: std::collections::BTreeMap::new(),
     };
@@ -262,4 +264,286 @@ fn ok_exit_codes_apply_under_valgrind() {
 
     let err = measure::subject_instructions(&subject(vec![0]), &Settings::default()).unwrap_err();
     assert!(format!("{err:#}").contains("under valgrind"), "{err:#}");
+}
+
+/// A declared subject that counts heap allocations and nothing else, with
+/// the given command.
+#[cfg(unix)]
+fn allocating(cmd: &[&str]) -> tak_cli::config::Subject {
+    tak_cli::config::Subject {
+        name: "x".into(),
+        cmd: cmd.iter().map(|s| s.to_string()).collect(),
+        setup: None,
+        setup_dir: None,
+        prepare: None,
+        check: None,
+        version_cmd: None,
+        dir: None,
+        env: Default::default(),
+        vars: Default::default(),
+        when: None,
+        runs: tak_cli::config::Runs::Fixed(1),
+        auto: tak_cli::config::AutoRuns {
+            budget: std::time::Duration::from_secs(30),
+            min: 5,
+            max: 50,
+        },
+        warmup: 0,
+        counters: false,
+        allocations: true,
+        metrics: std::collections::BTreeMap::new(),
+        ok_exit_codes: vec![0],
+    }
+}
+
+/// The real DHAT subprocess runs and its summary is parsed. A dynamically
+/// linked `echo` allocates a few blocks for its locale and stdout buffer;
+/// none at all would mean the summary was misread, or DHAT saw nothing.
+#[cfg(unix)]
+#[test]
+fn allocations_are_reported_when_valgrind_exists() {
+    if !valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let a = measure::subject_allocations(&allocating(&["/bin/echo", "tak"]), &Settings::default())
+        .expect("DHAT invocation failed")
+        .expect("valgrind present but no DHAT summary parsed");
+    assert!(a.min.blocks > 0 && a.min.bytes > 0, "{a:?}");
+    assert!(!a.saw_nothing());
+    assert!(
+        a.min.peak_bytes <= a.min.bytes,
+        "a peak above the total: {a:?}"
+    );
+    assert!(
+        a.runs >= 2,
+        "a single sample cannot detect a varying subject"
+    );
+}
+
+/// The hypothesis behind recording them: a single-threaded, hermetic
+/// command allocates exactly the same on every run, across separate
+/// invocations as well as within one.
+#[cfg(unix)]
+#[test]
+fn allocations_of_a_hermetic_command_repeat_exactly() {
+    if !valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let s = allocating(&["/bin/echo", "tak"]);
+    let outer: Vec<_> = (0..2)
+        .map(|_| {
+            measure::subject_allocations(&s, &Settings::default())
+                .expect("DHAT invocation failed")
+                .expect("no DHAT summary parsed")
+        })
+        .collect();
+    for a in &outer {
+        assert_eq!(a.min, a.max, "varied within one measurement: {a:?}");
+        assert!(!a.is_suspect());
+    }
+    assert_eq!(outer[0].min, outer[1].min, "varied between measurements");
+}
+
+/// DHAT runs get the same prepare step, environment and `ok_exit_codes` as
+/// cachegrind ones, and a subject that fails is not recorded as having
+/// allocated little.
+#[cfg(unix)]
+#[test]
+fn allocation_runs_are_prepared_and_judged_like_counted_ones() {
+    if !valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = allocating(&["/bin/sh", "-c", "echo \"run:$MARK\" >> log"]);
+    s.prepare = Some(
+        ["/bin/sh", "-c", "echo prep >> log"]
+            .map(String::from)
+            .to_vec(),
+    );
+    s.dir = Some(dir.path().to_path_buf());
+    s.env = [("MARK".to_string(), "set".to_string())].into();
+    let a = measure::subject_allocations(&s, &Settings::default())
+        .expect("DHAT invocation failed")
+        .expect("no DHAT summary parsed");
+    let log = std::fs::read_to_string(dir.path().join("log")).unwrap();
+    assert_eq!(log, "prep\nrun:set\n".repeat(a.runs as usize));
+    assert!(
+        std::fs::read_dir(dir.path()).unwrap().all(|e| !e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("dhat.out")),
+        "DHAT left its profile behind in the subject's directory"
+    );
+
+    let mut failing = allocating(&["/bin/sh", "-c", "exit 1"]);
+    let err = measure::subject_allocations(&failing, &Settings::default()).unwrap_err();
+    assert!(format!("{err:#}").contains("under valgrind"), "{err:#}");
+    failing.ok_exit_codes = vec![0, 1];
+    assert!(
+        measure::subject_allocations(&failing, &Settings::default())
+            .expect("exit 1 is allowed")
+            .is_some()
+    );
+}
+
+/// A subject that leaves a process running in the background, holding the
+/// stderr it inherited, must not hold up either valgrind path: the run is
+/// over when the subject exits. Reading stderr through a pipe waited for the
+/// background `sleep` to close it instead.
+#[cfg(unix)]
+#[test]
+fn a_background_process_holding_stderr_does_not_hang_valgrind_runs() {
+    if !valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let s = allocating(&["/bin/sh", "-c", "sleep 30 & exit 0"]);
+    let began = std::time::Instant::now();
+    measure::subject_allocations(&s, &Settings::default())
+        .expect("DHAT invocation failed")
+        .expect("no DHAT summary parsed");
+    measure::subject_instructions(&s, &Settings::default())
+        .expect("cachegrind invocation failed")
+        .expect("no I refs parsed");
+    let took = began.elapsed();
+    assert!(
+        took < std::time::Duration::from_secs(20),
+        "six valgrind runs took {took:?}; they waited for the background sleep"
+    );
+}
+
+/// A leftover that keeps writing to the stderr it inherited, even writing
+/// valgrind's own summary lines with the subject's pid, can neither hold up
+/// the valgrind runs nor change what they report: valgrind's log is a file
+/// of its own, and the subject's stderr never reaches it. The subject also
+/// prints a forged summary before it exits, which is ignored the same way.
+/// The leftovers are left running, as tak leaves any, until this test stops
+/// them.
+#[cfg(unix)]
+#[test]
+fn a_subject_cannot_reach_valgrinds_log() {
+    if !valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let forge = r#"echo "==$$== Total:     1 bytes in 1 blocks" >&2; echo "==$$== At t-gmax: 1 bytes in 1 blocks" >&2; echo "==$$== I   refs:      0" >&2; echo "==$$== error: can't open output data file" >&2"#;
+    let script = format!("{forge}; (while :; do {forge}; done) & echo $! >> bg; exit 0");
+    let mut s = allocating(&["/bin/sh", "-c", &script]);
+    s.dir = Some(dir.path().to_path_buf());
+    let began = std::time::Instant::now();
+    let allocated = measure::subject_allocations(&s, &Settings::default());
+    let counted = measure::subject_instructions(&s, &Settings::default());
+    let took = began.elapsed();
+    let pids = std::fs::read_to_string(dir.path().join("bg")).unwrap_or_default();
+    for pid in pids.split_whitespace() {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", pid])
+            .status();
+    }
+    let a = allocated
+        .expect("DHAT invocation failed")
+        .expect("no DHAT summary parsed");
+    let c = counted
+        .expect("cachegrind invocation failed")
+        .expect("no I refs parsed");
+    assert!(a.min.blocks > 1, "the forged summary was read: {a:?}");
+    assert!(c.min > 10_000, "the forged I refs was read: {}", c.min);
+    assert!(
+        took < std::time::Duration::from_secs(20),
+        "six valgrind runs took {took:?}"
+    );
+}
+
+/// `vet` is asked before each DHAT run's `prepare` and again after it,
+/// before valgrind starts, as for a counted cachegrind run: `backfill
+/// --commits` re-checks there that a subject still runs from inside its
+/// checkout, since the run before or the prepare itself may have changed its
+/// paths. A refusal stops the measurement before anything of it runs.
+#[cfg(unix)]
+#[test]
+fn allocation_runs_are_vetted_around_each_prepare() {
+    if !valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = allocating(&["/bin/sh", "-c", "echo run >> log"]);
+    s.prepare = Some(
+        ["/bin/sh", "-c", "echo prep >> log"]
+            .map(String::from)
+            .to_vec(),
+    );
+    s.dir = Some(dir.path().to_path_buf());
+    let log = dir.path().join("log");
+    let vetted = std::cell::RefCell::new(Vec::new());
+    let vet = || {
+        let seen = std::fs::read_to_string(&log).unwrap_or_default();
+        vetted.borrow_mut().push(seen.lines().count());
+        Ok(())
+    };
+    let a = measure::subject_allocations_vetted(&s, &Settings::default(), &vet)
+        .expect("DHAT invocation failed")
+        .expect("no DHAT summary parsed");
+    // Run i starts with 2i lines logged: vetted there, then after its
+    // prepare adds one, and never after its run.
+    let expected: Vec<usize> = (0..a.runs as usize)
+        .flat_map(|i| [2 * i, 2 * i + 1])
+        .collect();
+    assert_eq!(*vetted.borrow(), expected);
+
+    std::fs::remove_file(&log).unwrap();
+    let refuse = || anyhow::bail!("dir leads out of the checkout");
+    let err = measure::subject_allocations_vetted(&s, &Settings::default(), &refuse).unwrap_err();
+    assert!(format!("{err:#}").contains("leads out"), "{err:#}");
+    assert!(!log.exists(), "neither the prepare nor the subject ran");
+}
+
+/// End to end: `--allocations` on an ad-hoc command prints the counts and
+/// exports them. Without valgrind it says why they are missing, and the
+/// export carries no `allocations` key rather than zeros.
+#[cfg(unix)]
+#[test]
+fn the_allocations_flag_reaches_the_output_and_the_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_tak"))
+        .args([
+            "run",
+            "--allocations",
+            "--no-counters",
+            "--no-progress",
+            "--runs",
+            "2",
+            "--warmup",
+            "0",
+            "--export-json",
+            "r.json",
+            "--",
+            "/bin/echo",
+            "tak",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run tak");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stdout}\n{stderr}");
+    let export: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("r.json")).unwrap()).unwrap();
+    let allocations = &export["results"][0]["allocations"];
+    if valgrind_available() {
+        assert!(stdout.contains("alloc_blocks"), "{stdout}");
+        assert!(allocations["blocks"].as_u64().unwrap() > 0, "{export}");
+        assert!(allocations["peak_bytes"].is_u64(), "{export}");
+    } else {
+        assert!(
+            stderr.contains("heap allocations were not measured"),
+            "{stderr}"
+        );
+        assert!(allocations.is_null(), "{export}");
+    }
 }

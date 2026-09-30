@@ -179,6 +179,11 @@ struct Layer {
     /// Values for templates, as `{{ vars.name }}`. Not passed to the command.
     #[serde(default)]
     vars: BTreeMap<String, String>,
+    /// Opt in to heap-allocation counting under DHAT. A layer setting rather
+    /// than a subject one like `counters`: it never gates, so there is no
+    /// competitor's upgrade for it to fail, and a single-command benchmark
+    /// needs a way to turn it on.
+    allocations: Option<bool>,
     /// Numbers recorded beside the timings, by name: a file's size, or what
     /// a command prints. Merged by name across layers, like `env`, with a
     /// more specific layer's metric replacing a same-named one outright.
@@ -260,7 +265,7 @@ fn metric_name(name: &str) -> Result<()> {
     if crate::record::is_builtin_metric(name) {
         bail!(
             "metric name `{name}` is reserved for what tak measures itself \
-             (`instructions`, and anything starting `wall_`)"
+             (`instructions`, and anything starting `wall_` or `alloc_`)"
         );
     }
     Ok(())
@@ -539,6 +544,8 @@ pub struct Subject {
     pub auto: AutoRuns,
     pub warmup: u32,
     pub counters: bool,
+    /// Count heap allocations under DHAT. Recorded and reported, never gated.
+    pub allocations: bool,
     /// Exit codes a timed or warmup sample may end with and still count.
     /// Never empty. A death by signal fails whatever this holds, and
     /// `setup` and `prepare` are always held to exit 0.
@@ -908,6 +915,9 @@ fn resolve(
             .copied()
             .unwrap_or(DEFAULT_WARMUP),
         counters,
+        allocations: last(layers, |l| l.allocations.as_ref())
+            .copied()
+            .unwrap_or(false),
         ok_exit_codes: match last(layers, |l| l.ok_exit_codes.as_ref()) {
             Some(codes) => ok_exit_codes(codes)?,
             None => DEFAULT_OK_EXIT_CODES.to_vec(),
@@ -1217,6 +1227,39 @@ cmd = "mycli 'two words'""#,
         assert_eq!(s.name, SELF_TOOL);
         assert!(s.counters);
         assert!(!c.bench["a"].is_multi());
+    }
+
+    /// `allocations` stacks like any layer setting, so a single-command
+    /// benchmark can turn it on and a subject can turn a default off. Off
+    /// unless asked for: every DHAT run costs as much as a cachegrind one.
+    #[test]
+    fn allocations_are_off_unless_a_layer_turns_them_on() {
+        let c = Config::parse(
+            r#"
+            [bench.plain]
+            cmd = "x"
+
+            [bench.single]
+            cmd = "x"
+            allocations = true
+
+            [defaults]
+            allocations = true
+
+            [bench.multi.subject.on]
+            cmd = "x"
+            [bench.multi.subject.off]
+            cmd = "y"
+            allocations = false
+            "#,
+        )
+        .unwrap();
+        assert!(only(&c, "single").allocations);
+        assert!(only(&c, "plain").allocations, "from [defaults]");
+        let multi = c.subjects("multi").unwrap();
+        assert!(!multi[0].allocations, "a subject's own setting wins");
+        assert!(multi[1].allocations);
+        assert!(!only(&Config::parse("[bench.a]\ncmd = \"x\"").unwrap(), "a").allocations);
     }
 
     #[test]
@@ -2021,6 +2064,11 @@ cmd = "mycli 'two words'""#,
             msg.contains("bench.a.metric.instructions") && msg.contains("reserved"),
             "{msg}"
         );
+
+        // DHAT's counts share the record's map too: a script printing
+        // `alloc_bytes` would overwrite the counted one.
+        let err = format!("{:#}", metric_name("alloc_bytes").unwrap_err());
+        assert!(err.contains("reserved") && err.contains("alloc_"), "{err}");
     }
 
     /// Both, neither, or an empty one is a mistake, caught before anything

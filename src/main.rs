@@ -92,6 +92,10 @@ enum Cmd {
         /// Skip instruction counting even where valgrind is available.
         #[usage(long)]
         no_counters: bool,
+        /// Also count heap allocations under valgrind's DHAT, for every
+        /// subject measured. Recorded and reported, never gated.
+        #[usage(long)]
+        allocations: bool,
         /// Append the result to refs/notes/tak for the current commit.
         #[usage(long)]
         record: bool,
@@ -428,6 +432,7 @@ struct RunOpts {
     runs: Option<Runs>,
     warmup: Option<u32>,
     no_counters: bool,
+    allocations: bool,
     record: bool,
     no_progress: bool,
     subjects: Vec<String>,
@@ -626,6 +631,7 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         },
         warmup: opts.warmup.unwrap_or(DEFAULT_WARMUP),
         counters: true,
+        allocations: opts.allocations,
         ok_exit_codes: config::DEFAULT_OK_EXIT_CODES.to_vec(),
         metrics: BTreeMap::new(),
     };
@@ -881,6 +887,10 @@ fn plan_declared(cfg: &Config, path: &Path, opts: &RunOpts) -> Result<Planned> {
             // An explicit flag beats the file; the file beats the default.
             s.runs = opts.runs.unwrap_or(s.runs);
             s.warmup = opts.warmup.unwrap_or(s.warmup);
+            // Adds to the file rather than overriding it: there is no
+            // `--no-allocations`, since leaving the flag off already means
+            // whatever tak.toml says.
+            s.allocations |= opts.allocations;
         }
         plans.push((name, b.is_multi(), subjects));
     }
@@ -984,6 +994,9 @@ fn print_plan(bench: &str, multi: bool, subjects: &[Subject], no_counters: bool)
         if s.counters && !no_counters {
             println!("{pad}counters on");
         }
+        if s.allocations {
+            println!("{pad}allocations on");
+        }
         for (name, source) in &s.metrics {
             match source {
                 config::MetricSource::File(p) => {
@@ -1039,6 +1052,7 @@ fn finish(
                 let mut r = ExportResult::new(&m.bench, &m.subject.name, command, &m.samples.times)
                     .with_exit_codes(&m.samples.exit_codes);
                 r.version = m.version.clone();
+                r.allocations = export::Allocations::from_metrics(&m.record.metrics);
                 r.metrics = m.custom.clone();
                 if m.subject.check.is_some() {
                     r.with_checks(&m.samples.checks)
@@ -1675,6 +1689,23 @@ fn measure_bench_vetted(
         } else {
             (false, None)
         };
+        // Independent of --no-counters, which is about instruction counting.
+        // A subject that asked for allocations gets them, or a note saying
+        // why not. Never part of `count_failed`: allocations do not gate, so
+        // failing to count them leaves no gate unchecked, and the rest of
+        // the measurement is recorded without them. Only `vet` refusing a
+        // DHAT run is fatal, as it is before any sample: the subject no
+        // longer runs from where it may.
+        if s.allocations
+            && let Err(e) = allocations_into(&mut metrics, &label, s, settings, &|| vet(s))
+        {
+            if !multi {
+                return Err(e);
+            }
+            eprintln!("  error: {label} dropped: {e:#}");
+            failed.push(label.clone());
+            continue;
+        }
         // Last, once the subject is done running: setup or the samples may
         // be what produced the file or output being measured. A failure is
         // reported here and fails the run in `finish`, after every other
@@ -1702,9 +1733,14 @@ fn measure_bench_vetted(
             // first, since that is the robust estimator, then the spread.
             // The command is in tak.toml; repeating it here buried the numbers.
             // Instruction counts, when a subject opted in, stay on its line.
-            let count = metrics
+            let mut count = metrics
                 .get("instructions")
                 .map_or(String::new(), |i| format!("  instructions {i:.0}"));
+            if let (Some(blocks), Some(bytes)) =
+                (metrics.get("alloc_blocks"), metrics.get("alloc_bytes"))
+            {
+                count.push_str(&format!("  allocs {blocks:.0} ({bytes:.0} bytes)"));
+            }
             let checked = checks.map_or(String::new(), |(p, t)| format!("  checks {p}/{t}"));
             let extra: String = custom
                 .iter()
@@ -1728,7 +1764,8 @@ fn measure_bench_vetted(
             if k == "wall_n" {
                 continue;
             }
-            if k == "instructions" {
+            // Counts, not measurements: a fraction would be noise.
+            if k == "instructions" || k.starts_with("alloc_") {
                 println!("  {k:<16} {v:>14.0}");
             } else if s.metrics.contains_key(k) {
                 println!("  {k:<16} {:>14}", metric_value(*v));
@@ -1880,6 +1917,70 @@ fn count_into(
             (false, None)
         }
     }
+}
+
+/// Add a subject's heap allocations to its metrics, warning rather than
+/// failing when they cannot be had, as [`count_into`] does.
+///
+/// The one error returned is `vet` refusing a run, which is not a failed
+/// measurement but a subject that must not run at all. Told apart by
+/// remembering the refusal, since the measurement reports both the same way.
+fn allocations_into(
+    metrics: &mut BTreeMap<String, f64>,
+    label: &str,
+    s: &Subject,
+    settings: &Settings,
+    vet: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    let refused = std::cell::RefCell::new(None);
+    let checked = || {
+        vet().inspect_err(|e| {
+            refused.replace(Some(format!("{e:#}")));
+        })
+    };
+    let result = measure::subject_allocations_vetted(s, settings, &checked);
+    if let Some(why) = refused.take() {
+        bail!("{why}");
+    }
+    match result {
+        Ok(Some(a)) => {
+            for (k, v) in a.min.metrics() {
+                metrics.insert(k.into(), v as f64);
+            }
+            // Recorded anyway: it is what DHAT reported, and nothing gates
+            // on it. The warning is what keeps a zero from being believed.
+            if a.saw_nothing() {
+                eprintln!(
+                    "  warning: {label}: DHAT saw no heap allocations. It counts only \
+                     calls it can intercept, so a statically linked binary or one with \
+                     its own allocator (jemalloc, mimalloc) reports zero however much \
+                     it allocates."
+                );
+            } else if a.is_suspect() {
+                eprintln!(
+                    "  warning: {label}: heap allocation totals varied {:.2}% across {} runs. \
+                     A hermetic command repeats them exactly, so this one does \
+                     environment-dependent work (a cache it fills on first run, an \
+                     update check, DNS).",
+                    a.totals_spread_pct(),
+                    a.runs
+                );
+            } else if a.peak_is_unsteady() {
+                eprintln!(
+                    "  note: {label}: peak heap varied {:.2}% across {} runs while the \
+                     totals did not. Threads that allocate at once reach a different peak \
+                     depending on how valgrind interleaves them; the minimum is recorded.",
+                    a.peak_spread_pct(),
+                    a.runs
+                );
+            }
+        }
+        Ok(None) => {
+            eprintln!("  note: {label}: valgrind not found, so heap allocations were not measured.")
+        }
+        Err(e) => eprintln!("  warning: {label}: allocation counting failed: {e:#}"),
+    }
+    Ok(())
 }
 
 fn cmd_history(rev: String, remote: String) -> Result<()> {
@@ -2748,6 +2849,8 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
         runs: o.runs.map(Runs::Fixed),
         warmup: None,
         no_counters: false,
+        // What tak.toml says; backfilling past commits has no flag for it.
+        allocations: false,
         record: true,
         no_progress: false,
         subjects: Vec::new(),
@@ -3424,6 +3527,7 @@ fn main() -> Result<()> {
             runs,
             warmup,
             no_counters,
+            allocations,
             record,
             no_progress,
             subject,
@@ -3450,6 +3554,7 @@ fn main() -> Result<()> {
                     runs: runs.as_deref().map(str::parse).transpose()?,
                     warmup,
                     no_counters,
+                    allocations,
                     record,
                     no_progress,
                     subjects: subject,

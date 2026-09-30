@@ -508,6 +508,30 @@ mod tests {
         assert_eq!(s.list().unwrap(), vec!["before".to_string()]);
     }
 
+    /// Heap-allocation metrics survive a save and load, and a `--baseline`
+    /// report renders them through the same allocation table as `tak
+    /// compare`, still without gating on them.
+    #[test]
+    fn allocation_metrics_reach_a_baseline_report() {
+        let with_allocs = |blocks: f64| {
+            let mut r = rec("a", "r", 10.0);
+            r.metrics.insert("alloc_blocks".into(), blocks);
+            r.metrics.insert("alloc_bytes".into(), blocks * 8.0);
+            r.metrics.insert("alloc_peak_bytes".into(), blocks * 4.0);
+            r
+        };
+        let (_tmp, s) = store();
+        s.save("before", &[with_allocs(10.0)]).unwrap();
+        let b = s.load("before").unwrap();
+        let current = [with_allocs(20.0)];
+        let c = crate::compare::compare(&relevant(&b.records, &current), &current);
+        let gates = crate::compare::Gates::uniform(crate::compare::Gate::new(1.0, 0).unwrap());
+        let md = crate::compare::markdown(&c, &crate::compare::Trend::new(), &gates, false);
+        assert!(md.contains("Heap allocations"), "{md}");
+        assert!(md.contains("| a | 10 → 20 | +100.00% |"), "{md}");
+        assert!(c.regressions(&gates).is_empty());
+    }
+
     /// Saving a subset updates that subset and keeps the rest, the way a
     /// criterion baseline does per benchmark.
     #[test]

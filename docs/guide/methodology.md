@@ -33,10 +33,49 @@ That leads to one narrow rule:
 | tier | metrics | may gate CI? |
 |---|---|---|
 | deterministic | `instructions` | yes |
+| undecided | `alloc_blocks`, `alloc_bytes`, `alloc_peak_bytes` | not yet |
 | timing | `wall_min_ms`, `wall_p50_ms`, `wall_mean_ms`, `wall_max_ms`, `wall_stddev_ms` | never |
 
 Syscall counts and peak RSS are not deterministic enough for a tight threshold because thread
 scheduling changes them.
+
+## Heap allocations
+
+Instruction counts can miss a change that allocates much more memory for little extra work.
+With [`allocations = true`](/guide/configuration#counting-heap-allocations), tak also runs a
+subject under valgrind's DHAT, which counts every heap allocation it intercepts. That is the
+same kind of instrumentation as cachegrind's, so the counts might be as reproducible as
+instruction counts. tak records and reports them, and doesn't gate on them until that has been
+measured across more programs than these.
+
+Each program below ran 20 times under DHAT and 20 times under cachegrind, on a 32-core Linux
+host running valgrind 3.24.0 in a container. "Quiet" means no load was added, though other
+work was running on the host. "Contended" means 32 `stress-ng --cpu` workers in the same
+container. The figures are coefficients of variation.
+
+| program | totals (`alloc_blocks`, `alloc_bytes`), quiet / contended | peak (`alloc_peak_bytes`), quiet / contended | peak minimum, contended vs quiet | `instructions`, quiet / contended |
+|---|---|---|---|---|
+| `tak --help` | 0 / 0 | 0 / 0 | 0 | 0 / 0 |
+| `git status` in a 200-file repository | 26.6%, see below / 0 | 1.19%, see below / 0 | 0 | 0 / 0 |
+| `git grep --threads=8` | 0 / 0 | 0.010% / 0.032% | +0.009% | 0.12% / 0.49% |
+| Python, 4 threads allocating | 0 / 0 | 0 / 0.009% | 0 | 0.059% / 0.081% |
+| Rust, 8 threads allocating at once | 0 / 0 | 0.51% / 1.07% | −0.72% | 0.003% / 0.003% |
+
+`git status` allocated 1,140 blocks on its first run and 496 on each of the other 39, because
+the first run refreshed the repository's index. That is a command doing different work, not
+the metric varying, and it is what tak's spread warning is for. The minimum was the same in
+both conditions. In a real run the timed samples come first, so the refresh happens before the
+DHAT runs.
+
+Apart from that first `git status` run, the totals repeated exactly for every program, threaded
+ones included, under contention too. The peak didn't. Valgrind runs one thread at a time and decides itself when to switch, so how
+much a threaded program has live at once depends on that schedule. The 8-thread program's
+peak ranged from 26,526 to 27,198 bytes, 2.5% apart. Its minimum was *lower* under
+contention, so for the peak the floor is not the one-sided estimator it is for time and
+instructions.
+
+That suggests the totals could join the deterministic tier and the peak should stay out of
+it. Five programs are not enough to establish that, so for now none of them gates.
 
 ## Why the minimum
 

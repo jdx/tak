@@ -12,6 +12,11 @@
 //! Syscall counts and peak RSS sit awkwardly between the two: better than wall
 //! clock (~1%) but not deterministic, because they move with thread scheduling.
 //! They are recorded, and may be flagged, but must not gate at a tight threshold.
+//!
+//! Heap allocations (`alloc_*`, from DHAT) are counted rather than timed. Their
+//! totals have repeated exactly for every hermetic subject measured so far, but
+//! that is five programs, not a demonstrated property, so they are recorded
+//! and reported and do not gate. Their peak moves with thread scheduling.
 
 use crate::config::{AutoRuns, DEFAULT_OK_EXIT_CODES, MetricSource, Runs, SELF_TOOL, Subject};
 use crate::settings::Settings;
@@ -100,17 +105,6 @@ fn run_tracked(c: &mut Command) -> std::io::Result<std::process::ExitStatus> {
     let status = child.wait();
     tracked::finished();
     status
-}
-
-/// [`run_tracked`] for `Command::output`: stdin closed, stderr captured.
-/// Callers set stdout themselves.
-fn output_tracked(c: &mut Command) -> std::io::Result<std::process::Output> {
-    c.stdin(Stdio::null()).stderr(Stdio::piped());
-    let child = c.spawn()?;
-    tracked::started(child.id());
-    let out = child.wait_with_output();
-    tracked::finished();
-    out
 }
 
 /// Put every measured command in a process group of its own, so that
@@ -1100,6 +1094,7 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
         },
         warmup: plan.warmup,
         counters: false,
+        allocations: false,
         ok_exit_codes: DEFAULT_OK_EXIT_CODES.to_vec(),
         metrics: BTreeMap::new(),
     };
@@ -1867,6 +1862,119 @@ fn capture(
     })
 }
 
+/// How much of valgrind's log to read. Only valgrind writes it, so it holds
+/// a banner and a summary and is a few kilobytes; the cap is there so a
+/// tool that turned verbose could not make tak read without limit.
+const VALGRIND_LOG_CAP: u64 = 1 << 20;
+
+/// Run `cmd` under valgrind with `tool` options to completion, returning its
+/// exit status and the lines of valgrind's log that belong to the subject's
+/// own process, where the tool's summary is.
+///
+/// valgrind writes its messages to a file of its own (`--log-fd`), and the
+/// subject's stdout and stderr go to `/dev/null`, as they do for timed
+/// samples. Mixing the two on one stream, as valgrind does by default,
+/// caused every problem a subject's background process could cause: reading
+/// the stream to EOF waited for that process and hung the run; a file for
+/// it grew for as long as the process logged; a bounded tail of it could
+/// have the summary pushed out by the process's output; and the subject
+/// could print a line that read as the summary. With the log apart, nothing
+/// the subject leaves behind can reach it, and the run is over when the
+/// process spawned here exits.
+///
+/// The log is an anonymous temporary file — unlinked from the start, so a
+/// subject that clears its temporary directory, as `rm -rf "$TMPDIR"/*`
+/// does, cannot take the log with it. It reaches valgrind by descriptor:
+/// close-on-exec is cleared for it in the child alone, and valgrind moves it
+/// out of the client's sight and marks it close-on-exec again, so programs
+/// the subject runs never hold it. A process the subject forks without exec
+/// stays under valgrind and writes to the same file, under its own
+/// `==PID==` prefix, which is why only the subject's pid's lines are
+/// returned: valgrind replaces itself with the tool rather than forking, so
+/// that is the pid spawned here.
+///
+/// Creating the file can fail — a full or read-only temporary directory —
+/// and that is an error naming it, which the caller reports as a failed
+/// measurement, never as valgrind being absent.
+#[cfg(unix)]
+fn under_valgrind(
+    tool: &[&str],
+    cmd: &[String],
+    site: &Site,
+) -> Result<(std::process::ExitStatus, String)> {
+    use std::io::{Read, Seek};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    let mut log = tempfile::tempfile().context("failed to create a file for valgrind's log")?;
+    let fd = log.as_raw_fd();
+    let mut argv: Vec<String> = std::iter::once("valgrind")
+        .chain(tool.iter().copied())
+        .map(String::from)
+        .collect();
+    argv.push(format!("--log-fd={fd}"));
+    argv.extend_from_slice(cmd);
+    let mut c = command(&argv, site)?;
+    c.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: runs in the child between fork and exec, and only calls fcntl,
+    // which is async-signal-safe, on a descriptor this function owns.
+    unsafe {
+        c.pre_exec(move || {
+            if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    // Spawned and waited for as `run_tracked` does, so under `tak backfill
+    // --commits` the run is in its own process group (set by `command`) and
+    // an interrupt stops it with everything it started. The group is set by
+    // std, not by the hook above, which is the only `pre_exec` here.
+    let mut child = c.spawn().context("failed to run valgrind")?;
+    let pid = child.id();
+    tracked::started(pid);
+    let status = child.wait();
+    tracked::finished();
+    let status = status.context("failed to run valgrind")?;
+    // An empty log is what a valgrind that could not start the subject
+    // leaves: its launcher reports that on stderr, before the log is used.
+    // The caller's "no summary" error says so rather than this one guessing.
+    let mut raw = Vec::new();
+    log.rewind().context("failed to read valgrind's log")?;
+    log.take(VALGRIND_LOG_CAP)
+        .read_to_end(&mut raw)
+        .context("failed to read valgrind's log")?;
+    let prefix = format!("=={pid}==");
+    let own: String = String::from_utf8_lossy(&raw)
+        .lines()
+        .filter(|l| l.starts_with(&prefix))
+        .flat_map(|l| [l, "\n"])
+        .collect();
+    Ok((status, own))
+}
+
+/// There is no valgrind to run on other platforms, and [`valgrind_available`]
+/// says so before this is reached.
+#[cfg(not(unix))]
+fn under_valgrind(
+    _tool: &[&str],
+    _cmd: &[String],
+    _site: &Site,
+) -> Result<(std::process::ExitStatus, String)> {
+    bail!("valgrind runs only on Unix")
+}
+
+/// The last line of valgrind's log with something on it past the `==PID==`
+/// prefix, for an error that has no summary to show. valgrind ends its
+/// output with a bare `==PID==` line, which says nothing.
+fn last_log_line(log: &str) -> &str {
+    log.lines()
+        .map(|l| valgrind_line(l).unwrap_or(l).trim())
+        .rfind(|l| !l.is_empty())
+        .unwrap_or("(valgrind wrote no log; it may not have been able to start the command)")
+}
+
 /// `ok` applies to the subject under valgrind: cachegrind exits with its
 /// client's code, and re-raises the signal a client died of.
 ///
@@ -1924,36 +2032,32 @@ fn count(
                 .replace('%', "%%"),
             None => "/dev/null".to_string(),
         };
-        let mut argv: Vec<String> = [
-            "valgrind",
-            "--tool=cachegrind",
-            "--cache-sim=no",
-            "--branch-sim=no",
-        ]
-        .map(String::from)
-        .to_vec();
-        argv.push(format!("--cachegrind-out-file={out_file}"));
-        argv.extend_from_slice(cmd);
-        let mut c = command(&argv, site)?;
-        c.stdout(Stdio::null());
-        let out = output_tracked(&mut c).context("failed to run valgrind")?;
+        let out_arg = format!("--cachegrind-out-file={out_file}");
+        let (status, log) = under_valgrind(
+            &[
+                "--tool=cachegrind",
+                "--cache-sim=no",
+                "--branch-sim=no",
+                &out_arg,
+            ],
+            cmd,
+            site,
+        )?;
 
-        // cachegrind writes its summary to stderr as e.g. "I refs:  48,349,132".
-        let stderr = String::from_utf8_lossy(&out.stderr);
+        // cachegrind writes its summary to its log as e.g. "I refs:  48,349,132".
         let bin = cmd.first().map(String::as_str).unwrap_or("(empty command)");
-        accepted(bin, out.status, ok, " under valgrind")?;
-        match parse_irefs(&stderr) {
+        accepted(bin, status, ok, " under valgrind")?;
+        match parse_irefs(&log) {
             // cachegrind that cannot open its output file still exits with
             // the client's code, and reports `I refs: 0` — a count that would
             // record as the largest improvement ever measured. Seen with
             // valgrind 3.24 when the subject removed the directory the profile
-            // was going to. Decided on the count, not on the message: stderr
-            // is the subject's as well, and a program printing the same words
-            // must not lose a real count. No process retires zero
-            // instructions, so zero is never a measurement.
+            // was going to. Decided on the count, not on the message, which
+            // only names the cause: no process retires zero instructions, so
+            // zero is never a measurement.
             Some(0) => {
                 let unwritable =
-                    valgrind_lines(&stderr).any(|l| l.contains("can't open output data file"));
+                    valgrind_lines(&log).any(|l| l.contains("can't open output data file"));
                 if unwritable {
                     bail!(
                         "cachegrind could not write its profile to {out_file}, and counts nothing when that happens"
@@ -1967,7 +2071,7 @@ fn count(
             // absent sends people off installing something they already have.
             None => bail!(
                 "valgrind ran but emitted no `I refs` summary: {}",
-                stderr.lines().last().unwrap_or("(no output)").trim()
+                last_log_line(&log)
             ),
         }
     }
@@ -2004,13 +2108,14 @@ fn count(
     Ok(Some((counted, kept)))
 }
 
-/// Extract the `I refs:` count from cachegrind's stderr summary.
+/// Extract the `I refs:` count from cachegrind's summary in its log.
 ///
-/// Only valgrind's own lines are read, and the last summary among them: the
-/// subject shares the stream, and one that prints `I refs:` must not supply
-/// its own count.
-fn parse_irefs(stderr: &str) -> Option<u64> {
-    let line = valgrind_lines(stderr)
+/// Only valgrind's own `==PID==` lines are read, and the last summary among
+/// them. [`under_valgrind`] keeps the subject's output out of the log
+/// altogether; the prefix check is what would still hold if that ever
+/// changed, since a subject printing `I refs:` must not supply its own count.
+fn parse_irefs(log: &str) -> Option<u64> {
+    let line = valgrind_lines(log)
         .filter(|l| l.contains("I refs:"))
         .last()?;
     let digits: String = line
@@ -2022,19 +2127,336 @@ fn parse_irefs(stderr: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
-/// The lines valgrind itself wrote to a stderr it shares with its client,
-/// with their `==<pid>==` prefix removed.
-fn valgrind_lines(stderr: &str) -> impl Iterator<Item = &str> {
-    stderr.lines().filter_map(|l| {
-        let rest = l.strip_prefix("==")?;
-        let (pid, rest) = rest.split_once("==")?;
-        (!pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit())).then_some(rest)
+/// What DHAT reports about one run's heap use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Heap {
+    /// Blocks allocated over the whole run, freed or not.
+    pub blocks: u64,
+    /// Bytes allocated over the whole run, freed or not.
+    pub bytes: u64,
+    /// Bytes live at the global peak (DHAT's `t-gmax`).
+    pub peak_bytes: u64,
+}
+
+impl Heap {
+    /// As recorded metrics. The `alloc_` prefix keeps them together in the
+    /// sorted metrics map and apart from the gated `instructions`.
+    pub fn metrics(&self) -> [(&'static str, u64); 3] {
+        [
+            ("alloc_blocks", self.blocks),
+            ("alloc_bytes", self.bytes),
+            ("alloc_peak_bytes", self.peak_bytes),
+        ]
+    }
+}
+
+/// Heap allocations from repeated DHAT runs: each metric's floor and ceiling,
+/// taken independently, as [`Counted`] does for instructions.
+#[derive(Debug, Clone, Copy)]
+pub struct Allocated {
+    pub min: Heap,
+    pub max: Heap,
+    pub runs: u32,
+}
+
+/// Relative spread of one metric across runs, as a percentage of its
+/// minimum. A minimum of zero under a maximum that is not has no percentage,
+/// and counts as infinitely spread: something allocated on one run and not on
+/// another.
+fn spread(lo: u64, hi: u64) -> f64 {
+    match (lo, hi) {
+        (0, 0) => 0.0,
+        (0, _) => f64::INFINITY,
+        (lo, hi) => (hi - lo) as f64 / lo as f64 * 100.0,
+    }
+}
+
+impl Allocated {
+    /// The wider spread of the two totals, blocks and bytes.
+    pub fn totals_spread_pct(&self) -> f64 {
+        spread(self.min.blocks, self.max.blocks).max(spread(self.min.bytes, self.max.bytes))
+    }
+
+    /// The spread of the peak.
+    pub fn peak_spread_pct(&self) -> f64 {
+        spread(self.min.peak_bytes, self.max.peak_bytes)
+    }
+
+    /// Whether the totals moved between runs, which says the program's work
+    /// did. Same threshold as instructions. The totals of every hermetic
+    /// subject measured, threaded ones included, repeated exactly; the one
+    /// that moved was `git status` refreshing its index on the first run.
+    pub fn is_suspect(&self) -> bool {
+        self.totals_spread_pct() > SPREAD_WARN_PCT
+    }
+
+    /// Whether the peak moved while the totals did not. That is how a
+    /// threaded subject looks: every thread does the same work, but how much
+    /// of it is live at once depends on how valgrind interleaves them, which
+    /// moved an 8-thread subject's peak by up to 2.5%.
+    pub fn peak_is_unsteady(&self) -> bool {
+        self.peak_spread_pct() > SPREAD_WARN_PCT
+    }
+
+    /// Whether DHAT saw no heap allocation at all. Nearly always blindness
+    /// rather than a finding: DHAT counts only calls it can intercept, so a
+    /// statically linked binary, or one with its own allocator compiled in
+    /// (jemalloc, mimalloc), reports zero however much it allocates.
+    pub fn saw_nothing(&self) -> bool {
+        self.max.blocks == 0
+    }
+}
+
+/// Heap allocations via `valgrind --tool=dhat`, repeated [`COUNTER_RUNS`]
+/// times, with the subject's prepare step before each run as for
+/// [`subject_instructions`].
+///
+/// Reported, never gated — not yet. In the measurements on the methodology
+/// page the totals repeated exactly for every hermetic subject, threaded ones
+/// and a 32-way CPU contention run included. The peak did not: valgrind runs
+/// one thread at a time and switches by its own schedule, so how much a
+/// threaded program has live at once moves with it, in both directions. Its
+/// minimum drifted 0.7% under contention, so for the peak the floor is not
+/// the one-sided estimator it is for everything else.
+///
+/// `Ok(None)` when valgrind is unavailable, like [`instructions`].
+pub fn subject_allocations(s: &Subject, settings: &Settings) -> Result<Option<Allocated>> {
+    subject_allocations_vetted(s, settings, &|| Ok(()))
+}
+
+/// [`subject_allocations`], asking `vet` before each DHAT run, after its
+/// `prepare`, as [`subject_instructions_vetted`] does before each counted
+/// run.
+pub fn subject_allocations_vetted(
+    s: &Subject,
+    settings: &Settings,
+    vet: &dyn Fn() -> Result<()>,
+) -> Result<Option<Allocated>> {
+    let site = Site {
+        dir: s.dir.as_deref(),
+        env: &s.env,
+        settings,
+    };
+    allocations(&s.cmd, s.prepare.as_deref(), &site, &s.ok_exit_codes, vet)
+}
+
+/// `ok` applies to the subject under valgrind: DHAT, like cachegrind, exits
+/// with its client's code.
+fn allocations(
+    cmd: &[String],
+    prepare: Option<&[String]>,
+    site: &Site,
+    ok: &[i32],
+    vet: &dyn Fn() -> Result<()>,
+) -> Result<Option<Allocated>> {
+    if !valgrind_available() {
+        return Ok(None);
+    }
+    let bin = cmd.first().map(String::as_str).unwrap_or("(empty command)");
+    let mut runs: Vec<Heap> = Vec::with_capacity(COUNTER_RUNS as usize);
+    for _ in 0..COUNTER_RUNS {
+        // Before each step that runs from the subject's paths, as for a
+        // counted cachegrind run: the previous run may have changed them,
+        // and the prepare may change them again.
+        if let Some(p) = prepare {
+            vet()?;
+            prepare_once(p, site)?;
+        }
+        vet()?;
+        // The profile DHAT would write is for its viewer, and tak reads only
+        // the summary; without this every run leaves a `dhat.out.PID` in the
+        // subject's directory.
+        let (status, log) =
+            under_valgrind(&["--tool=dhat", "--dhat-out-file=/dev/null"], cmd, site)?;
+        accepted(bin, status, ok, " under valgrind")?;
+        match parse_dhat(&log) {
+            Some(h) => runs.push(h),
+            None => bail!(
+                "valgrind ran but emitted no DHAT summary: {}",
+                last_log_line(&log)
+            ),
+        }
+    }
+    let fold = |f: fn(u64, u64) -> u64| {
+        runs.iter()
+            .copied()
+            .reduce(|a, b| Heap {
+                blocks: f(a.blocks, b.blocks),
+                bytes: f(a.bytes, b.bytes),
+                peak_bytes: f(a.peak_bytes, b.peak_bytes),
+            })
+            .expect("COUNTER_RUNS > 0")
+    };
+    Ok(Some(Allocated {
+        min: fold(u64::min),
+        max: fold(u64::max),
+        runs: COUNTER_RUNS,
+    }))
+}
+
+/// Extract DHAT's summary from valgrind's log, e.g.
+///
+/// ```text
+/// ==8== Total:     4,140 bytes in 3 blocks
+/// ==8== At t-gmax: 4,140 bytes in 3 blocks
+/// ```
+///
+/// Only lines with valgrind's `==PID==` prefix count. The log holds nothing
+/// else when it is written by [`under_valgrind`], but the summary's own
+/// words are too ordinary — "Total: 5 bytes in 1 blocks" could be any
+/// progress line — to match wherever they appear. The format is the one
+/// valgrind 3.15 introduced with `--tool=dhat`; before that it was
+/// `exp-dhat`, which no longer exists.
+fn parse_dhat(log: &str) -> Option<Heap> {
+    let field = |name: &str| {
+        let rest = valgrind_lines(log).find_map(|l| l.trim_start().strip_prefix(name))?;
+        let (bytes, rest) = rest.trim().split_once(" bytes in ")?;
+        let blocks = rest.split_whitespace().next()?;
+        Some((dhat_number(bytes)?, dhat_number(blocks)?))
+    };
+    let (bytes, blocks) = field("Total:")?;
+    let (peak_bytes, _) = field("At t-gmax:")?;
+    Some(Heap {
+        blocks,
+        bytes,
+        peak_bytes,
     })
+}
+
+/// A line of valgrind's own output, without its `==PID==` prefix.
+fn valgrind_line(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("==")?;
+    let (pid, rest) = rest.split_once("==")?;
+    (!pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit())).then_some(rest)
+}
+
+/// A count as valgrind prints it, with commas every three digits.
+fn dhat_number(s: &str) -> Option<u64> {
+    let digits: String = s.trim().chars().filter(|&c| c != ',').collect();
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// valgrind's own lines in its log, with their `==<pid>==` prefix removed.
+fn valgrind_lines(log: &str) -> impl Iterator<Item = &str> {
+    log.lines().filter_map(valgrind_line)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Captured from valgrind 3.22.0 (Ubuntu 24.04) running `git --version`.
+    /// 3.24.0 (Debian trixie) prints the same summary lines.
+    const DHAT_3_22: &str = "\
+==9== DHAT, a dynamic heap analysis tool
+==9== Copyright (C) 2010-2018, and GNU GPL'd, by Mozilla Foundation
+==9== Using Valgrind-3.22.0 and LibVEX; rerun with -h for copyright info
+==9== Command: git --version
+==9==
+git version 2.43.0
+==9==
+==9== Total:     7,119 bytes in 31 blocks
+==9== At t-gmax: 6,847 bytes in 25 blocks
+==9== At t-end:  2,379 bytes in 15 blocks
+==9== Reads:     1,067 bytes
+==9== Writes:    1,546 bytes
+==9==
+==9== To view the resulting profile, open
+==9==   file:///usr/libexec/valgrind/dh_view.html
+==9== in a web browser, click on \"Load...\", and then select the file
+==9==   /dev/null
+==9== The text at the bottom explains the abbreviations used in the output.
+";
+
+    #[test]
+    fn parses_a_dhat_summary() {
+        assert_eq!(
+            parse_dhat(DHAT_3_22),
+            Some(Heap {
+                blocks: 31,
+                bytes: 7_119,
+                peak_bytes: 6_847,
+            })
+        );
+    }
+
+    /// Captured from valgrind 3.24.0 running a threaded Python script: the
+    /// separators matter once counts pass a million.
+    #[test]
+    fn parses_counts_past_a_million() {
+        let s = "==21== Total:     2,626,313 bytes in 2,833 blocks\n\
+                 ==21== At t-gmax: 1,185,686 bytes in 1,661 blocks\n";
+        assert_eq!(
+            parse_dhat(s),
+            Some(Heap {
+                blocks: 2_833,
+                bytes: 2_626_313,
+                peak_bytes: 1_185_686,
+            })
+        );
+    }
+
+    /// Only valgrind's own lines are read: a line without its `==PID==`
+    /// prefix is never the measurement, however much it looks like one.
+    #[test]
+    fn only_valgrinds_own_lines_are_read() {
+        let s = "Total: 5 bytes in 1 blocks\n\
+                 ==12== \n\
+                 ==12== Total:     8,748 bytes in 17 blocks\n\
+                 ==12== At t-gmax: 8,748 bytes in 17 blocks\n";
+        assert_eq!(parse_dhat(s).unwrap().blocks, 17);
+        assert_eq!(
+            parse_dhat("Total: 5 bytes in 1 blocks\nAt t-gmax: 5 bytes in 1 blocks\n"),
+            None
+        );
+        assert_eq!(valgrind_line("==x== Total:"), None);
+        assert_eq!(valgrind_line("==== Total:"), None);
+    }
+
+    #[test]
+    fn a_missing_or_truncated_dhat_summary_is_none() {
+        assert_eq!(parse_dhat(""), None);
+        // A run that died before the summary's second line.
+        assert_eq!(parse_dhat("==3== Total:     1 bytes in 1 blocks\n"), None);
+        assert_eq!(
+            parse_dhat(
+                "==3== Total:     lots bytes in 1 blocks\n==3== At t-gmax: 1 bytes in 1 blocks\n"
+            ),
+            None
+        );
+    }
+
+    /// Totals and peak are judged apart: moving totals mean the work
+    /// changed, a moving peak alone means threads interleaved differently.
+    #[test]
+    fn totals_and_peak_spread_are_judged_apart() {
+        let h = |blocks, bytes, peak_bytes| Heap {
+            blocks,
+            bytes,
+            peak_bytes,
+        };
+        let a = |min, max| Allocated { min, max, runs: 3 };
+        let steady = a(h(10, 1000, 500), h(10, 1000, 500));
+        assert_eq!(steady.totals_spread_pct(), 0.0);
+        assert!(!steady.is_suspect() && !steady.peak_is_unsteady());
+
+        let threaded = a(h(10, 1000, 500), h(10, 1000, 510));
+        assert!((threaded.peak_spread_pct() - 2.0).abs() < 1e-9);
+        assert!(threaded.peak_is_unsteady() && !threaded.is_suspect());
+
+        // The first run refreshed a cache: 1140 blocks, then 496.
+        let first_run = a(h(496, 2_077_237, 1_790_738), h(1140, 2_227_102, 1_888_914));
+        assert!(first_run.is_suspect());
+        assert!((first_run.totals_spread_pct() - 129.84).abs() < 0.01);
+
+        // Nothing on one run and something on another has no percentage.
+        assert!(a(h(0, 0, 0), h(1, 8, 8)).totals_spread_pct().is_infinite());
+        assert!(a(h(0, 0, 0), h(0, 0, 0)).saw_nothing());
+        assert!(!steady.saw_nothing());
+    }
 
     /// The subject's stderr is interleaved with valgrind's; only valgrind's
     /// prefixed lines are its summary.
@@ -2256,6 +2678,7 @@ mod tests {
             },
             warmup: 1,
             counters: false,
+            allocations: false,
             ok_exit_codes: vec![0],
             metrics: BTreeMap::new(),
         };
@@ -2316,6 +2739,7 @@ mod tests {
             },
             warmup: 0,
             counters: false,
+            allocations: false,
             ok_exit_codes: vec![0],
             metrics: BTreeMap::new(),
         }
@@ -2650,6 +3074,7 @@ mod tests {
                 },
                 warmup: 0,
                 counters: false,
+                allocations: false,
                 ok_exit_codes: vec![0],
                 metrics: BTreeMap::new(),
             }],
@@ -2694,6 +3119,7 @@ mod tests {
             },
             warmup,
             counters: false,
+            allocations: false,
             ok_exit_codes: vec![0],
             metrics: BTreeMap::new(),
         }
@@ -2852,6 +3278,7 @@ mod tests {
             },
             warmup: 1,
             counters: false,
+            allocations: false,
             ok_exit_codes: vec![0],
             metrics: BTreeMap::new(),
         };
@@ -2903,6 +3330,7 @@ mod tests {
             },
             warmup,
             counters: false,
+            allocations: false,
             ok_exit_codes: vec![0],
             metrics: BTreeMap::new(),
         };

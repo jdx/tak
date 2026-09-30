@@ -43,6 +43,7 @@ version_cmd = ["true", "--version"]
 dir = "."
 env = { A = "1" }
 vars = { v = "x" }
+allocations = false
 metric.binary_bytes.file = "target/release/x"
 
 [subject.shared]
@@ -63,6 +64,7 @@ version_cmd = "true --version"
 dir = "."
 env = { B = "2" }
 vars = { w = "y" }
+allocations = true
 metric.bundle_kb.cmd = ["true"]
 
 [bench.single]
@@ -82,6 +84,7 @@ version_cmd = ["true"]
 dir = "."
 env = { C = "3" }
 vars = { u = "z" }
+allocations = true
 metric.lines_count.cmd = "true"
 
 [bench.multi]

@@ -246,8 +246,12 @@
           "type": "string"
         }
       },
+      "allocations": {
+        "description": "Count heap allocations under valgrind's DHAT: alloc_blocks, alloc_bytes and alloc_peak_bytes. Recorded and reported, never gated. Default false.",
+        "type": "boolean"
+      },
       "metric": {
-        "description": "Custom metrics by name, recorded beside the timings and reported by `tak compare`, never gated. Merged by name across layers. Names use a-z, 0-9 and _, start with a letter, and cannot be `instructions` or start with `wall_`; end them with their unit, such as `binary_bytes`. Lower is taken as better.",
+        "description": "Custom metrics by name, recorded beside the timings and reported by `tak compare`, never gated. Merged by name across layers. Names use a-z, 0-9 and _, start with a letter, and cannot be `instructions` or start with `wall_` or `alloc_`; end them with their unit, such as `binary_bytes`. Lower is taken as better.",
         "type": "object",
         "propertyNames": {
           "pattern": "^[a-z][a-z0-9_]{0,63}$",
@@ -258,6 +262,9 @@
               },
               {
                 "pattern": "^wall_"
+              },
+              {
+                "pattern": "^alloc_"
               }
             ]
           }
@@ -338,6 +345,9 @@
         "vars": {
           "$ref": "#/definitions/layerProperties/vars"
         },
+        "allocations": {
+          "$ref": "#/definitions/layerProperties/allocations"
+        },
         "metric": {
           "$ref": "#/definitions/layerProperties/metric"
         }
@@ -392,6 +402,9 @@
         },
         "vars": {
           "$ref": "#/definitions/layerProperties/vars"
+        },
+        "allocations": {
+          "$ref": "#/definitions/layerProperties/allocations"
         },
         "metric": {
           "$ref": "#/definitions/layerProperties/metric"
@@ -469,6 +482,9 @@
         },
         "vars": {
           "$ref": "#/definitions/layerProperties/vars"
+        },
+        "allocations": {
+          "$ref": "#/definitions/layerProperties/allocations"
         },
         "metric": {
           "$ref": "#/definitions/layerProperties/metric"

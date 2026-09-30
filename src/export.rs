@@ -8,8 +8,9 @@
 //! holds several benchmarks. `user` and `system` are omitted because tak does
 //! not measure CPU time. Everything tak adds is an extra key, and none of
 //! hyperfine's changes meaning: `checks` is present only for a subject with a
-//! `check`, `version` only for one with a `version_cmd`, and `metrics` only
-//! for one with custom metrics.
+//! `check`, `version` only for one with a `version_cmd`, `allocations` only
+//! for one whose heap allocations were counted, and `metrics` only for one
+//! with custom metrics.
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -77,6 +78,33 @@ pub struct ExportResult {
     /// out in the same order every run.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub metrics: BTreeMap<String, Option<f64>>,
+    /// Heap allocations DHAT counted, when the subject asked for them and
+    /// valgrind was there to count them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allocations: Option<Allocations>,
+}
+
+/// The minimum of each allocation metric over the DHAT runs, as recorded.
+/// Counts, so integers rather than the floats the metrics map holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Allocations {
+    pub blocks: u64,
+    pub bytes: u64,
+    pub peak_bytes: u64,
+}
+
+impl Allocations {
+    /// From a record's metrics: all three, or none. A partial set cannot
+    /// happen, since they are measured together, and an export should not
+    /// invent the missing ones.
+    pub fn from_metrics(metrics: &std::collections::BTreeMap<String, f64>) -> Option<Self> {
+        let get = |k: &str| metrics.get(k).map(|&v| v as u64);
+        Some(Allocations {
+            blocks: get("alloc_blocks")?,
+            bytes: get("alloc_bytes")?,
+            peak_bytes: get("alloc_peak_bytes")?,
+        })
+    }
 }
 
 /// How a subject's timed samples fared against its `check`.
@@ -130,6 +158,7 @@ impl ExportResult {
             exit_codes: vec![0; n],
             times,
             checks: None,
+            allocations: None,
             metrics: BTreeMap::new(),
         }
     }
@@ -161,6 +190,7 @@ pub fn write(path: &Path, meta: Meta, results: Vec<ExportResult>) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn times_are_seconds_and_the_median_is_the_true_median() {
@@ -198,6 +228,35 @@ mod tests {
         assert!(serde_json::to_value(&r).unwrap()["version"].is_null());
         r.version = Some(Some("tool 1.2.3".into()));
         assert_eq!(serde_json::to_value(&r).unwrap()["version"], "tool 1.2.3");
+    }
+
+    /// Absent unless counted, like `checks`, so a subject that did not ask
+    /// exports the same shape as before.
+    #[test]
+    fn allocations_are_exported_only_when_counted() {
+        let mut r = ExportResult::new("b", "s", "s", &[1.0]);
+        assert!(
+            serde_json::to_value(&r)
+                .unwrap()
+                .get("allocations")
+                .is_none()
+        );
+
+        let metrics = std::collections::BTreeMap::from([
+            ("alloc_blocks".to_string(), 31.0),
+            ("alloc_bytes".to_string(), 7119.0),
+            ("alloc_peak_bytes".to_string(), 6847.0),
+            ("wall_min_ms".to_string(), 1.0),
+        ]);
+        r.allocations = Allocations::from_metrics(&metrics);
+        assert_eq!(
+            serde_json::to_value(&r).unwrap()["allocations"],
+            serde_json::json!({"blocks": 31, "bytes": 7119, "peak_bytes": 6847})
+        );
+        assert_eq!(
+            Allocations::from_metrics(&BTreeMap::from([("alloc_blocks".to_string(), 1.0)])),
+            None
+        );
     }
 
     /// Custom metrics appear only for a subject that declares some, and a

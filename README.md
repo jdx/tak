@@ -44,6 +44,8 @@ and reasoning.
 ## What exists
 
 - `tak run` measures wall time and, where Valgrind is available, instruction counts
+- `allocations = true` or `tak run --allocations` also counts heap allocations under
+  Valgrind's DHAT. They are recorded and shown in `tak compare`, and never gate
 - `tak.toml` declares repeatable benchmarks for local and CI runs
 - a benchmark can also record custom metrics, such as a file's size in bytes or a number a
   command prints. They are stored and reported beside the timings, and never gated

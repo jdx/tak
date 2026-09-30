@@ -20,6 +20,15 @@ pub const GATED_METRIC: &str = "instructions";
 /// The timing metric shown alongside it, for context only.
 pub(crate) const WALL_METRIC: &str = "wall_min_ms";
 
+/// Heap-allocation metrics, in the order their columns appear. Recorded only
+/// by subjects that opt in, so they get a table of their own rather than
+/// columns every report would carry empty.
+const ALLOC_METRICS: [(&str, &str); 3] = [
+    ("alloc_blocks", "allocations"),
+    ("alloc_bytes", "bytes allocated"),
+    ("alloc_peak_bytes", "peak heap"),
+];
+
 /// What identifies a comparable series.
 ///
 /// Runner is part of the key because it has to be: absolute counts shift
@@ -550,6 +559,7 @@ pub fn markdown(c: &Comparison, trend: &Trend, gates: &Gates, credit: bool) -> S
         );
     } else {
         out.push_str(&table(c, trend, gates));
+        out.push_str(&allocations(c));
         out.push_str(&custom_table(c));
     }
 
@@ -567,6 +577,27 @@ pub fn markdown(c: &Comparison, trend: &Trend, gates: &Gates, credit: bool) -> S
         out.push_str(CREDIT);
     }
     out
+}
+
+/// A series' table cell: [`name`], plus the runner when `keys` holds the
+/// same bench and tool on another runner. Without it the two rows read
+/// identically, and nothing says which change was measured where.
+///
+/// Escaped like every other report site: control characters by [`name`]
+/// and [`escape_control`], then the whole cell by [`cell`], since bench,
+/// tool and runner names are free text — a runner class comes from the
+/// environment — and a bare `|` in any of them would split the row.
+fn row_name<'a>(key: &Key, keys: impl IntoIterator<Item = &'a Key>) -> String {
+    let (bench, tool, runner) = key;
+    let shared = keys
+        .into_iter()
+        .any(|(b, t, r)| b == bench && t == tool && r != runner);
+    let text = if shared {
+        format!("{} on {}", name(bench, tool), escape_control(runner))
+    } else {
+        name(bench, tool)
+    };
+    cell(&text)
 }
 
 /// How a series is named in a table row or a verdict: the bench, plus the tool
@@ -634,7 +665,7 @@ fn table(c: &Comparison, trend: &Trend, gates: &Gates) -> String {
     for (key, (ins, wall)) in &series {
         let (bench, tool, _runner) = key;
         let gate = gates.get(bench, tool);
-        let mut cells = vec![cell(&name(bench, tool))];
+        let mut cells = vec![row_name(key, series.keys())];
         if any_trend {
             cells.push(
                 trend
@@ -778,6 +809,56 @@ fn verdict(c: &Comparison, gates: &Gates, uniform: bool) -> String {
             reported.len(),
             listed(&reported, true)
         ));
+    }
+    out
+}
+
+/// The heap-allocation table, or nothing when no series has allocation
+/// metrics on both sides — so a project that never opted in sees the report
+/// it always did.
+///
+/// Never flagged, whatever the change: allocations are reported beside the
+/// gate, not part of it, until they have been shown to be as reproducible as
+/// instruction counts across the programs people measure.
+fn allocations(c: &Comparison) -> String {
+    let mut series: BTreeMap<Key, BTreeMap<&str, &Change>> = BTreeMap::new();
+    for change in &c.changes {
+        if ALLOC_METRICS.iter().any(|(m, _)| *m == change.metric) {
+            series
+                .entry((
+                    change.bench.clone(),
+                    change.tool.clone(),
+                    change.runner.clone(),
+                ))
+                .or_default()
+                .insert(change.metric.as_str(), change);
+        }
+    }
+    if series.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nHeap allocations, counted by DHAT; reported, not gated:\n\n");
+    out.push_str("| benchmark |");
+    for (_, title) in ALLOC_METRICS {
+        out.push_str(&format!(" {title} | Δ |"));
+    }
+    out.push_str("\n|---|");
+    out.push_str(&"---:|---:|".repeat(ALLOC_METRICS.len()));
+    out.push('\n');
+    for (key, metrics) in &series {
+        out.push_str(&format!("| {} |", row_name(key, series.keys())));
+        for (metric, _) in ALLOC_METRICS {
+            match metrics.get(metric) {
+                Some(ch) => out.push_str(&format!(
+                    " {} → {} | {} |",
+                    thousands(ch.base),
+                    thousands(ch.head),
+                    count_delta(ch)
+                )),
+                None => out.push_str(" — | — |"),
+            }
+        }
+        out.push('\n');
     }
     out
 }
@@ -1045,6 +1126,22 @@ fn unused_acceptances(c: &Comparison, gates: &Gates) -> String {
         ));
     }
     out
+}
+
+/// An allocation count's change, for display.
+///
+/// A zero base has no percentage, and [`signed_pct`] calls that `new`, which
+/// is right for an instruction count: a benchmark that retired nothing was
+/// not really measured. A zero allocation count is a real measurement — a
+/// command that allocated nothing — so `0 → 0` is no change and `0 → N` is
+/// the rise itself. `new` stays for a series with nothing on the base side,
+/// which never reaches this table.
+fn count_delta(ch: &Change) -> String {
+    match ch.pct() {
+        Some(p) => signed_pct(Some(p)),
+        None if ch.head == ch.base => signed_pct(Some(0.0)),
+        None => format!("+{} (from 0)", thousands(ch.head - ch.base)),
+    }
 }
 
 /// `text` with every control character written as its escape (`\n`,
@@ -1747,6 +1844,94 @@ mod tests {
         assert!(md.contains('█'), "{md}");
     }
 
+    fn with_allocs(mut r: Record, blocks: f64, bytes: f64, peak: f64) -> Record {
+        r.metrics.insert("alloc_blocks".into(), blocks);
+        r.metrics.insert("alloc_bytes".into(), bytes);
+        r.metrics.insert("alloc_peak_bytes".into(), peak);
+        r
+    }
+
+    /// A project that never opted in gets the report it always did: no
+    /// allocation table, no empty columns.
+    #[test]
+    fn the_allocation_table_appears_only_when_both_sides_have_allocations() {
+        let plain = compare(
+            &[rec("a", "gha", 1_000_000.0, 10.0)],
+            &[rec("a", "gha", 1_000_000.0, 10.0)],
+        );
+        let md = markdown(&plain, &Trend::new(), &g(1.0), false);
+        assert!(!md.contains("Heap allocations"), "{md}");
+        assert!(md.contains("| benchmark | instructions | Δ | wall (min) | Δ |"));
+
+        // The first run after opting in has nothing to compare against.
+        let first = compare(
+            &[rec("a", "gha", 1_000_000.0, 10.0)],
+            &[with_allocs(
+                rec("a", "gha", 1_000_000.0, 10.0),
+                3.0,
+                4140.0,
+                4140.0,
+            )],
+        );
+        assert!(!markdown(&first, &Trend::new(), &g(1.0), false).contains("Heap allocations"));
+    }
+
+    /// Allocations are reported beside the gate, never part of it, however
+    /// far they move.
+    #[test]
+    fn allocations_are_reported_and_never_gate() {
+        let c = compare(
+            &[with_allocs(
+                rec("a", "gha", 1_000_000.0, 10.0),
+                31.0,
+                7_119.0,
+                6_847.0,
+            )],
+            &[with_allocs(
+                rec("a", "gha", 1_000_000.0, 10.0),
+                62.0,
+                14_238.0,
+                6_847.0,
+            )],
+        );
+        assert!(c.regressions(&g(0.001)).is_empty());
+        let md = markdown(&c, &Trend::new(), &g(1.0), false);
+        assert!(md.contains("reported, not gated"), "{md}");
+        assert!(
+            md.contains(
+                "| a | 31 → 62 | +100.00% | 7,119 → 14,238 | +100.00% | 6,847 → 6,847 | +0.00% |"
+            ),
+            "{md}"
+        );
+        assert!(md.contains("No instruction-count regression"), "{md}");
+    }
+
+    /// The same benchmark on two runner classes is two rows, and each has
+    /// to say which runner it is, in both tables. One runner needs no label.
+    #[test]
+    fn rows_name_their_runner_only_when_another_shares_the_series() {
+        let on = |runner| with_allocs(rec("a", runner, 1_000_000.0, 10.0), 3.0, 30.0, 20.0);
+        let both = [on("linux-x64"), on("linux-arm64")];
+        let md = markdown(&compare(&both, &both), &Trend::new(), &g(1.0), false);
+        for runner in ["linux-x64", "linux-arm64"] {
+            let rows = md
+                .lines()
+                .filter(|l| l.starts_with(&format!("| a on {runner} |")))
+                .count();
+            assert_eq!(
+                rows, 2,
+                "instructions and allocations rows for {runner}: {md}"
+            );
+        }
+
+        let one = [on("linux-x64")];
+        let md = markdown(&compare(&one, &one), &Trend::new(), &g(1.0), false);
+        assert!(
+            md.contains("| a |") && !md.contains(" on linux-x64 |"),
+            "{md}"
+        );
+    }
+
     /// Declared metrics get a table of their own and never gate, however far
     /// they move; the main table is exactly what it was without them.
     #[test]
@@ -1806,6 +1991,30 @@ mod tests {
             false,
         );
         assert!(!md.contains("wall_p50_ms"), "{md}");
+    }
+
+    /// Allocation counts have a table of their own and sit beside custom
+    /// metrics without appearing in theirs: each is reported once, in its
+    /// own table, and neither gates.
+    #[test]
+    fn allocations_and_custom_metrics_each_get_their_own_table() {
+        let with = |blocks: f64, bytes: f64| {
+            let mut r = with_allocs(rec("a", "gha", 1_000_000.0, 10.0), blocks, 80.0, 40.0);
+            r.metrics.insert("binary_bytes".into(), bytes);
+            r
+        };
+        let c = compare(&[with(10.0, 100.0)], &[with(20.0, 200.0)]);
+        let md = markdown(&c, &Trend::new(), &g(1.0), false);
+        assert!(md.contains("Heap allocations"), "{md}");
+        assert!(
+            md.contains("| a | binary_bytes | 100 → 200 | +100.00% |"),
+            "{md}"
+        );
+        assert!(
+            !md.contains("| alloc_"),
+            "allocations leaked into the custom table: {md}"
+        );
+        assert!(c.regressions(&g(0.0)).is_empty());
     }
 
     /// A metric name from a note is not held to `tak.toml`'s charset, so the
@@ -1988,6 +2197,76 @@ mod tests {
             md.contains("no benchmark by that name was compared on both sides: `bb` (`--accept`)"),
             "{md}"
         );
+    }
+
+    /// A `|` in a name is escaped, so it cannot add a column.
+    #[test]
+    fn a_pipe_in_a_row_name_is_escaped() {
+        let on = |runner| rec("a|b", runner, 1_000_000.0, 10.0);
+        let both = [on("ci|x64"), on("ci|arm64")];
+        let md = markdown(&compare(&both, &both), &Trend::new(), &g(1.0), false);
+        assert!(md.contains("| a\\|b on ci\\|x64 |"), "{md}");
+        let row = md.lines().find(|l| l.contains("ci\\|arm64")).unwrap();
+        let cells = row.replace("\\|", "").matches('|').count();
+        assert_eq!(cells, 6, "a benchmark cell and four numbers: {row}");
+    }
+
+    /// The allocation table's labels go through the same escaping as every
+    /// other report site: a control character in a bench, tool or runner
+    /// name from an old note cannot start a line of its own, and a
+    /// backslash is kept as written.
+    #[test]
+    fn allocation_labels_are_escaped_like_the_rest_of_the_report() {
+        let on = |runner| {
+            let mut r = with_allocs(rec("a\nb", runner, 1.0, 1.0), 3.0, 30.0, 20.0);
+            r.tool = "t\\x".into();
+            r
+        };
+        let both = [on("ci\rx64"), on("ci-arm64")];
+        let md = markdown(&compare(&both, &both), &Trend::new(), &g(1.0), false);
+        let allocs = md
+            .lines()
+            .skip_while(|l| !l.starts_with("Heap allocations"))
+            .collect::<Vec<_>>();
+        assert!(
+            allocs
+                .iter()
+                .any(|l| l.starts_with(r"| a\\nb (t\\x) on ci\\rx64 |")),
+            "{md}"
+        );
+        assert!(!md.contains('\r'), "{md:?}");
+    }
+
+    /// A zero allocation count is a measurement, not a missing base: no
+    /// change reads as such, and a rise from zero gives the rise.
+    #[test]
+    fn a_zero_allocation_base_is_a_measurement_not_new() {
+        let c = compare(
+            &[with_allocs(
+                rec("a", "gha", 1_000_000.0, 10.0),
+                0.0,
+                0.0,
+                0.0,
+            )],
+            &[with_allocs(
+                rec("a", "gha", 1_000_000.0, 10.0),
+                0.0,
+                4_140.0,
+                0.0,
+            )],
+        );
+        let md = markdown(&c, &Trend::new(), &g(1.0), false);
+        let row = md
+            .lines()
+            .skip_while(|l| !l.starts_with("Heap allocations"))
+            .find(|l| l.starts_with("| a |"))
+            .unwrap();
+        assert_eq!(
+            row,
+            "| a | 0 → 0 | +0.00% | 0 → 4,140 | +4,140 (from 0) | 0 → 0 | +0.00% |"
+        );
+        assert!(!row.contains("new"), "{row}");
+        assert!(c.regressions(&g(0.001)).is_empty(), "still never gates");
     }
 
     /// With nothing compared there is no table, but an acceptance still has
