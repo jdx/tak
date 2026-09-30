@@ -1502,7 +1502,8 @@ fn cmd_log(opts: LogOpts, settings: &Settings) -> Result<()> {
     // Never fatal, as in `notes::read`: offline, or a remote with no notes
     // yet, falls back to the local ref.
     let _ = notes::fetch(&opts.remote);
-    let walked = notes::log(&opts.rev, None)?;
+    let mut enough = tak_cli::report::Enough::new(opts.limit, &opts.bench);
+    let walked = notes::log_until(&opts.rev, |c| enough.after(c))?;
     // Whether the walk stopped at a graft, not whether anything in the clone
     // is shallow: the notes fetch above is shallow by design.
     let shallow = walked

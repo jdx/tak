@@ -81,8 +81,10 @@ pub struct History {
     pub series: Vec<Series>,
     /// First-parent commits walked, recorded or not.
     pub walked: usize,
-    /// Recorded commits further back than the limit reached.
-    pub older: usize,
+    /// Recorded commits exist further back than the limit reached. Whether,
+    /// not how many: counting them meant reading every note on the trunk, and
+    /// [`Enough`] stops the walk at the first one instead.
+    pub older: bool,
     /// Commits whose records carry neither metric this report draws. Said
     /// aloud when nothing else was found, so an empty report does not claim
     /// that nothing was recorded when something was.
@@ -134,7 +136,7 @@ pub fn build(
             (!c.records.is_empty()).then_some(c)
         })
         .collect();
-    let older = recorded.len().saturating_sub(limit);
+    let older = recorded.len() > limit;
     recorded.truncate(limit);
     // The walk is newest first; a series reads oldest to newest.
     recorded.reverse();
@@ -166,6 +168,50 @@ pub fn build(
         undrawable,
         shallow,
     })
+}
+
+/// Decides when a newest-first walk has read far enough for [`build`] to
+/// produce the report the whole walk would.
+///
+/// That is one recorded commit past the limit, which is proof that older ones
+/// exist, and every benchmark named with `--bench` seen with something to
+/// draw, so that [`check_benches`] passes on the prefix exactly when it would
+/// on the whole. Until both hold, the walk goes on to the end, and the report
+/// is built from all of it as before.
+///
+/// "Recorded" is [`build`]'s rule, not merely a note being present, or a run of
+/// commits carrying only other benchmarks would end the walk before the
+/// selected one's points were reached.
+pub struct Enough<'a> {
+    limit: usize,
+    benches: &'a [String],
+    recorded: usize,
+    drawn: BTreeSet<String>,
+}
+
+impl<'a> Enough<'a> {
+    pub fn new(limit: usize, benches: &'a [String]) -> Self {
+        Enough {
+            limit,
+            benches,
+            recorded: 0,
+            drawn: BTreeSet::new(),
+        }
+    }
+
+    /// Take in the next commit of the walk; true once nothing older can change
+    /// the report.
+    pub fn after(&mut self, c: &Logged) -> bool {
+        let mut counted = false;
+        for r in c.records.iter().filter(|r| drawable(r)) {
+            if self.benches.is_empty() || self.benches.contains(&r.bench) {
+                counted = true;
+                self.drawn.insert(r.bench.clone());
+            }
+        }
+        self.recorded += usize::from(counted);
+        self.recorded > self.limit && self.benches.iter().all(|b| self.drawn.contains(b))
+    }
 }
 
 /// Whether a record carries a metric this report draws.
@@ -278,12 +324,8 @@ fn coverage(h: &History, rev: &str) -> String {
             h.walked
         )
     };
-    if h.older > 0 {
-        let _ = write!(
-            out,
-            " {} older recorded commit(s) are not shown; `-n` shows more.",
-            h.older
-        );
+    if h.older {
+        out.push_str(" Older recorded commits are not shown; `-n` shows more.");
     } else if h.shallow {
         // Only worth saying when the limit was not what stopped the walk.
         out.push_str(
@@ -1059,8 +1101,8 @@ mod tests {
         assert_eq!(b.deltas(), vec![None, Some(20.0)]);
     }
 
-    /// The limit counts recorded commits, newest first, and says how many
-    /// older ones it left out.
+    /// The limit counts recorded commits, newest first, and says that it left
+    /// older ones out.
     #[test]
     fn the_limit_keeps_the_newest_and_counts_the_rest() {
         let h = build(
@@ -1071,9 +1113,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ins(&h.series[0]), vec![Some(3.0), Some(4.0)]);
-        assert_eq!(h.older, 3);
+        assert!(h.older);
         let md = markdown(&h, "HEAD", false);
-        assert!(md.contains("3 older recorded commit(s)"), "{md}");
+        assert!(md.contains("Older recorded commits are not shown"), "{md}");
     }
 
     /// With a filter, a commit carrying only other benchmarks is not a
@@ -1094,7 +1136,7 @@ mod tests {
         .unwrap();
         assert_eq!(h.series.len(), 1);
         assert_eq!(ins(&h.series[0]), vec![Some(1.0), Some(2.0)]);
-        assert_eq!(h.older, 0);
+        assert!(!h.older);
     }
 
     /// A typo in a CI step must fail, not publish an empty report forever.
@@ -1219,7 +1261,7 @@ mod tests {
         .unwrap();
         assert_eq!(h.commits.len(), 2);
         assert_eq!(ins(&h.series[0]), vec![Some(1.0), Some(2.0)]);
-        assert_eq!(h.older, 0);
+        assert!(!h.older);
     }
 
     /// A selected benchmark with nothing drawable must fail, not publish a
