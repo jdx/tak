@@ -117,6 +117,10 @@ enum Cmd {
         /// Write every sample and summary to PATH as hyperfine-compatible JSON.
         #[usage(long, value_name = "PATH")]
         export_json: Option<std::path::PathBuf>,
+        /// Keep the cachegrind profile behind each instruction count, as
+        /// `DIR/<bench>/<subject>.cachegrind.out`, for `tak explain`.
+        #[usage(long, value_name = "DIR")]
+        profile_dir: Option<std::path::PathBuf>,
         /// Save the results as a named local baseline, kept in the git
         /// directory rather than in refs/notes/tak. Replaces what NAME held
         /// for the benchmarks measured and keeps the rest.
@@ -254,6 +258,23 @@ enum Cmd {
         /// migration. A regression still fails.
         #[usage(long)]
         allow_empty: bool,
+    },
+    /// Show which functions an instruction-count change came from.
+    ///
+    /// Reads two sets of profiles written by `tak run --profile-dir`, pairs
+    /// them by benchmark and subject, and prints the functions whose counts
+    /// changed most as markdown. Reports only; it never fails on the numbers.
+    Explain {
+        /// Base profiles: a directory written by `tak run --profile-dir`, or
+        /// one profile file.
+        #[usage(arg)]
+        base: std::path::PathBuf,
+        /// Head profiles, in the same form as the base.
+        #[usage(arg)]
+        head: std::path::PathBuf,
+        /// Functions to list for each benchmark.
+        #[usage(long, default = "10", value_name = "N")]
+        top: usize,
     },
     /// Find instruction-count steps that already landed on a branch.
     ///
@@ -411,6 +432,8 @@ struct RunOpts {
     subjects: Vec<String>,
     seed: Option<u64>,
     export_json: Option<std::path::PathBuf>,
+    /// Absolute, so a subject's own `dir` cannot move where profiles land.
+    profile_dir: Option<std::path::PathBuf>,
     config: Option<std::path::PathBuf>,
     dry_run: bool,
     save_baseline: Option<String>,
@@ -509,6 +532,32 @@ struct Measured {
     /// Kept apart from counters being off: the record looks the same either
     /// way, and only one of them is a benchmark `--gate` meant to check.
     count_failed: bool,
+    /// The cachegrind profile behind the instruction count, when
+    /// `--profile-dir` asked for one and the count succeeded.
+    profile: Option<Vec<u8>>,
+}
+
+/// Check every profile path before measuring anything, so a benchmark name
+/// that cannot be a file name fails now rather than after an hour of
+/// benchmarks before it.
+fn check_profile_paths<'a>(
+    opts: &RunOpts,
+    plans: impl IntoIterator<Item = (&'a str, bool, &'a [Subject])>,
+) -> Result<()> {
+    let Some(dir) = &opts.profile_dir else {
+        return Ok(());
+    };
+    if opts.no_counters {
+        bail!(
+            "--profile-dir keeps the profiles of instruction counts, and --no-counters turns them off"
+        );
+    }
+    for (bench, multi, subjects) in plans {
+        for s in subjects {
+            tak_cli::profile::path_for(dir, bench, &record_tool(multi, s))?;
+        }
+    }
+    Ok(())
 }
 
 /// Reject the recorded names that come from outside `tak.toml` — the runner
@@ -575,6 +624,10 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         counters: true,
         ok_exit_codes: config::DEFAULT_OK_EXIT_CODES.to_vec(),
     };
+    check_profile_paths(
+        &opts,
+        [(bench.as_str(), false, std::slice::from_ref(&subject))],
+    )?;
     let seed = opts.seed.unwrap_or_else(random_seed);
     if opts.dry_run {
         print_plan(
@@ -667,6 +720,12 @@ fn run_declared(opts: RunOpts, settings: &Settings, local: &Local) -> Result<()>
         return Ok(());
     }
 
+    check_profile_paths(
+        &opts,
+        plans
+            .iter()
+            .map(|(name, multi, subjects)| (name.as_str(), *multi, subjects.as_slice())),
+    )?;
     if opts.dry_run {
         println!("{}", path.display());
         for (name, multi, subjects) in &plans {
@@ -987,6 +1046,33 @@ fn finish(
             measured.len(),
             path.display()
         );
+    }
+    // Written when the export is and for the same reason: they describe this
+    // run, and a subject that failed simply has none, which `tak explain`
+    // reports as a profile on one side only.
+    if let Some(dir) = &opts.profile_dir {
+        let runner = runner_class(settings);
+        // What `--record` would attach the counts to, so `tak explain` can
+        // find them. Outside a repository there is nothing to check against.
+        let commit = notes::rev_parse("HEAD").ok();
+        let mut written = 0usize;
+        for m in &measured {
+            if let Some(raw) = &m.profile {
+                // Named, like the origin inside it, by the series the record
+                // uses — what the notes are looked up by, and for a single
+                // command that may be TAK_TOOL rather than `self`.
+                let dest = tak_cli::profile::path_for(dir, &m.bench, &m.record.tool)?;
+                let origin = tak_cli::profile::Origin {
+                    runner: runner.clone(),
+                    commit: commit.clone(),
+                    bench: m.bench.clone(),
+                    subject: m.record.tool.clone(),
+                };
+                tak_cli::profile::write(&dest, raw, &origin)?;
+                written += 1;
+            }
+        }
+        println!("\n  wrote {written} profile(s) to {}", dir.display());
     }
     let failing = failing_checks(&measured);
     // Reported before a failed subject stops the run: the question this
@@ -1484,8 +1570,13 @@ fn measure_bench(
                 samples.first_failure.as_deref().unwrap_or("(no detail)")
             );
         }
-        let count_failed =
-            s.counters && !opts.no_counters && !count_into(&mut metrics, s, settings);
+        let (count_failed, profile) = if s.counters && !opts.no_counters {
+            let (counted, profile) =
+                count_into(&mut metrics, s, settings, opts.profile_dir.is_some());
+            (!counted, profile)
+        } else {
+            (false, None)
+        };
 
         if multi {
             // One line per subject, in the order of a quick read: the floor
@@ -1531,6 +1622,7 @@ fn measure_bench(
             version: version.clone(),
             samples,
             count_failed,
+            profile,
             record: Record {
                 v: SCHEMA_VERSION,
                 bench: bench.to_string(),
@@ -1551,7 +1643,9 @@ fn measure_bench(
 ///
 /// TAK_TOOL only ever renames the single-command series. Keyed on the
 /// benchmark's shape rather than the subject's name, so a declared subject
-/// can never be recorded as anything but itself.
+/// can never be recorded as anything but itself. Profiles are named by it
+/// too, so two `TAK_TOOL`s measured into one `--profile-dir` are two files,
+/// not one overwriting the other under `self`.
 fn record_tool(multi: bool, s: &Subject) -> String {
     if multi {
         s.name.clone()
@@ -1566,9 +1660,34 @@ fn record_tool(multi: bool, s: &Subject) -> String {
 /// False only when valgrind was there and the count still failed. A missing
 /// valgrind is not a failure: nothing on this host could be counted, and
 /// `--gate` already has nothing to check then.
-fn count_into(metrics: &mut BTreeMap<String, f64>, s: &Subject, settings: &Settings) -> bool {
-    match measure::subject_instructions(s, settings) {
-        Ok(Some(c)) => {
+///
+/// With `profile`, also returns the cachegrind profile behind the count.
+fn count_into(
+    metrics: &mut BTreeMap<String, f64>,
+    s: &Subject,
+    settings: &Settings,
+    profile: bool,
+) -> (bool, Option<Vec<u8>>) {
+    let counted = if profile {
+        measure::subject_profile(s, settings).map(|c| c.map(|(c, p)| (c, Some(p))))
+    } else {
+        measure::subject_instructions(s, settings).map(|c| c.map(|c| (c, None)))
+    };
+    match counted {
+        Ok(Some((c, profile))) => {
+            // The count stands without its profile; only the explanation is
+            // lost, and saying so beats a missing file nobody notices.
+            let profile = match profile {
+                Some(Ok(raw)) => Some(raw),
+                Some(Err(e)) => {
+                    eprintln!(
+                        "warning: {}: instruction count kept, but its profile was not: {e:#}",
+                        s.name
+                    );
+                    None
+                }
+                None => None,
+            };
             metrics.insert("instructions".into(), c.min as f64);
             if c.is_suspect() {
                 eprintln!(
@@ -1581,7 +1700,7 @@ fn count_into(metrics: &mut BTreeMap<String, f64>, s: &Subject, settings: &Setti
                     c.runs
                 );
             }
-            true
+            (true, profile)
         }
         Ok(None) => {
             eprintln!(
@@ -1589,13 +1708,13 @@ fn count_into(metrics: &mut BTreeMap<String, f64>, s: &Subject, settings: &Setti
                  Instruction counts are the only gate-able metric; on macOS/Windows \
                  run tak in a Linux container to get them."
             );
-            true
+            (true, None)
         }
         // Valgrind exists but the measurement failed. Say so rather than
         // blaming a missing install, and keep the timing we did collect.
         Err(e) => {
             eprintln!("warning: instruction counting failed: {e}");
-            false
+            (false, None)
         }
     }
 }
@@ -1814,6 +1933,34 @@ fn cmd_compare(
         "{} benchmark(s) regressed beyond their gate",
         regressions.len()
     )
+}
+
+/// Print which functions account for the instruction-count changes between
+/// two sets of profiles.
+///
+/// Settings are not read: nothing here measures or gates, and the credit line
+/// is left to `tak compare`, whose report this is meant to sit under.
+fn cmd_explain(base: &Path, head: &Path, top: usize) -> Result<()> {
+    if top == 0 {
+        bail!("--top must be at least 1");
+    }
+    let (pairs, unpaired) = tak_cli::profile::load(base, head)?;
+    // Local notes only, no fetch: the check is a warning, and a report that
+    // waits on the network, or fails without one, costs more than it adds.
+    let recorded = |o: &tak_cli::profile::Origin| {
+        let records = notes::read(None, o.commit.as_deref()?).ok()?;
+        records
+            .iter()
+            .filter(|r| r.bench == o.bench && r.tool == o.subject && r.runner == o.runner)
+            .filter_map(|r| r.metrics.get(compare::GATED_METRIC))
+            .map(|v| *v as u64)
+            .min()
+    };
+    print!(
+        "{}",
+        tak_cli::profile::markdown(&pairs, &unpaired, top, &recorded)
+    );
+    Ok(())
 }
 
 /// Walk `rev`'s recorded history, print the steps, and gate on the newest.
@@ -2294,6 +2441,7 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
         subjects: Vec::new(),
         seed: None,
         export_json: None,
+        profile_dir: None,
         config: None,
         dry_run: o.dry_run,
         // Backfill records to each commit's note; local baselines belong to
@@ -2827,6 +2975,7 @@ fn main() -> Result<()> {
             subject,
             seed,
             export_json,
+            profile_dir,
             config,
             dry_run,
             save_baseline,
@@ -2835,6 +2984,12 @@ fn main() -> Result<()> {
             cmd,
         } => {
             let settings = Settings::from_process_at(&overrides, config.as_deref())?;
+            let profile_dir = profile_dir
+                .map(|d| {
+                    std::path::absolute(&d)
+                        .with_context(|| format!("could not resolve {}", d.display()))
+                })
+                .transpose()?;
             cmd_run(
                 RunOpts {
                     bench,
@@ -2846,6 +3001,7 @@ fn main() -> Result<()> {
                     subjects: subject,
                     seed,
                     export_json,
+                    profile_dir,
                     config,
                     dry_run,
                     save_baseline,
@@ -2982,6 +3138,7 @@ fn main() -> Result<()> {
             allow_empty,
             &resolve_settings(&overrides)?,
         ),
+        Cmd::Explain { base, head, top } => cmd_explain(&base, &head, top),
         Cmd::Detect {
             rev,
             window,

@@ -53,6 +53,9 @@ cmd run help="Benchmark a command, or everything declared in tak.toml." {
     flag --export-json help="Write every sample and summary to PATH as hyperfine-compatible JSON." {
         arg <PATH>
     }
+    flag --profile-dir help="Keep the cachegrind profile behind each instruction count, as `DIR/<bench>/<subject>.cachegrind.out`, for `tak explain`." {
+        arg <DIR>
+    }
     flag --save-baseline help="Save the results as a named local baseline, kept in the git directory rather than in refs/notes/tak. Replaces what NAME held for the benchmarks measured and keeps the rest." {
         arg <NAME>
     }
@@ -173,6 +176,19 @@ Fails when an instruction count has risen by more than `gate_pct` and `gate_min_
     flag --allow-empty help="Pass when no series was measured on both sides, instead of failing. For the first pull request after adopting tak, or a runner-class migration. A regression still fails."
     flag "-h --help" help="Print help" action=help builtin=#true
     arg "[BASE]" help="Revision to compare against." default="origin/main"
+}
+cmd explain help="Show which functions an instruction-count change came from." {
+    long_help #"""
+Show which functions an instruction-count change came from.
+
+Reads two sets of profiles written by `tak run --profile-dir`, pairs them by benchmark and subject, and prints the functions whose counts changed most as markdown. Reports only; it never fails on the numbers.
+"""#
+    flag --top help="Functions to list for each benchmark." default="10" {
+        arg <N>
+    }
+    flag "-h --help" help="Print help" action=help builtin=#true
+    arg <BASE> help="Base profiles: a directory written by `tak run --profile-dir`, or one profile file."
+    arg <HEAD> help="Head profiles, in the same form as the base."
 }
 cmd detect help="Find instruction-count steps that already landed on a branch." {
     long_help #"""
