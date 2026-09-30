@@ -560,7 +560,20 @@ TAK_GATE_PCT=2 tak compare origin/main
 ```
 
 Only instruction counts are gated. Wall-clock changes are displayed but never fail the
-comparison. Use `tak compare --no-gate` when a report must always exit successfully.
+comparison. Use `tak compare --no-gate` when a report must always exit successfully. To let
+one benchmark regress on purpose while the others still gate, pass `--accept BENCH`; see
+[accepting an intentional regression](/guide/ci#accept-an-intentional-regression).
+
+`Tak-Accept:` commit trailers do the same, but only when the project opts in. Trailers are
+written by the change being gated, so they are ignored by default:
+
+```toml
+[gate]
+accept_trailers = true
+```
+
+`TAK_ACCEPT_TRAILERS=0` in a workflow overrides the file. Use it where the gate is enforced
+against pull requests you do not trust, because a pull request can edit `tak.toml`.
 
 ### An absolute floor
 

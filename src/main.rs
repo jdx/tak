@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use usage_rs::{Args, Cli, Subcommands};
 
+use tak_cli::accept::{self, Acceptances};
 use tak_cli::backfill;
 use tak_cli::compare;
 use tak_cli::config::{
@@ -191,7 +192,10 @@ enum Cmd {
     /// Fails when an instruction count has risen by more than `gate_pct` and
     /// `gate_min_delta`, or by more than a benchmark's own `gate` in the
     /// working tree's tak.toml, or when no series was measured on both
-    /// sides. Wall clock is reported and never gated.
+    /// sides. Wall clock is reported and never gated. A regression in a
+    /// benchmark named by `--accept` is reported as accepted and does not
+    /// fail. So is one named by a `Tak-Accept:` trailer on a commit in
+    /// BASE..REV, but only when the `accept_trailers` setting is on.
     Compare {
         /// Revision to compare against.
         #[usage(arg, default = "origin/main")]
@@ -206,6 +210,11 @@ enum Cmd {
         /// over `--allow-empty`: an empty comparison passes too.
         #[usage(long)]
         no_gate: bool,
+        /// Accept a regression in this benchmark: report it, but do not fail
+        /// on it. Repeatable; each value is one exact benchmark name. Honoured
+        /// whatever `accept_trailers` says.
+        #[usage(long, value_name = "BENCH")]
+        accept: Vec<String>,
         /// Pass when no series was measured on both sides, instead of failing.
         /// For the first pull request after adopting tak, or a runner-class
         /// migration. A regression still fails.
@@ -1105,6 +1114,7 @@ fn cmd_compare(
     rev: String,
     remote: String,
     no_gate: bool,
+    accept_flags: Vec<String>,
     allow_empty: bool,
     settings: &Settings,
 ) -> Result<()> {
@@ -1112,12 +1122,40 @@ fn cmd_compare(
     let base_sha = notes::rev_parse(&base).with_context(|| format!("cannot resolve {base}"))?;
     let head_sha = notes::rev_parse(&rev).with_context(|| format!("cannot resolve {rev}"))?;
 
+    let mut accepted = Acceptances::default();
+    for name in &accept_flags {
+        accepted.add_name(name, accept::Source::Flag)?;
+    }
+    // Read either way; only honoured when the setting says so. The commits
+    // under comparison are the change being gated, so by default their own
+    // trailers must not be able to waive the gate — but an author whose
+    // trailer was ignored should be told, not left guessing.
+    let log = notes::trailers(&base_sha, &head_sha, accept::TRAILER);
+    let mut ignored = Acceptances::default();
+    if settings.accept_trailers {
+        // Fatal when honoured, unlike the trend below. Carrying on would still
+        // fail closed, but on a regression the author accepted, with a report
+        // that says nothing about why the acceptance was not seen.
+        let log = log.with_context(|| {
+            format!(
+                "cannot read {} trailers from {base}..{rev}",
+                accept::TRAILER
+            )
+        })?;
+        accepted.add_trailer_log(&log);
+    } else if let Ok(log) = log {
+        // Not fatal: nothing the gate decides depends on it.
+        ignored.add_trailer_log(&log);
+    }
+
     // One fetch, not two: `read` refreshes from the remote, and doing it twice
     // doubles the round trip for the same ref.
     let base_records = notes::read(Some(&remote), &base_sha)?;
     let head_records = notes::read(None, &head_sha)?;
 
-    let comparison = compare::compare(&base_records, &head_records);
+    let comparison = compare::compare(&base_records, &head_records)
+        .with_accepted(accepted)
+        .with_ignored_trailers(ignored);
     // Never fatal: a shallow checkout has no history to walk, and a missing
     // sparkline is a smaller loss than a failed gate.
     let trend = gather_trend(&base_sha, &head_sha, &head_records).unwrap_or_default();
@@ -1143,7 +1181,8 @@ fn cmd_compare(
              pull request after adopting tak or across a runner-class migration"
         )
     }
-    let regressions = comparison.regressions(&gates);
+    // Accepted regressions are reported above and do not count here.
+    let regressions = comparison.failures(&gates);
     if regressions.is_empty() {
         return Ok(());
     }
@@ -1653,12 +1692,14 @@ fn main() -> Result<()> {
             rev,
             remote,
             no_gate,
+            accept,
             allow_empty,
         } => cmd_compare(
             base,
             rev,
             remote,
             no_gate,
+            accept,
             allow_empty,
             &resolve_settings(&overrides)?,
         ),

@@ -1062,6 +1062,26 @@
             "global": false
           },
           {
+            "name": "accept",
+            "usage": "--accept <BENCH>",
+            "help": "Accept a regression in this benchmark: report it, but do not fail on it. Repeatable; each value is one exact benchmark name. Honoured whatever `accept_trailers` says.",
+            "help_first_line": "Accept a regression in this benchmark: report it, but do not fail on it. Repeatable; each value is one exact benchmark name. Honoured whatever `accept_trailers` says.",
+            "short": [],
+            "long": [
+              "accept"
+            ],
+            "var": true,
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "BENCH",
+              "usage": "<BENCH>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
             "name": "allow-empty",
             "usage": "--allow-empty",
             "help": "Pass when no series was measured on both sides, instead of failing. For the first pull request after adopting tak, or a runner-class migration. A regression still fails.",
@@ -1095,7 +1115,7 @@
         "hide": false,
         "args_override_self": true,
         "help": "Compare this commit's measurements against another's.",
-        "help_long": "Compare this commit's measurements against another's.\n\nFails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate` in the working tree's tak.toml, or when no series was measured on both sides. Wall clock is reported and never gated.",
+        "help_long": "Compare this commit's measurements against another's.\n\nFails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate` in the working tree's tak.toml, or when no series was measured on both sides. Wall clock is reported and never gated. A regression in a benchmark named by `--accept` is reported as accepted and does not fail. So is one named by a `Tak-Accept:` trailer on a commit in BASE..REV, but only when the `accept_trailers` setting is on.",
         "name": "compare",
         "aliases": [],
         "hidden_aliases": [],
@@ -1382,6 +1402,44 @@
   },
   "config": {
     "props": {
+      "accept_trailers": {
+        "default": false,
+        "default_note": null,
+        "data_type": "boolean",
+        "value_type": {
+          "kind": "base",
+          "of": "bool"
+        },
+        "env": "TAK_ACCEPT_TRAILERS",
+        "envs": [
+          "TAK_ACCEPT_TRAILERS"
+        ],
+        "cli": [],
+        "bindings": {
+          "config": [
+            "gate.accept_trailers"
+          ]
+        },
+        "help": "Whether `tak compare` honours `Tak-Accept:` trailers on the commits it compares.",
+        "long_help": "Whether `tak compare` honours `Tak-Accept:` trailers on the commits it compares.\n\nOff by default, because of who writes those trailers. A trailer is part of a commit message, and the commits `tak compare` reads are the change being gated — on a pull request, the author's own. Honouring them by default would let any change waive its own gate by adding one line, which makes the gate advisory for exactly the changes it exists to stop. The acceptance would be visible in the report, but visible is not the same as approved.\n\nWith this off, trailers are ignored entirely; if the compared range carries any, the report says so in one line, so an author is not left wondering why theirs did nothing. `tak compare --accept BENCH` works either way, and is the recommended route in CI: pass it from a workflow step driven by something only maintainers can do, such as applying a pull-request label.\n\nTurn it on where every commit in the compared range has already been reviewed by the time the result matters, or where everyone who can push is trusted to waive the gate — a solo project, or comparisons along an already-reviewed main branch.\n\n`tak.toml` is read from the checkout being measured, so a pull request can change this key just as it can change `gate.pct`. Where the gate is enforced against changes you do not trust, set `TAK_ACCEPT_TRAILERS=0` in the workflow: the environment takes precedence over the file.",
+        "help_heading": null,
+        "choices": [],
+        "merge": "replace",
+        "scope": "any",
+        "deprecated": null,
+        "deprecated_warn_at": null,
+        "deprecated_remove_at": null,
+        "renamed_to": null,
+        "hide": false,
+        "since": "0.0.14",
+        "parse": null,
+        "writes_to": null,
+        "examples": [
+          "TAK_ACCEPT_TRAILERS=1 tak compare origin/main"
+        ],
+        "default_list": [],
+        "extensions": []
+      },
       "credit": {
         "default": true,
         "default_note": null,

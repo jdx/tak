@@ -214,10 +214,18 @@ jobs:
       #
       # Both verdict forms: `above the 1% gate` when every row is held to
       # `[gate]`, `above their gate` when any row has its own — which a
-      # report-only benchmark always does.
+      # report-only benchmark always does. An accepted regression counts as a
+      # rise too, so an acceptance can only ever turn this check neutral,
+      # never green.
+      #
+      # TAK_ACCEPT_TRAILERS=0 because tak.toml comes from the pull request's
+      # own checkout: a pull request could set `[gate] accept_trailers = true`
+      # and accept its own regression with a trailer. The environment takes
+      # precedence over the file.
       - name: Compare against the base
         env:
           BASE_SHA: ${{ steps.base.outputs.sha }}
+          TAK_ACCEPT_TRAILERS: "0"
         run: |
           set +e
           ./target/release/tak compare --no-gate "$BASE_SHA" > /tmp/tak-report.md
@@ -227,7 +235,7 @@ jobs:
             echo 2 > /tmp/tak-gate-status
           elif grep -Fq '**Nothing was compared' /tmp/tak-report.md; then
             echo 2 > /tmp/tak-gate-status
-          elif grep -Eq 'benchmark\(s\) above (the .*% gate|their gate)' /tmp/tak-report.md; then
+          elif grep -Eq '(benchmark|accepted regression)\(s\) above (the .*% gate|their gate)' /tmp/tak-report.md; then
             echo 1 > /tmp/tak-gate-status
           else
             echo 0 > /tmp/tak-gate-status
