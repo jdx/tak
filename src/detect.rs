@@ -155,8 +155,9 @@ pub struct Detection {
     /// Set when the walk stopped before the window filled for a reason of its
     /// own, so a short history here may be the walk's rather than the project's.
     pub cutoff: Option<Cutoff>,
-    /// Whether an empty comparison was accepted (`--allow-empty`) rather than
-    /// failed. Carried here so the report and the exit status cannot disagree.
+    /// Whether an empty comparison is accepted (`allow_empty`, from `tak.toml`,
+    /// `TAK_ALLOW_EMPTY` or `--allow-empty`) rather than failed. Carried here so
+    /// the report and the exit status cannot disagree.
     pub allow_empty: bool,
     /// Report-only (`--no-gate`): nothing fails, an empty comparison included.
     /// The same promise `tak compare --no-gate` makes, so a workflow that must
@@ -636,23 +637,25 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
              this is the first recording, the history is too short or shallow, or \
              the runner class changed, which deliberately starts a new series."
         };
-        if !d.empty_fails() {
-            // Name the flag that waived it, so a report that passed says why.
-            let flag = if d.no_gate {
-                "--no-gate"
-            } else {
-                "--allow-empty"
-            };
+        if d.no_gate {
             out.push_str(&format!(
                 "**Nothing was compared at `{head}`, and so nothing was gated** \
-                 (`{flag}`). {why}\n"
+                 (`--no-gate`). {why}\n"
+            ));
+        } else if !d.empty_fails() {
+            // The setting, not a flag: `--allow-empty` is one of its spellings,
+            // and the report cannot know which one a run used.
+            out.push_str(&format!(
+                "**Nothing was compared at `{head}`, and so nothing was gated** \
+                 (`allow_empty`). {why}\n\n{}\n",
+                crate::compare::ALLOWED_EMPTY
             ));
         } else {
             out.push_str(&format!(
                 "**Nothing was compared at `{head}`, so this check fails.** {why} \
                  When that is expected — the first recording, or the first on a new \
-                 runner class — pass `--allow-empty`, or record an earlier commit on \
-                 the same runner class first.\n"
+                 runner class — pass `--allow-empty` or set `[gate] allow_empty = true`, \
+                 or record an earlier commit on the same runner class first.\n"
             ));
         }
     } else {
@@ -1160,17 +1163,23 @@ mod tests {
         let md = markdown(&d, false);
         assert!(md.contains("so this check fails.**"), "{md}");
         assert!(md.contains("pass `--allow-empty`"), "{md}");
+        assert!(md.contains("set `[gate] allow_empty = true`"), "{md}");
         assert!(!md.contains("nothing was gated"), "{md}");
+        assert!(!md.contains(crate::compare::ALLOWED_EMPTY), "{md}");
 
         d.allow_empty = true;
         assert!(!d.empty_fails());
         let md = markdown(&d, false);
-        assert!(md.contains("nothing was gated** (`--allow-empty`)"), "{md}");
+        // The setting's name, whichever of its spellings turned it on, and the
+        // line saying it passed with a warning and what that can hide.
+        assert!(md.contains("nothing was gated** (`allow_empty`)"), "{md}");
+        assert!(md.contains(crate::compare::ALLOWED_EMPTY), "{md}");
         assert!(!md.contains("this check fails"), "{md}");
     }
 
     /// `--no-gate` means never fail, so it waives an empty comparison too, and
-    /// the report names it rather than `--allow-empty`.
+    /// the report names it rather than `allow_empty` — even with both on,
+    /// since `--no-gate` is what decided, and it asked for no warning.
     #[test]
     fn no_gate_waives_an_empty_comparison() {
         let mut d = analyze(&walk(&[Some(1000.0)]), &pct(1.0));
@@ -1179,6 +1188,22 @@ mod tests {
         let md = markdown(&d, false);
         assert!(md.contains("nothing was gated** (`--no-gate`)"), "{md}");
         assert!(!md.contains("this check fails"), "{md}");
+        d.allow_empty = true;
+        let md = markdown(&d, false);
+        assert!(md.contains("nothing was gated** (`--no-gate`)"), "{md}");
+        assert!(!md.contains(crate::compare::ALLOWED_EMPTY), "{md}");
+    }
+
+    /// `allow_empty` waives the empty case and nothing else: a step onto the
+    /// head beyond its gate still fails with the setting on.
+    #[test]
+    fn allow_empty_does_not_waive_a_step() {
+        let mut d = analyze(&walk(&[Some(1000.0), Some(1100.0)]), &pct(1.0));
+        d.allow_empty = true;
+        assert!(!d.nothing_compared());
+        assert!(!d.empty_fails());
+        assert_eq!(d.failures().len(), 1);
+        assert!(!markdown(&d, false).contains(crate::compare::ALLOWED_EMPTY));
     }
 
     /// A comparison that happened is never an empty one, whatever the flag.
@@ -1456,7 +1481,7 @@ mod tests {
     }
 
     /// Including when nothing was compared, where it matters most: with
-    /// `--allow-empty` a stale or misspelt acceptance would otherwise pass
+    /// `allow_empty` a stale or misspelt acceptance would otherwise pass
     /// without a word. `tak compare` prints its line on that path too.
     #[test]
     fn an_unused_acceptance_is_reported_when_nothing_was_compared() {

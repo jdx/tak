@@ -53,9 +53,10 @@ and reasoning.
 - `tak artifact export` and `tak artifact publish` hand measurements from a
   read-only CI job to a separately trusted publisher
 - `tak compare` reports changes and gates only on instruction counts. It fails when nothing
-  was measured on both sides, unless `--allow-empty` or `--no-gate` is given. Under
-  `--allow-empty` a regression still fails; `--no-gate` never fails on the comparison,
-  though errors such as an invalid `tak.toml` still do
+  was measured on both sides, unless the `allow_empty` setting is on (`[gate] allow_empty`,
+  `TAK_ALLOW_EMPTY` or `--allow-empty`), which passes that case with a warning, or `--no-gate`
+  is given. Under `allow_empty` a regression still fails; `--no-gate` never fails on the
+  comparison, though errors such as an invalid `tak.toml` still do
 - `tak compare --accept BENCH` accepts an intentional regression in one named benchmark while
   every other benchmark still gates; `Tak-Accept:` commit trailers do the same once a project
   opts in

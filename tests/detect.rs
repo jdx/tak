@@ -40,6 +40,9 @@ fn tak_env(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
         // running the tests says.
         .env_remove("TAK_GATE_PCT")
         .env_remove("TAK_ACCEPT_TRAILERS")
+        .env_remove("TAK_ALLOW_EMPTY")
+        // The warning's shape depends on it, and CI sets it.
+        .env_remove("GITHUB_ACTIONS")
         .envs(env.iter().copied())
         .current_dir(dir)
         .output()
@@ -265,11 +268,85 @@ fn a_first_recording_needs_allow_empty() {
     let out = tak(dir.path(), &["detect", &c[0], "--allow-empty"]);
     let md = stdout(&out);
     assert!(out.status.success(), "{md}");
-    assert!(md.contains("nothing was gated** (`--allow-empty`)"), "{md}");
+    assert!(md.contains("nothing was gated** (`allow_empty`)"), "{md}");
+    assert_eq!(
+        stderr(&out),
+        format!(
+            "warning: nothing was compared at {}; passing because `allow_empty` is on\n",
+            short(&c[0])
+        )
+    );
 
     // It waives only the empty case: a real step still fails.
     let out = tak(dir.path(), &["detect", &c[3], "--allow-empty"]);
     assert!(!out.status.success(), "{}", stdout(&out));
+}
+
+fn stderr(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stderr).into_owned()
+}
+
+/// `[gate] allow_empty = true` in the working tree's `tak.toml` does what
+/// `--allow-empty` does, and the report and warning cannot tell them apart:
+/// the flag is one spelling of the setting. The environment overrides the
+/// file in both directions, and the flag overrides the environment.
+#[test]
+fn allow_empty_from_tak_toml_passes_with_a_warning() {
+    let (dir, c) = repo();
+    std::fs::write(dir.path().join("tak.toml"), "[gate]\nallow_empty = true\n").unwrap();
+
+    let by_setting = tak(dir.path(), &["detect", &c[0]]);
+    assert!(by_setting.status.success(), "{}", stdout(&by_setting));
+    let by_flag = tak(dir.path(), &["detect", &c[0], "--allow-empty"]);
+    assert_eq!(stdout(&by_setting), stdout(&by_flag));
+    assert_eq!(stderr(&by_setting), stderr(&by_flag));
+    assert!(stderr(&by_setting).starts_with("warning: nothing was compared at "));
+    assert!(
+        stdout(&by_setting).contains("passes with a warning instead of failing"),
+        "{}",
+        stdout(&by_setting)
+    );
+
+    let off = tak_env(dir.path(), &["detect", &c[0]], &[("TAK_ALLOW_EMPTY", "0")]);
+    assert!(!off.status.success(), "TAK_ALLOW_EMPTY=0 beats the file");
+    assert!(
+        stdout(&off).contains("so this check fails.**"),
+        "{}",
+        stdout(&off)
+    );
+
+    let flag = tak_env(
+        dir.path(),
+        &["detect", &c[0], "--allow-empty"],
+        &[("TAK_ALLOW_EMPTY", "0")],
+    );
+    assert!(flag.status.success(), "the flag beats the environment");
+
+    // A step onto the head still fails with the setting on.
+    let step = tak(dir.path(), &["detect", &c[3]]);
+    assert!(!step.status.success(), "{}", stdout(&step));
+    assert!(!stderr(&step).contains("allow_empty"), "{}", stderr(&step));
+}
+
+/// Under GitHub Actions the one warning line is a workflow command, on
+/// stderr, so it becomes an annotation without touching the report on stdout.
+#[test]
+fn allow_empty_warns_as_an_annotation_under_github_actions() {
+    let (dir, c) = repo();
+    let out = tak_env(
+        dir.path(),
+        &["detect", &c[0], "--allow-empty"],
+        &[("GITHUB_ACTIONS", "true")],
+    );
+    assert!(out.status.success(), "{}", stdout(&out));
+    assert_eq!(
+        stderr(&out),
+        format!(
+            "::warning::tak: nothing was compared at {}; passing because `allow_empty` is on\n",
+            short(&c[0])
+        )
+    );
+    assert!(!stdout(&out).contains("::warning"), "{}", stdout(&out));
 }
 
 /// First-parent only: a merged side branch's measurements are not trunk

@@ -10,7 +10,11 @@ name: perf-pr
 # microseconds rather than a regression in tak. tak.toml marks both report-only
 # (`gate = { enabled = false }`), so the report says so on each row. A rise
 # shows as a neutral check and a warning; a comparison that never ran still
-# fails, since that is broken CI rather than a number.
+# fails, since that is broken CI rather than a number. A comparison that ran
+# and found nothing on both sides is neutral with a warning too, because
+# tak.toml sets `[gate] allow_empty = true`: the runner class changes with
+# every GitHub image and Rust update, and main has to be measured on the new
+# one before a pull request has anything to compare against.
 #
 # Nothing here writes to refs/notes/tak. A pull request's measurements are
 # recorded locally, used for the comparison, and discarded with the runner. Only
@@ -210,14 +214,25 @@ jobs:
       # report is not evidence of anything; the exit status is, and so is the
       # report's first line, which tak writes before any name. Status:
       # 0 clean, 1 rose beyond the gate (reported, not failed), 2 the
-      # comparison failed or compared nothing.
+      # comparison failed or compared nothing, 3 compared nothing and
+      # `allow_empty` let it pass.
       #
-      # - Exit 0: nothing gated rose. A report-only benchmark or an accepted
-      #   regression that rose is still worth a neutral check rather than a
-      #   green one, so an acceptance can only ever turn this check neutral.
-      # - Non-zero, and the first line says nothing was compared: 2. No
-      #   `--allow-empty`, so an empty comparison fails like one that never
-      #   ran.
+      # - Exit 0, and the first line says nothing was compared: 3, a neutral
+      #   check and a warning, neither a pass nor a failure. tak.toml sets
+      #   `[gate] allow_empty = true` because the runner class above embeds
+      #   the image and Rust versions, so every update to either leaves pull
+      #   requests nothing to compare until main is measured again; see the
+      #   comment there. Exit status first, then the first line: only the
+      #   exit status says the gate let it through, and only the first line
+      #   says there was nothing to gate, and no echoed name can reach it.
+      # - Exit 0 otherwise: nothing gated rose. A report-only benchmark or an
+      #   accepted regression that rose is still worth a neutral check rather
+      #   than a green one, so an acceptance can only ever turn this check
+      #   neutral.
+      # - Non-zero, and the first line says nothing was compared: 2. The
+      #   base's tak.toml did not allow it, so an empty comparison fails like
+      #   one that never ran. That is what a pull request sees when it is the
+      #   one adding `allow_empty`: the base's file decides, not its own.
       # - Non-zero, with the gate's own verdict line: 1, a regression. For
       #   tak itself that is reported, not failed; see the note at the top.
       # - Anything else non-zero: 2, an error.
@@ -231,7 +246,8 @@ jobs:
       #
       # The gate policy comes from the merge base's tak.toml, which the fetch
       # above makes available, so a pull request cannot loosen it or set
-      # `[gate] accept_trailers = true` for itself. TAK_ACCEPT_TRAILERS=0 keeps
+      # `[gate] accept_trailers = true` or `allow_empty = true` for itself.
+      # No TAK_ALLOW_EMPTY here, so main's tak.toml decides. TAK_ACCEPT_TRAILERS=0 keeps
       # trailers off here even if main's tak.toml turns them on. The binary
       # comparing is this pull request's own build, so for tak itself that
       # is not a boundary; `authorize` is.
@@ -245,7 +261,9 @@ jobs:
           ran=$?
           set -e
           if [ "$ran" -eq 0 ]; then
-            if grep -Eq '^\*\*[0-9]+ (report-only benchmark|accepted regression)\(s\) above (the .*% gate|their gate)' /tmp/tak-report.md; then
+            if head -n 1 /tmp/tak-report.md | grep -q '^\*\*Nothing was compared'; then
+              echo 3 > /tmp/tak-gate-status
+            elif grep -Eq '^\*\*[0-9]+ (report-only benchmark|accepted regression)\(s\) above (the .*% gate|their gate)' /tmp/tak-report.md; then
               echo 1 > /tmp/tak-gate-status
             else
               echo 0 > /tmp/tak-gate-status
@@ -367,6 +385,12 @@ jobs:
               conclusion=failure
               title='The comparison did not run or failed'
               ;;
+            3)
+              # Neutral, not green: nothing was gated, and a green check
+              # would read as "checked and fine".
+              conclusion=neutral
+              title='Nothing was compared (allowed by allow_empty)'
+              ;;
             *)
               # Reported, not failed: see the note at the top of this file.
               conclusion=neutral
@@ -389,6 +413,9 @@ jobs:
             2)
               echo "::error::the comparison never ran or failed, so nothing was compared — see the job log"
               exit 1
+              ;;
+            3)
+              echo "::warning::nothing was compared, and allow_empty let it pass — usually because main has not been measured on this runner class yet; see the job summary"
               ;;
             *)
               echo "::warning::an instruction count rose beyond the gate — reported only; see the comment or the job summary"

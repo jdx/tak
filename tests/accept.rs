@@ -87,6 +87,7 @@ fn run_compare(dir: &Path, args: &[&str], trailers: Option<&str>) -> (bool, Stri
         .env_remove("TAK_GATE_PCT")
         .env_remove("TAK_CREDIT")
         .env_remove("TAK_ACCEPT_TRAILERS")
+        .env_remove("TAK_ALLOW_EMPTY")
         .current_dir(dir);
     if let Some(value) = trailers {
         cmd.env("TAK_ACCEPT_TRAILERS", value);
@@ -207,6 +208,21 @@ fn the_status_patterns_are_the_workflows() {
         "head -n 1 /tmp/tak-report.md | grep -q '{NOTHING_COMPARED}'"
     )));
     assert!(workflow.contains(&format!("grep -Eq '{REGRESSED}'")));
+    // The exit-0 branch asks about an empty comparison first, from the first
+    // line only, and the report job turns that status into a neutral check
+    // with a warning rather than a pass or a failure.
+    assert!(workflow.contains(&format!(
+        "if [ \"$ran\" -eq 0 ]; then\n            \
+         if head -n 1 /tmp/tak-report.md | grep -q '{NOTHING_COMPARED}'; then\n              \
+         echo 3 > /tmp/tak-gate-status\n"
+    )));
+    assert!(workflow.contains(
+        "            3)\n              # Neutral, not green: nothing was gated, and a green check\n              \
+         # would read as \"checked and fine\".\n              conclusion=neutral\n"
+    ));
+    assert!(
+        workflow.contains("            3)\n              echo \"::warning::nothing was compared")
+    );
     assert!(
         !workflow.contains("tak compare --no-gate"),
         "the classification needs the exit status"
@@ -231,12 +247,19 @@ fn grep(pattern: &str, text: &str) -> bool {
 }
 
 /// perf-pr's status for a `tak compare` run: 0 clean, 1 rose (reported),
-/// 2 failed or compared nothing. The same decision the workflow makes, from
-/// the exit status first and the report's text only where that is not enough.
+/// 2 failed or compared nothing, 3 compared nothing and `allow_empty` passed
+/// it. The same decision the workflow makes, from the exit status first and
+/// the report's text only where that is not enough.
 fn status(ok: bool, report: &str) -> u8 {
     let first = report.lines().next().unwrap_or_default();
     if ok {
-        if grep(NEUTRAL, report) { 1 } else { 0 }
+        if grep(NOTHING_COMPARED, first) {
+            3
+        } else if grep(NEUTRAL, report) {
+            1
+        } else {
+            0
+        }
     } else if grep(NOTHING_COMPARED, first) {
         2
     } else if grep(REGRESSED, report) {
@@ -300,6 +323,29 @@ fn the_workflow_status_matches_real_results() {
     commit(empty.path(), "head");
     let (ok, stdout, _) = compare(empty.path(), &[&base]);
     assert_eq!(status(ok, &stdout), 2, "nothing compared: {stdout}");
+
+    // With `allow_empty` on in the base's tak.toml, as tak's own is: neutral
+    // with a warning, not the pass a bare exit status 0 would read as.
+    let allowed = repo();
+    std::fs::write(
+        allowed.path().join("tak.toml"),
+        "[gate]\nallow_empty = true\n",
+    )
+    .unwrap();
+    git(allowed.path(), &["add", "tak.toml"]);
+    let base = commit(allowed.path(), "base");
+    commit(allowed.path(), "head");
+    let (ok, stdout, _) = compare(allowed.path(), &[&base]);
+    assert!(ok, "{stdout}");
+    assert_eq!(status(ok, &stdout), 3, "allowed empty: {stdout}");
+
+    // A regression under the same setting is still a regression.
+    let base = commit(allowed.path(), "measured base");
+    note(allowed.path(), &base, &[("startup", 1e6)]);
+    let head = commit(allowed.path(), "slower");
+    note(allowed.path(), &head, &[("startup", 1.1e6)]);
+    let (ok, stdout, _) = compare(allowed.path(), &[&base]);
+    assert_eq!(status(ok, &stdout), 1, "a regression: {stdout}");
 
     let clean = repo();
     let base = commit(clean.path(), "base");

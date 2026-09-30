@@ -54,6 +54,14 @@ struct Cli {
     /// Instructions a count may rise by before `compare` fails, whatever the percentage.
     #[usage(long, global, value_name = "N", setting = "gate_min_delta")]
     gate_min_delta: Option<u64>,
+    /// Pass, with a warning, when nothing was compared, instead of failing. For
+    /// `compare`, `detect` and `run --baseline --gate`. A regression still fails.
+    // A plain `bool`: given, it contributes `true`; left off, nothing, so
+    // `[gate] allow_empty` and `TAK_ALLOW_EMPTY` still apply. It was a flag on
+    // `compare` and `detect` before it was a setting, and is global now for the
+    // reason above — one spelling wherever the setting applies.
+    #[usage(long, global, setting = "allow_empty")]
+    allow_empty: bool,
     /// Leave the line naming tak off the end of generated reports.
     // `SetFalse`: the long spelling is the negation of the setting, so `--no-credit`
     // contributes `false` to the settings layer and its absence contributes nothing.
@@ -137,7 +145,8 @@ enum Cmd {
         baseline: Option<String>,
         /// With --baseline, fail when an instruction count rose beyond its
         /// gate — the one `tak compare` would apply — or when a gated benchmark
-        /// could not be compared.
+        /// could not be compared. `allow_empty` (`--allow-empty`) passes, with a
+        /// warning, a run where nothing was compared at all.
         #[usage(long)]
         gate: bool,
         /// Command to benchmark, after `--`. Omit to run what tak.toml declares.
@@ -232,7 +241,8 @@ enum Cmd {
     ///
     /// Fails when an instruction count has risen by more than `gate_pct` and
     /// `gate_min_delta`, or by more than a benchmark's own `gate`, or when no
-    /// series was measured on both sides. The gate comes from BASE's
+    /// series was measured on both sides, unless `allow_empty` (`--allow-empty`)
+    /// is on, which passes that case with a warning. The gate comes from BASE's
     /// tak.toml, not the working tree's, so a change cannot loosen its own;
     /// flags and environment variables still override it. Wall clock is
     /// reported and never gated. A regression in a benchmark named by
@@ -249,7 +259,7 @@ enum Cmd {
         #[usage(long, default = "origin")]
         remote: String,
         /// Report without failing, whatever the numbers say. Takes precedence
-        /// over `--allow-empty`: an empty comparison passes too. Errors, such as
+        /// over `allow_empty`: an empty comparison passes too. Errors, such as
         /// an invalid `tak.toml`, still fail.
         #[usage(long)]
         no_gate: bool,
@@ -258,11 +268,6 @@ enum Cmd {
         /// whatever `accept_trailers` says.
         #[usage(long, value_name = "BENCH")]
         accept: Vec<String>,
-        /// Pass when no series was measured on both sides, instead of failing.
-        /// For the first pull request after adopting tak, or a runner-class
-        /// migration. A regression still fails.
-        #[usage(long)]
-        allow_empty: bool,
     },
     /// Show which functions an instruction-count change came from.
     ///
@@ -288,8 +293,11 @@ enum Cmd {
     /// points. Fails when the step onto REV itself is beyond that series' gate
     /// (the same per-benchmark gates as `compare`), so a regression fails the
     /// run for the commit that introduced it rather than every run after, and
-    /// when nothing could be compared. Older steps and slow drift are reported
-    /// without failing. Wall clock is shown and never gated. A step in a
+    /// when nothing could be compared: REV has no instruction counts, or none
+    /// of its series has an earlier point in the window. `allow_empty`
+    /// (`--allow-empty`) passes that case with a warning, for a first
+    /// recording or the first on a new runner class. Older steps and slow
+    /// drift are reported without failing. Wall clock is shown and never gated. A step in a
     /// benchmark named by `--accept` is reported as accepted and does not fail.
     /// So is one named by a `Tak-Accept:` trailer on a first-parent commit in
     /// the step's range, but only when the `accept_trailers` setting is on.
@@ -313,13 +321,6 @@ enum Cmd {
         /// whatever `accept_trailers` says.
         #[usage(long, value_name = "BENCH")]
         accept: Vec<String>,
-        /// Succeed when nothing could be compared: REV has no instruction
-        /// counts, or none of its series has an earlier point in the window.
-        /// Without it that fails, because a check that examined nothing
-        /// otherwise looks like a pass. Needed on a first recording or the
-        /// first on a new runner class. A step onto REV still fails.
-        #[usage(long)]
-        allow_empty: bool,
     },
     /// Diagnose the git-notes plumbing.
     Doctor,
@@ -1109,7 +1110,13 @@ fn finish(
     // answers is whether an edit helped, and the subjects that did measure
     // answer it.
     let compared = match (&local.against, &local.gates) {
-        (Some(b), Some(gates)) => Some(report_against(b, &measured, &failing, gates)),
+        (Some(b), Some(gates)) => Some(report_against(
+            b,
+            &measured,
+            &failing,
+            gates,
+            opts.gate && settings.allow_empty,
+        )),
         _ => None,
     };
     // What a failure below keeps from being written, named so the message
@@ -1262,15 +1269,20 @@ struct Against {
 /// The same [`compare::compare`] and [`compare::markdown`] as `tak compare`,
 /// so a local report and a pull request's read the same way and are kept
 /// correct in one place.
+///
+/// `allow_empty` is the setting under `--gate`, and false without it: only a
+/// gate has anything to waive, and a report-only run should not claim to have
+/// passed with a warning.
 fn report_against(
     against: &Baseline,
     measured: &[Measured],
     failing: &[FailedCheck],
     gates: &compare::Gates,
+    allow_empty: bool,
 ) -> Against {
     let current: Vec<Record> = measured.iter().map(|m| m.record.clone()).collect();
     let base = baseline::relevant(&against.records, &current);
-    let comparison = compare::compare(&base, &current);
+    let mut comparison = compare::compare(&base, &current);
     // A report-only series is never a reason to fail, so it cannot leave a
     // gap in what the gate checked either.
     let count_failed: BTreeSet<compare::Key> = measured
@@ -1288,6 +1300,24 @@ fn report_against(
         .into_iter()
         .filter(|(k, _)| gates.get(&k.0, &k.1).enabled)
         .collect();
+    let keys: BTreeSet<compare::Key> = current
+        .iter()
+        .map(|r| (r.bench.clone(), r.tool.clone(), r.runner.clone()))
+        .collect();
+    // Decided here, before the report is printed, so the report and
+    // `gate_against` read the same answer. Only an empty comparison, as in
+    // `tak compare`: nothing measured both here and in the baseline. Not a
+    // count that failed or a check that failed, which are this run's own
+    // measurement going wrong rather than history that is missing, and not a
+    // run of report-only benchmarks, which passes on that ground and says so.
+    let enabled = |bench: &str, tool: &str| gates.get(bench, tool).enabled;
+    comparison.allowed_empty = allow_empty
+        && comparison.is_empty()
+        && keys.iter().any(|k| enabled(&k.0, &k.1))
+        && !failing.iter().any(|f| enabled(&f.bench, &f.tool))
+        && !gaps
+            .iter()
+            .any(|(_, gap)| matches!(gap, baseline::Gap::CountFailed));
 
     // Series the baseline holds only for other runner classes. The table
     // leaves them out, as it should, so this says why they are absent: a
@@ -1295,10 +1325,6 @@ fn report_against(
     // boundary, is the usual cause. Nothing is said when this run's class is
     // in the baseline too; the other classes are simply not this run's.
     let mut stranded: BTreeMap<Vec<String>, Vec<String>> = BTreeMap::new();
-    let keys: BTreeSet<compare::Key> = current
-        .iter()
-        .map(|r| (r.bench.clone(), r.tool.clone(), r.runner.clone()))
-        .collect();
     for k in &keys {
         if base.iter().any(|r| r.bench == k.0 && r.tool == k.1) {
             continue;
@@ -1377,16 +1403,17 @@ fn describe_series(key: &compare::Key) -> String {
 
 /// Fail on a regression against a baseline, for `--gate`.
 ///
-/// Stricter than `tak compare` about comparing nothing. There, a base with no
-/// measurements is a normal state — a commit CI has not reached yet. Here the
-/// baseline was named and loaded, so nothing to compare means a runner or tool
-/// mismatch, or a run without valgrind, and a gate that passed then would pass
-/// every edit: `git bisect run` would blame the wrong commit.
+/// Comparing nothing fails, as it does in `tak compare`: the baseline was
+/// named and loaded, so nothing to compare means a runner or tool mismatch,
+/// or a run without valgrind, and a gate that passed then would pass every
+/// edit: `git bisect run` would blame the wrong commit. `allow_empty` waives
+/// that case alone, with a warning, exactly as it does for `tak compare`.
 ///
-/// The same holds for any one series: a gate that checked only some of what
-/// this run counted has not passed. And a failed check fails the gate, since
-/// a subject that stopped doing its work retires fewer instructions, which is
-/// the one direction the gate lets through.
+/// Stricter than `tak compare` about any one series: a gate that checked only
+/// some of what this run counted has not passed, `allow_empty` or not. And a
+/// failed check fails the gate, since a subject that stopped doing its work
+/// retires fewer instructions, which is the one direction the gate lets
+/// through.
 ///
 /// Each series is held to its own gate, as `tak compare` holds it: the same
 /// [`compare::Gates`], so a `min_delta` floor applies and a report-only
@@ -1409,21 +1436,14 @@ fn gate_against(
             labels(failing)
         );
     }
-    if !compared.gaps.is_empty() {
-        // Each series carries its own reason, because the remedy differs:
-        // install valgrind or turn counters back on for one, save the
-        // baseline on this runner class for another.
-        bail!(
-            "cannot gate against baseline `{}`: {}",
-            against.name,
-            describe_gaps(&compared.gaps)
-        );
-    }
     let comparison = &compared.comparison;
     let enabled = |bench: &str, tool: &str| gates.get(bench, tool).enabled;
     // Report-only never fails, so a run of nothing else passes, counted or
     // not. It says so on stderr as well as in the table: an exit status of 0
     // from `--gate` otherwise reads, to a script, as "checked and fine".
+    // Asked ahead of the gaps, which only ever hold gated series, so this was
+    // already the outcome whenever it applied; asking first keeps the
+    // `allow_empty` waiver below from claiming a pass it did not grant.
     let nothing_gated = |why: &str| {
         eprintln!(
             "  note: nothing was gated against baseline `{}`: {why}",
@@ -1433,6 +1453,26 @@ fn gate_against(
     };
     if !compared.measured.iter().any(|k| enabled(&k.0, &k.1)) {
         return nothing_gated("every benchmark measured is report-only");
+    }
+    // Decided in `report_against`, which has already said so in the report.
+    // Before the gaps: an empty comparison is one gap per gated series, and
+    // failing on those would leave the setting nothing to waive.
+    if comparison.allowed_empty {
+        warn_allowed_empty(&format!(
+            "nothing was compared against baseline `{}`",
+            against.name
+        ));
+        return Ok(());
+    }
+    if !compared.gaps.is_empty() {
+        // Each series carries its own reason, because the remedy differs:
+        // install valgrind or turn counters back on for one, save the
+        // baseline on this runner class for another.
+        bail!(
+            "cannot gate against baseline `{}`: {}",
+            against.name,
+            describe_gaps(&compared.gaps)
+        );
     }
     if !comparison
         .changes
@@ -2105,6 +2145,40 @@ fn floor_suffix(gate: &compare::Gate) -> String {
     }
 }
 
+/// Say that a comparison of nothing passed because `allow_empty` let it.
+///
+/// Shared by `compare`, `detect` and `run --baseline --gate`, so the three word
+/// it alike and a log search for one finds them all. The report already says
+/// so, but a report is usually redirected to a file or a comment, and a pass
+/// that examined nothing should be visible where the job's own output is read.
+///
+/// Stderr, never stdout: workflows redirect stdout to the report whose first
+/// line scripts classify a run by. Under GitHub Actions the one line is a
+/// `::warning::` workflow command instead of plain text. That is still an
+/// `eprintln!` rather than a logging layer: the runner reads workflow commands
+/// from both of a step's streams, so the same line shows in the log as a
+/// warning and as an annotation on the run's summary page, where a green check
+/// that compared nothing gets seen by people who never open the log. Not both
+/// forms: in the log the annotation already reads as a warning, and printing
+/// the plain line too would say it twice.
+fn warn_allowed_empty(what: &str) {
+    let message = format!("{what}; passing because `allow_empty` is on");
+    if std::env::var_os("GITHUB_ACTIONS").is_some() {
+        eprintln!("::warning::tak: {}", workflow_escape(&message));
+    } else {
+        eprintln!("warning: {message}");
+    }
+}
+
+/// Escape a workflow command's message as `@actions/core` does. A revision or
+/// baseline name is interpolated, and a raw `%` or line break in one would be
+/// decoded as an escape or end the command early.
+fn workflow_escape(text: &str) -> String {
+    text.replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
 /// Compare `rev` against `base`, print the report, and gate on it.
 ///
 /// `cli` beside `settings`: the base's gate is resolved afresh under the same
@@ -2116,7 +2190,6 @@ fn cmd_compare(
     remote: String,
     no_gate: bool,
     accept_flags: Vec<String>,
-    allow_empty: bool,
     cli: &CliLayer,
     settings: &Settings,
 ) -> Result<()> {
@@ -2126,6 +2199,7 @@ fn cmd_compare(
     let proposed = Policy {
         gates: compare_gates(settings, None)?,
         accept_trailers: settings.accept_trailers,
+        allow_empty: settings.allow_empty,
     };
     // The commit itself is needed, not only its notes: the gate is read out of
     // its tree. A workflow that found the merge base has already fetched it.
@@ -2183,6 +2257,10 @@ fn cmd_compare(
         .collect();
     let changed = proposed.changes_from(&policy, &measured);
     comparison.gate_source = compare::gate_source(from.as_deref(), at, &changed);
+    // The base's, never the working tree's: a pull request that could turn this
+    // on for itself could pass a comparison that never ran. `--no-gate` wins,
+    // as it says it does, and then there is no waiver to name.
+    comparison.allowed_empty = comparison.is_empty() && policy.allow_empty && !no_gate;
     print!(
         "{}",
         compare::markdown(&comparison, &trend, gates, settings.credit)
@@ -2193,17 +2271,26 @@ fn cmd_compare(
     }
     // An empty comparison has no regressions, so the check below would pass
     // it — and a gate that passed because it never ran reads exactly like one
-    // that ran clean. Opting out is a flag, not the default, because the usual
-    // causes are a broken workflow rather than a state worth accepting.
-    if comparison.is_empty() && !allow_empty {
-        bail!(
-            "nothing was compared: no series was measured on both {base} and {rev}. \
-             Either one side has no measurements recorded (the base predates \
-             adopting tak, or its notes were never pushed or fetched), or the two \
-             were measured on different runner classes, which are deliberately \
-             not comparable. Pass --allow-empty to accept this, as on the first \
-             pull request after adopting tak or across a runner-class migration"
-        )
+    // that ran clean. Opting out is a setting, not the default, because the
+    // usual causes are a broken workflow rather than a state worth accepting.
+    // Opted out, it still says so: a pass that compared nothing must not look
+    // like one that compared everything, to a person or to a log search.
+    if comparison.is_empty() {
+        if !policy.allow_empty {
+            bail!(
+                "nothing was compared: no series was measured on both {base} and {rev}. \
+                 Either one side has no measurements recorded (the base predates \
+                 adopting tak, or its notes were never pushed or fetched), or the two \
+                 were measured on different runner classes, which are deliberately \
+                 not comparable. Pass --allow-empty, or set `[gate] allow_empty = true` \
+                 in the base's tak.toml, to accept this, as on the first pull request \
+                 after adopting tak or across a runner-class migration"
+            )
+        }
+        warn_allowed_empty(&format!(
+            "nothing was compared: no series was measured on both {base} and {rev}"
+        ));
+        return Ok(());
     }
     // Accepted regressions are reported above and do not count here.
     let regressions = comparison.failures(gates);
@@ -2261,7 +2348,6 @@ fn cmd_detect(
     remote: String,
     no_gate: bool,
     accept_flags: Vec<String>,
-    allow_empty: bool,
     settings: &Settings,
 ) -> Result<()> {
     // Up front, before any git work: one recorded commit has no step to find,
@@ -2286,7 +2372,7 @@ fn cmd_detect(
     let (walked, cutoff) = detect::gather(&head, window)?;
     let mut found = detect::analyze(&walked, &gates);
     found.cutoff = cutoff;
-    found.allow_empty = allow_empty;
+    found.allow_empty = settings.allow_empty;
     found.no_gate = no_gate;
 
     // Trailers from each step's own range, `from..head` along the first
@@ -2320,12 +2406,18 @@ fn cmd_detect(
     print!("{}", detect::markdown(&found, settings.credit));
 
     // Passing here would claim a check that never ran, so it takes an explicit
-    // waiver: --allow-empty for this case alone, or --no-gate for everything.
+    // waiver: `allow_empty` for this case alone, or --no-gate for everything.
     if found.empty_fails() {
         bail!(
-            "nothing was compared at {}; pass --allow-empty if that is expected",
+            "nothing was compared at {}; pass --allow-empty, or set `[gate] allow_empty = \
+             true` in tak.toml, if that is expected",
             detect::short(&head)
         );
+    }
+    // Waived, but said out loud, as in compare. `--no-gate` asked for a report
+    // that never fails and gets no warning for doing what it was told.
+    if found.nothing_compared() && found.allow_empty && !no_gate {
+        warn_allowed_empty(&format!("nothing was compared at {}", detect::short(&head)));
     }
     let failures = found.failures();
     if failures.is_empty() || no_gate {
@@ -2381,6 +2473,9 @@ fn compare_gates(settings: &Settings, config: Option<&Path>) -> Result<compare::
 struct Policy {
     gates: compare::Gates,
     accept_trailers: bool,
+    /// Policy, not presentation: it decides whether comparing nothing fails,
+    /// and a change able to set it for itself could merge with no comparison.
+    allow_empty: bool,
 }
 
 impl Policy {
@@ -2394,6 +2489,9 @@ impl Policy {
         let mut out = self.gates.changes_from(&base.gates, measured);
         if self.accept_trailers != base.accept_trailers {
             out.push("`accept_trailers`".to_string());
+        }
+        if self.allow_empty != base.allow_empty {
+            out.push("`allow_empty`".to_string());
         }
         out
     }
@@ -2459,6 +2557,7 @@ fn base_policy(base_sha: &str, cli: &CliLayer) -> Result<(Policy, Option<String>
     let policy = Policy {
         gates,
         accept_trailers: settings.accept_trailers,
+        allow_empty: settings.allow_empty,
     };
     Ok((policy, path))
 }
@@ -3687,14 +3786,12 @@ fn main() -> Result<()> {
             remote,
             no_gate,
             accept,
-            allow_empty,
         } => cmd_compare(
             base,
             rev,
             remote,
             no_gate,
             accept,
-            allow_empty,
             &overrides,
             &resolve_settings(&overrides)?,
         ),
@@ -3705,14 +3802,12 @@ fn main() -> Result<()> {
             remote,
             no_gate,
             accept,
-            allow_empty,
         } => cmd_detect(
             rev,
             window,
             remote,
             no_gate,
             accept,
-            allow_empty,
             &resolve_settings(&overrides)?,
         ),
         // Tolerant on purpose: doctor diagnoses a broken setup, so a tak.toml

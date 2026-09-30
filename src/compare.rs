@@ -281,6 +281,10 @@ pub struct Comparison {
     /// differently. Rendered below the verdict rather than above it, because
     /// scripts read the report's first line as its outcome.
     pub gate_source: Option<String>,
+    /// Set when nothing was compared and `allow_empty` passed it rather than
+    /// failing it. Carried here, as `detect` carries its own, so the report
+    /// and the exit status cannot disagree.
+    pub allowed_empty: bool,
 }
 
 impl Comparison {
@@ -413,6 +417,7 @@ pub fn compare(base: &[Record], head: &[Record]) -> Comparison {
         accepted: Acceptances::default(),
         ignored_trailers: Acceptances::default(),
         gate_source: None,
+        allowed_empty: false,
     }
 }
 
@@ -543,6 +548,18 @@ pub(crate) fn signed_pct(p: Option<f64>) -> String {
 pub(crate) const CREDIT: &str = "\n<sub>Measured by [tak](https://github.com/jdx/tak) — instruction-counted \
      CLI benchmarks, stored in this repository's git notes.</sub>\n";
 
+/// The line saying an empty comparison passed only because `allow_empty` let
+/// it, shared by every report that can say it so they word it alike.
+///
+/// Names the setting, not the flag: `--allow-empty`, `TAK_ALLOW_EMPTY` and
+/// `[gate] allow_empty` are three spellings of it. Names the cost too, because
+/// the reader most likely to see this is the one whose notes were never
+/// fetched, and "passed" is the wrong thing to leave them with.
+pub const ALLOWED_EMPTY: &str = "This passes with a warning instead of failing, because \
+     `allow_empty` is on. That is expected on a new runner class, for a new benchmark, or on \
+     a first recording. It is also what history that was never recorded or never fetched \
+     looks like, so check which this is.";
+
 pub fn markdown(c: &Comparison, trend: &Trend, gates: &Gates, credit: bool) -> String {
     let mut out = String::new();
 
@@ -557,6 +574,14 @@ pub fn markdown(c: &Comparison, trend: &Trend, gates: &Gates, credit: bool) -> S
              which are deliberately not comparable — counts shift between \
              machine types by more than a real regression does.\n",
         );
+        // A line of its own, below the first, never folded into it. That line
+        // is byte for byte what it was before this setting existed, because
+        // scripts match it as a whole — jdx/tak-action compares the full bold
+        // sentence, period included — and an exit status of 0 is exactly the
+        // case where the first line is all a script has left to go on.
+        if c.allowed_empty {
+            out.push_str(&format!("\n{ALLOWED_EMPTY}\n"));
+        }
     } else {
         out.push_str(&table(c, trend, gates));
         out.push_str(&allocations(c));
@@ -1628,6 +1653,38 @@ mod tests {
         assert!(md.contains("nothing was gated"), "{md}");
         assert!(md.contains("gha-macos"), "the new runner is unnamed: {md}");
         assert!(md.contains("gha-linux"), "the old runner is unnamed: {md}");
+    }
+
+    /// `allow_empty` changes the report below its first line and never the
+    /// line itself. Scripts classify an exit-0 run by that line alone —
+    /// jdx/tak-action matches the whole bold sentence, period included — so a
+    /// waived empty comparison has to start exactly as a failed one does.
+    #[test]
+    fn allowing_an_empty_comparison_keeps_the_first_line() {
+        const FIRST: &str = "**Nothing was compared, and so nothing was gated.** No series \
+             appears on both sides: either the base has no measurements recorded, or the two \
+             were measured on different runner classes, which are deliberately not \
+             comparable — counts shift between machine types by more than a real regression \
+             does.";
+        let mut c = compare(
+            &[rec("a", "gha-old", 1e6, 1.0)],
+            &[rec("a", "gha-new", 1e6, 1.0)],
+        );
+        let refused = markdown(&c, &Trend::new(), &g(1.0), false);
+        assert_eq!(refused.lines().next(), Some(FIRST), "{refused}");
+        assert!(!refused.contains(ALLOWED_EMPTY), "{refused}");
+
+        c.allowed_empty = true;
+        let allowed = markdown(&c, &Trend::new(), &g(1.0), false);
+        assert_eq!(allowed.lines().next(), Some(FIRST), "{allowed}");
+        // Its own paragraph, directly after the first, naming the setting.
+        assert_eq!(allowed.lines().nth(2), Some(ALLOWED_EMPTY), "{allowed}");
+        assert!(ALLOWED_EMPTY.contains("`allow_empty`"));
+        // Everything else the report says about an empty comparison stays.
+        assert!(
+            allowed.contains("gha-new") && allowed.contains("gha-old"),
+            "{allowed}"
+        );
     }
 
     /// A head with nothing recorded is the quietest possible failure: every

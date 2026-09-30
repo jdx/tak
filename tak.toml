@@ -14,3 +14,17 @@ gate = { enabled = false }
 cmd = ["./target/release/tak", "--help"]
 runs = 10
 gate = { enabled = false }
+
+# An empty comparison warns instead of failing. The perf workflows record
+# under a runner class that embeds the GitHub image and Rust versions
+# (TAK_RUNNER in perf.yml and perf-pr.yml), because either can move instruction
+# counts without tak changing. So each image or toolchain update starts a new
+# series, and until main is measured on it every pull request compares nothing:
+# gha20260920.314.1 becoming gha20260927.320.1 did exactly that on #172.
+# Failing those turned every perf check red for a reason no pull request could
+# fix. The cost is that a broken setup, such as notes that were not fetched,
+# warns too; perf.yml's detect job checks the published measurement is
+# readable before it relies on this. `tak compare` reads this from the base
+# revision, so it applies to pull requests once it is on main.
+[gate]
+allow_empty = true

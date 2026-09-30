@@ -32,6 +32,7 @@ fn settings_output(args: &[&str]) -> String {
         .env_remove("TAK_GATE_PCT")
         .env_remove("TAK_GATE_MIN_DELTA")
         .env_remove("TAK_CREDIT")
+        .env_remove("TAK_ALLOW_EMPTY")
         .current_dir(std::env::temp_dir())
         .output()
         .expect("failed to run tak settings");

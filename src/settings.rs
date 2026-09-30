@@ -173,6 +173,41 @@ pub struct Settings {
     )]
     pub gate_min_delta: u64,
 
+    /// Whether a comparison that compared nothing passes, with a warning, instead of failing.
+    ///
+    /// Applies to `tak compare`, `tak detect` and `tak run --baseline --gate`: the case
+    /// where no series was measured on both sides, so the gate had nothing to check. Off
+    /// by default, because a gate that passed without running reads exactly like one that
+    /// ran clean, and the causes nobody notices — a base never recorded, notes never
+    /// fetched, a recording that stopped producing instruction counts — are the ones a
+    /// green check hides.
+    ///
+    /// Turn it on where comparing nothing is routine rather than a symptom: a runner
+    /// class that encodes an image or toolchain version, so every update starts a new
+    /// series and the first comparison after it has no base; or a project still adopting,
+    /// whose pull requests branch from commits measured before tak was. With it on, those
+    /// runs exit successfully, the report says `allow_empty` let them through, and a
+    /// warning goes to stderr — as a `::warning::` annotation under GitHub Actions.
+    ///
+    /// The cost is that the broken causes above warn as well instead of failing. Only the
+    /// empty case is waived: a regression still fails, and so do a failed check and a
+    /// failed instruction count against a baseline.
+    ///
+    /// `--allow-empty` turns it on for one run, and `TAK_ALLOW_EMPTY=0` off. Like the rest
+    /// of its gate, `tak compare` reads it from the base revision's `tak.toml`, so a pull
+    /// request cannot waive its own empty comparison; turning it on takes effect once the
+    /// change is merged. `tak detect` and `tak run --baseline` read the working tree's.
+    #[usage(
+        default = false,
+        cli("--allow-empty"),
+        env = "TAK_ALLOW_EMPTY",
+        source("config", "gate.allow_empty"),
+        example("tak compare origin/main --allow-empty"),
+        example("TAK_ALLOW_EMPTY=0 tak detect"),
+        since = "0.0.14"
+    )]
+    pub allow_empty: bool,
+
     /// Whether generated reports end with a line naming tak.
     ///
     /// On by default. A report that appears in someone's pull request should say what
@@ -503,6 +538,7 @@ impl Settings {
             "env_deny" => Some(format!("{:?}", self.env_deny)),
             "credit" => Some(format!("{}", self.credit)),
             "accept_trailers" => Some(format!("{}", self.accept_trailers)),
+            "allow_empty" => Some(format!("{}", self.allow_empty)),
             "runner_class" => Some(if self.runner_class.is_empty() {
                 "(derived)".to_string()
             } else {
@@ -646,6 +682,28 @@ mod tests {
         );
         let s = Settings::resolve(&no_cli(), &no_env(), &cfg).unwrap();
         assert_eq!(s.gate_pct, 0.5);
+    }
+
+    /// `allow_empty` resolves like every other setting: `tak.toml` turns it on,
+    /// the environment overrides the file either way, and `--allow-empty` wins
+    /// over both. The flag can only say `true` — its absence says nothing — so
+    /// turning it off for one run is `TAK_ALLOW_EMPTY=0`, and a flag left off
+    /// must not undo the file.
+    #[test]
+    fn allow_empty_precedence() {
+        let on = TakConfigLayer::from_text("[gate]\nallow_empty = true\n");
+        let off = TakConfigLayer::from_text("[gate]\nallow_empty = false\n");
+        let resolve = |cli: &CliLayer, env: &EnvLayer, cfg: &TakConfigLayer| {
+            Settings::resolve(cli, env, cfg).unwrap().allow_empty
+        };
+        let flag = no_cli().with_value("allow_empty", Value::Bool(true));
+
+        assert!(!Settings::default().allow_empty, "off by default");
+        assert!(resolve(&no_cli(), &no_env(), &on));
+        assert!(!resolve(&no_cli(), &no_env(), &off));
+        assert!(!resolve(&no_cli(), &env(&[("TAK_ALLOW_EMPTY", "0")]), &on));
+        assert!(resolve(&no_cli(), &env(&[("TAK_ALLOW_EMPTY", "1")]), &off));
+        assert!(resolve(&flag, &env(&[("TAK_ALLOW_EMPTY", "0")]), &off));
     }
 
     /// A declared key holding the wrong TOML type is an error, not a guess.
