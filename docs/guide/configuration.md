@@ -35,6 +35,13 @@ warmup = 2
 `cmd` may be an argument list or a whitespace-split string. tak deliberately never starts a
 shell because shell startup would add work and variance to the subject.
 
+A benchmark or subject name can be any text except control characters, newlines included.
+Names are printed in reports that CI reads line by line, and a newline in a name could make
+part of it read as one of tak's verdicts. tak rejects such a name when `tak.toml` loads, before
+anything is measured. The same rule applies to `--bench` and the runner class. It also applies
+to `TAK_TOOL` where that becomes the recorded tool name: a single-command benchmark or
+`tak run -- CMD`.
+
 Command-line values override the file:
 
 ```sh
@@ -650,7 +657,9 @@ TAK_GATE_PCT=2 tak compare origin/main
 ```
 
 Only instruction counts are gated. Wall-clock changes and
-[custom metrics](#recording-other-metrics) are displayed but never fail the comparison. Use `tak compare --no-gate` when a report must always exit successfully. To let
+[custom metrics](#recording-other-metrics) are displayed but never fail the comparison. Use
+`tak compare --no-gate` when a report must not fail on the comparison; errors, such as an
+invalid `tak.toml`, still fail it. To let
 one benchmark regress on purpose while the others still gate, pass `--accept BENCH`; see
 [accepting an intentional regression](/guide/ci#accept-an-intentional-regression).
 
@@ -743,6 +752,9 @@ the notes whose benchmark `tak.toml` no longer declares is held to `[gate]`. A s
 subject the benchmark no longer declares is held to the benchmark's gate. `tak compare` works
 without a `tak.toml` and holds every series to `[gate]`. A `tak.toml` that doesn't parse is an
 error.
+
+`tak detect` reads gates the same way and applies each series' gate to its steps and its
+drift. A report-only benchmark never fails it.
 
 ## Environment filtering
 

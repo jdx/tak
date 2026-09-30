@@ -154,6 +154,10 @@ const METRIC_NAME_MAX: usize = 64;
 /// metric shares the record's one map with them: an `instructions` printed by
 /// a script would replace the counted one, and the gate would read it.
 fn metric_name(name: &str) -> Result<()> {
+    // The charset below already excludes control characters. This check runs
+    // first anyway, so a newline in a metric name gets the same explanation
+    // as one in a benchmark name.
+    crate::record::check_name("metric", name)?;
     let mut chars = name.chars();
     let well_formed = chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
@@ -956,6 +960,19 @@ impl Config {
                 crate::compare::check_pct(pct).with_context(|| format!("in {place}.pct"))?;
             }
         }
+        // Every name that can be recorded, including a shared subject no
+        // benchmark lists yet: a control character in one could forge a
+        // verdict line in a report. See `record::check_name`.
+        for name in cfg.subject.keys() {
+            crate::record::check_name("subject", name)?;
+        }
+        for (name, b) in &cfg.bench {
+            crate::record::check_name("benchmark", name)?;
+            for n in b.subject.keys().chain(b.subjects.iter()) {
+                crate::record::check_name("subject", n)
+                    .with_context(|| format!("benchmark `{}`", name.escape_default()))?;
+            }
+        }
         // Every declared benchmark is validated up front rather than failing
         // partway through a run that has already spent minutes measuring.
         for (name, b) in &cfg.bench {
@@ -1270,6 +1287,27 @@ cmd = "mycli 'two words'""#,
     #[test]
     fn zero_runs_is_rejected_at_parse_time() {
         assert!(Config::parse("[bench.a.subject.b]\ncmd = \"x\"\nruns = 0").is_err());
+    }
+
+    /// A name holding a newline could forge a verdict line in a report, so
+    /// every name that can be recorded is checked at load: benchmarks, shared
+    /// subjects (listed or not), and a benchmark's own subjects.
+    #[test]
+    fn a_control_character_in_any_name_is_rejected() {
+        for text in [
+            "[bench.\"a\\nb\"]\ncmd = \"x\"",
+            "[subject.\"s\\rt\"]\ncmd = \"x\"",
+            "[bench.a.subject.\"s\\u001bt\"]\ncmd = \"x\"",
+            "[subject.ok]\ncmd = \"x\"\n[bench.a]\nsubjects = [\"ok\", \"b\\tc\"]",
+        ] {
+            let err = Config::parse(text).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("control character"),
+                "{text}: {err:#}"
+            );
+        }
+        // Everything else a name can hold is still fine.
+        Config::parse("[bench.\" a,b `c` \"]\ncmd = \"x\"").unwrap();
     }
 
     #[test]
@@ -1868,6 +1906,14 @@ cmd = "mycli 'two words'""#,
         }
         assert!(metric_name(&"a".repeat(METRIC_NAME_MAX)).is_ok());
         assert!(metric_name(&"a".repeat(METRIC_NAME_MAX + 1)).is_err());
+        // A control character gets the explanation every recorded name gets.
+        let err = format!("{:#}", metric_name("size\nbytes").unwrap_err());
+        assert!(err.contains("control character"), "{err}");
+        let err = Config::parse(
+            "[bench.a]\ncmd = \"x\"\n[bench.a.metric.\"size\\nbytes\"]\nfile = \"a\"",
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("control character"), "{err:#}");
 
         let err = Config::parse(
             "[bench.a]\ncmd = \"x\"\n[bench.a.metric.instructions]\ncmd = \"echo 1\"",

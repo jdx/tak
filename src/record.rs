@@ -83,6 +83,27 @@ pub fn is_builtin_metric(name: &str) -> bool {
     name == "instructions" || name.starts_with("wall_")
 }
 
+/// Reject a name that will be recorded — benchmark, subject or tool, runner
+/// class — if it holds a control character.
+///
+/// Reports are read line by line: tak's own workflows decide a check by what
+/// a line starts with, and a name holding a newline could put a forged verdict
+/// such as `**Nothing was compared` at the start of one. `tak.toml`, `--bench`
+/// and `TAK_TOOL` all come from the change under test, so this is checked where
+/// a name enters, before anything is measured. Nothing legitimate needs a
+/// control character in a name. Report rendering escapes them as well, for
+/// notes that older tak versions wrote before this check existed.
+pub fn check_name(what: &str, name: &str) -> anyhow::Result<()> {
+    if let Some(c) = name.chars().find(|c| c.is_control()) {
+        anyhow::bail!(
+            "{what} {name:?} contains the control character {c:?}. Names appear in reports \
+             that are read line by line, so they may not contain control characters, \
+             newlines included"
+        );
+    }
+    Ok(())
+}
+
 /// Parse a whole note body, skipping lines that fail to parse.
 ///
 /// A single malformed line — hand-edited, or written by a broken tool — must not
