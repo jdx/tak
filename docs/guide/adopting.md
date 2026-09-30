@@ -342,6 +342,10 @@ jobs:
           # turn on `accept_trailers` itself. This keeps trailers off here even
           # if tak.toml turns them on for the main branch.
           TAK_ACCEPT_TRAILERS: "0"
+          # "true" once main's tak.toml sets `[gate] allow_empty = true`, or
+          # while passing --allow-empty below. Only this workflow can say so:
+          # an older tak also exits 0 when nothing was compared.
+          EMPTY_ALLOWED: "false"
         run: |
           set +e
           tak compare "$BASE_SHA" > /tmp/tak-report.md
@@ -350,14 +354,18 @@ jobs:
           cat /tmp/tak-report.md
           cat /tmp/tak-report.md >> "$GITHUB_STEP_SUMMARY"
           # Older tak releases exit 0 when nothing was compared; this keeps the
-          # gate failing on them. Drop it when passing --allow-empty or turning
-          # on `[gate] allow_empty`. Only the first line, which tak writes
-          # before any name: the rest of the report echoes text from the pull
-          # request, such as benchmark names and commit trailers, which must
-          # not be able to fail the check.
+          # gate failing on them. With an empty comparison allowed, it warns
+          # instead, so the job neither fails nor reads as a clean pass. Only
+          # the first line, which tak writes before any name: the rest of the
+          # report echoes text from the pull request, such as benchmark names
+          # and commit trailers, which must not be able to change the outcome.
           if head -n 1 /tmp/tak-report.md | grep -q '^\*\*Nothing was compared'; then
-            echo "::error::no comparable baseline was found"
-            status=1
+            if [ "$status" -eq 0 ] && [ "$EMPTY_ALLOWED" = true ]; then
+              echo "::warning::nothing was compared, so nothing was gated"
+            else
+              echo "::error::no comparable baseline was found"
+              status=1
+            fi
           fi
           exit "$status"
 ```
@@ -390,9 +398,9 @@ with `**Nothing was compared`. The gate then fails whichever version the workflo
 
 Two situations produce an empty comparison legitimately: the first pull request after adopting
 tak, whose merge base predates any main-branch measurement, and a runner-class migration, where
-every base series is on the old class. Pass `--allow-empty` for those pull requests, and remove
-the report check while it is passed, or the check still fails the job. Restore both once main has
-measurements on the current class. Left in place, `--allow-empty` lets a workflow that has
+every base series is on the old class. Pass `--allow-empty` for those pull requests and set
+`EMPTY_ALLOWED: "true"`, or the report check still fails the job; the check then warns instead of
+failing. Restore both once main has measurements on the current class. Left in place, `--allow-empty` lets a workflow that has
 stopped recording pass without comparing anything. A regression still fails under
 `--allow-empty`; only `--no-gate` reports without failing on the comparison, and errors still
 fail under it.
@@ -402,9 +410,10 @@ every image or toolchain update or the project is still adopting, set `[gate] al
 in `tak.toml`. `tak compare` reads it from the merge base, so it takes effect for pull requests
 once the change that sets it is merged; the pull request that adds it still fails on an empty
 comparison. With it on, an empty comparison exits 0 with a warning, and the report's first line
-still starts with `**Nothing was compared`. Change the report check in the example to warn when
-the exit status is 0, for example with `echo "::warning::nothing was compared"`, rather than
-fail, so the job reports it as a warning instead of a pass or a failure. The cost is the one
+still starts with `**Nothing was compared`. Set `EMPTY_ALLOWED: "true"` in the example once the
+setting is on main, so the report check warns on an exit status of 0 rather than failing. Keep
+the check rather than removing it: without it the job reports a comparison of nothing as a
+clean pass. The cost is the one
 above: a workflow that has stopped recording, or a base whose notes were never fetched, warns
 too. See [when comparing nothing is routine](/guide/ci#when-comparing-nothing-is-routine).
 
