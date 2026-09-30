@@ -696,12 +696,16 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
         }
 
         let failures = d.failures();
+        let accepted = d.accepted_steps();
         let any_gated = d.latest.iter().any(|s| s.gate(gates).enabled);
         out.push('\n');
         if !any_gated {
             // "No step above the gate" is true of a report with nothing that
             // could fail, and reads as a pass. Say there was nothing to fail.
             out.push_str("Every benchmark here is report-only, so none can fail the gate.\n");
+        } else if failures.is_empty() && !accepted.is_empty() {
+            // Nothing fails, but "no step above the gate" would be false: the
+            // accepted line below is the verdict, as in `tak compare`.
         } else if failures.is_empty() {
             if uniform {
                 out.push_str(&format!(
@@ -727,12 +731,13 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
                 );
             }
         }
-        let accepted = d.accepted_steps();
         if !accepted.is_empty() {
             // Its own bold line, with where each acceptance came from: an
             // override of the gate must be as visible as what it overrides.
+            // Separated from a failure verdict above it; alone, it is the verdict.
+            let gap = if failures.is_empty() { "" } else { "\n" };
             out.push_str(&format!(
-                "\n**{} accepted step(s) above {the_gate} at `{head}`, not failing:** {}\n",
+                "{gap}**{} accepted step(s) above {the_gate} at `{head}`, not failing:** {}\n",
                 accepted.len(),
                 accepted
                     .iter()
@@ -1381,6 +1386,10 @@ mod tests {
 
         d.accept(&flags(&["a", "b"]), &BTreeMap::new());
         assert!(d.failures().is_empty());
+        // Nothing fails, but claiming no step crossed the gate would be false.
+        let md = markdown(&d, false);
+        assert!(!md.contains("No instruction-count step"), "{md}");
+        assert!(md.contains("2 accepted step(s)"), "{md}");
     }
 
     /// A trailer counts only for a step whose range holds it. The log is keyed
