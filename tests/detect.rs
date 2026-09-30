@@ -529,6 +529,24 @@ fn a_trailer_in_the_steps_range_accepts_it_when_enabled() {
     );
 }
 
+/// On the nothing-compared path, a misspelt acceptance is still named, so
+/// `--allow-empty` cannot hide it.
+#[test]
+fn an_unused_acceptance_is_named_even_when_nothing_was_compared() {
+    let (dir, c) = accepted_repo();
+    let out = tak(
+        dir.path(),
+        &["detect", &c[0], "--accept", "startupp", "--allow-empty"],
+    );
+    let md = stdout(&out);
+    assert!(out.status.success(), "{md}");
+    assert!(md.contains("Nothing was compared"), "{md}");
+    assert!(
+        md.contains("so nothing was accepted: `startupp` (`--accept`)"),
+        "{md}"
+    );
+}
+
 /// `--accept` works whatever the setting says: the escape for a manual rerun
 /// of a main-branch job whose step was accepted on its pull request.
 #[test]

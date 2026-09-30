@@ -749,32 +749,6 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
                     .join(", ")
             ));
         }
-        let unused = d.unused_acceptances();
-        if !unused.is_empty() {
-            out.push_str(&format!(
-                "\nAccepted, but no step onto `{head}` needed it, so nothing was accepted: {}\n",
-                unused
-                    .iter()
-                    .map(|name| format!("{} ({})", code(name), d.offered.describe(name)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-        if !d.ignored_trailers.is_empty() {
-            out.push_str(&format!(
-                "\n`{TRAILER}` trailers were found but not honoured, because \
-                 `gate.accept_trailers` is off: {}\n",
-                d.ignored_trailers
-                    .iter()
-                    .map(|(name, _)| format!(
-                        "{} ({})",
-                        code(name),
-                        d.ignored_trailers.describe(name)
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
         let reported = d.reported();
         if !reported.is_empty() {
             out.push_str(&format!(
@@ -784,6 +758,32 @@ pub fn markdown(d: &Detection, credit: bool) -> String {
                 listed(&reported)
             ));
         }
+    }
+
+    // Outside the branch above, as in `tak compare`: an acceptance that
+    // waived nothing matters most when nothing was compared, because a stale
+    // or misspelt name is otherwise silent under `--allow-empty`.
+    let unused = d.unused_acceptances();
+    if !unused.is_empty() {
+        out.push_str(&format!(
+            "\nAccepted, but no step onto `{head}` needed it, so nothing was accepted: {}\n",
+            unused
+                .iter()
+                .map(|name| format!("{} ({})", code(name), d.offered.describe(name)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !d.ignored_trailers.is_empty() {
+        out.push_str(&format!(
+            "\n`{TRAILER}` trailers were found but not honoured, because \
+             `gate.accept_trailers` is off: {}\n",
+            d.ignored_trailers
+                .iter()
+                .map(|(name, _)| format!("{} ({})", code(name), d.ignored_trailers.describe(name)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
     if !d.earlier.is_empty() {
@@ -1430,6 +1430,23 @@ mod tests {
         let md = markdown(&d, false);
         assert!(
             md.contains("no step onto `c1` needed it, so nothing was accepted: `a` (`--accept`), `nope` (`--accept`)"),
+            "{md}"
+        );
+    }
+
+    /// Including when nothing was compared, where it matters most: with
+    /// `--allow-empty` a stale or misspelt acceptance would otherwise pass
+    /// without a word. `tak compare` prints its line on that path too.
+    #[test]
+    fn an_unused_acceptance_is_reported_when_nothing_was_compared() {
+        let mut d = analyze(&walk(&[Some(1000.0)]), &pct(1.0));
+        d.allow_empty = true;
+        d.accept(&flags(&["startupp"]), &BTreeMap::new());
+        assert!(d.nothing_compared());
+        let md = markdown(&d, false);
+        assert!(md.contains("Nothing was compared"), "{md}");
+        assert!(
+            md.contains("so nothing was accepted: `startupp` (`--accept`)"),
             "{md}"
         );
     }
