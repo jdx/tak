@@ -263,16 +263,22 @@ pub fn rev_list(rev: &str, n: usize) -> Result<Vec<String>> {
 /// `log.showSignature` would otherwise put GPG output on stdout, between the
 /// lines this parses. `--end-of-options` and `--` keep the range a revision
 /// whatever it looks like.
-pub fn trailers(base: &str, head: &str, key: &str) -> Result<String> {
+///
+/// `first_parent` narrows the range to the trunk's own commits, for `tak
+/// detect`: after a merge, what landed on main is the commit on its
+/// first-parent line — the squash, the rebased commit, or the merge itself —
+/// and that is the history a main-branch check has reviewed as merged. A
+/// branch commit behind a merge's second parent was only ever gated on its
+/// pull request.
+pub fn trailers(base: &str, head: &str, key: &str, first_parent: bool) -> Result<String> {
     let format = format!("--format=%H%x00%(trailers:key={key},valueonly,unfold,separator=%x2C)");
-    git(&[
-        "log",
-        "--no-show-signature",
-        &format,
-        "--end-of-options",
-        &format!("{base}..{head}"),
-        "--",
-    ])
+    let range = format!("{base}..{head}");
+    let mut args = vec!["log", "--no-show-signature"];
+    if first_parent {
+        args.push("--first-parent");
+    }
+    args.extend([format.as_str(), "--end-of-options", &range, "--"]);
+    git(&args)
 }
 
 /// One commit on a first-parent walk, with whatever tak recorded on it.
@@ -309,9 +315,14 @@ const LOG_FIELDS: usize = 4;
 /// whatever refs `core.notesRef` and `notes.displayRef` configure, so only this
 /// ref's notes reach `%N` and are parsed as records — explicitly, rather than
 /// relying on an explicit `--notes=<ref>` happening to replace the defaults.
-pub fn log(rev: &str) -> Result<Vec<Logged>> {
+///
+/// `max` bounds the walk to the newest `max` commits, for a caller that has to
+/// stop somewhere on a trunk of hundreds of thousands of commits and needs to
+/// know whether it did.
+pub fn log(rev: &str, max: Option<usize>) -> Result<Vec<Logged>> {
     let notes = format!("--notes={NOTES_REF}");
-    let out = git(&[
+    let limit = max.map(|n| format!("--max-count={n}"));
+    let mut args = vec![
         "log",
         "-z",
         "--first-parent",
@@ -319,10 +330,12 @@ pub fn log(rev: &str) -> Result<Vec<Logged>> {
         "--no-notes",
         &notes,
         "--format=%H%x00%cI%x00%s%x00%N",
-        "--end-of-options",
-        rev,
-        "--",
-    ])?;
+    ];
+    if let Some(limit) = &limit {
+        args.push(limit);
+    }
+    args.extend(["--end-of-options", rev, "--"]);
+    let out = git(&args)?;
     Ok(parse_log(&out))
 }
 

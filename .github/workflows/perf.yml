@@ -203,3 +203,80 @@ jobs:
             git fetch --quiet "$remote" +refs/notes/tak:refs/notes/tak-remote
             git notes --ref=tak merge -s cat_sort_uniq refs/notes/tak-remote
           done
+
+  detect:
+    name: Detect regressions that landed
+    # After publish, so the measurement is in refs/notes/tak whether or not this
+    # fails, and so the walk sees this commit's point beside the earlier ones.
+    #
+    # Today this job cannot fail on a step. Both of tak's benchmarks are
+    # report-only in tak.toml (`gate = { enabled = false }`, reasons there), and
+    # tak detect uses the same per-benchmark gates as tak compare. What it does
+    # now is put steps, ranges and drift in the job summary, and fail if the
+    # published measurement cannot be read back. It starts failing on steps
+    # the day a benchmark in tak.toml is gated, with no change here.
+    needs: publish
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Read-only: it fetches notes from this public repository and writes
+    # nothing back, so it gets no token beyond the default read scope.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # tak detect walks the first-parent commits between recorded points;
+          # the default one-commit checkout leaves it nothing to walk.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The binary this workflow built and measured from this commit, so the
+      # check is the same tak that produced the numbers.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tak-perf-binary
+          path: /tmp/tak-build
+
+      - name: Install tak
+        # Artifacts drop the executable bit.
+        run: chmod +x /tmp/tak-build/tak
+
+      # Proof this job has the data before anything may pass for want of it.
+      # tak detect treats a failed notes refresh as "offline" and carries on
+      # with what is local, which in this fresh checkout is nothing — and with
+      # --allow-empty below that would pass without examining anything. So the
+      # fetch must succeed, and the commit publish just wrote must carry an
+      # instruction count that tak itself can read.
+      #
+      # Read through `tak history`, not by grepping the note: it goes through
+      # the same parser detect uses, which skips malformed lines and records
+      # from a newer schema, so text that merely contains "instructions" does
+      # not count. This couples the check to history's output format — one line
+      # per record with `instructions=<count>`, or `instructions=-` when there
+      # is none. If that format changes, change this pattern with it.
+      - name: Fetch the published measurements
+        run: |
+          git fetch --quiet origin '+refs/notes/tak:refs/notes/tak'
+          history=$(/tmp/tak-build/tak history "$GITHUB_SHA")
+          echo "$history"
+          if ! grep -Eq 'instructions=[0-9]' <<<"$history"; then
+            echo "::error::tak reads no instruction counts for $GITHUB_SHA in refs/notes/tak"
+            exit 1
+          fi
+
+      # --allow-empty, deliberately, and only after the step above. TAK_RUNNER
+      # embeds the GitHub image and Rust versions, so the runner class changes
+      # on routine image and toolchain updates, and the first run after each
+      # has no earlier point in its new series. Failing main for that would
+      # make a red perf check routine, which is the fastest way to teach
+      # everyone to ignore it. Every other way to compare nothing is ruled out
+      # first: fetch-depth: 0 gives the walk its history, and the step above
+      # proves this commit's instruction counts are here. What is left for the
+      # flag to waive is a new runner class. A step onto this commit beyond
+      # an enabled gate still fails; see the note at the top of this job for
+      # why there are none today.
+      - name: Detect
+        run: |
+          set -o pipefail
+          /tmp/tak-build/tak detect --allow-empty | tee -a "$GITHUB_STEP_SUMMARY"

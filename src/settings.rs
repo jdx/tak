@@ -88,7 +88,7 @@ pub struct Settings {
     )]
     pub env_allow: Vec<String>,
 
-    /// How much an instruction count may rise before `tak compare` fails.
+    /// How much an instruction count may rise before `tak compare` or `tak detect` fails.
     ///
     /// A percentage of the base measurement. Only instruction counts are gated. Wall
     /// clock is reported and never gated: on the same hardware it moves 4-20% run to
@@ -118,7 +118,8 @@ pub struct Settings {
     )]
     pub gate_pct: f64,
 
-    /// Whether `tak compare` honours `Tak-Accept:` trailers on the commits it compares.
+    /// Whether `tak compare` and `tak detect` honour `Tak-Accept:` trailers on the commits
+    /// they compare.
     ///
     /// Off by default, because of who writes those trailers. A trailer is part of a
     /// commit message, and the commits `tak compare` reads are the change being gated —
@@ -150,8 +151,8 @@ pub struct Settings {
     )]
     pub accept_trailers: bool,
 
-    /// How many instructions a count may rise by before `tak compare` fails, whatever
-    /// the percentage.
+    /// How many instructions a count may rise by before `tak compare` or `tak detect` fails,
+    /// whatever the percentage.
     ///
     /// A regression has to exceed both this and `gate_pct`. A percentage alone serves
     /// small benchmarks badly: on a 450k-instruction startup check, 1% is 4,500
