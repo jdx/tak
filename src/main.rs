@@ -2874,6 +2874,11 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
             }
             Outcome::MeasureFailed(bench) => {
                 measure_failed.push(short);
+                // It built, so a build failure remembered from before — which
+                // `--force` retried — no longer holds. Kept, it would pass
+                // over every other benchmark of the commit from now on. Even
+                // under an interrupt: the build did finish.
+                failures.recorded(&p.sha, &[])?;
                 if !tak_cli::worktree::stopping() {
                     failures.add(&p.sha, tak_cli::worktree::Failure::Measure(bench))?;
                 }
@@ -2971,11 +2976,15 @@ fn backfill_commit(
     // Counted as a failed build: which paths a commit's tree holds never
     // changes, so this would fail the same way next time, and retrying it
     // first on every run would stop `--limit` from reaching older commits.
-    for dir in [Some(&root), build.dir.as_ref()].into_iter().flatten() {
-        if let Err(e) = wt.check_contains(dir) {
-            println!("  build failed — skipped: {e:#}");
-            return Ok(Outcome::BuildFailed);
-        }
+    // The build's own program too, when it is one of the tree's files.
+    let contained = [Some(&root), build.dir.as_ref()]
+        .into_iter()
+        .flatten()
+        .try_for_each(|dir| wt.check_contains(dir))
+        .and_then(|()| check_program(&build.cmd, &wt));
+    if let Err(e) = contained {
+        println!("  build failed — skipped: {e:#}");
+        return Ok(Outcome::BuildFailed);
     }
     match backfill::run_build(&build, &scratch.join("build.log")) {
         Ok(took) => println!("  built in {:.1}s", took.as_secs_f64()),
@@ -3114,6 +3123,11 @@ fn check_inputs(subjects: &[Subject], wt: &tak_cli::worktree::Worktree) -> Optio
 
 /// Whether a subject's `dir` and program, where they are inside the checkout
 /// and exist, still resolve inside it with symlinks followed.
+///
+/// Every program tak runs for the subject counts, not only `cmd`: `setup`,
+/// `prepare`, `check` and `version_cmd` are the old tree's code as much as
+/// the subject is, and a committed symlink at one of their paths would run
+/// something from outside the commit just the same.
 fn check_contained(s: &Subject, wt: &tak_cli::worktree::Worktree) -> Result<()> {
     if let Some(d) = &s.dir
         && d.starts_with(wt.path())
@@ -3121,7 +3135,23 @@ fn check_contained(s: &Subject, wt: &tak_cli::worktree::Worktree) -> Result<()> 
     {
         wt.check_contains(d)?;
     }
-    let program = Path::new(&s.cmd[0]);
+    let programs = [
+        Some(&s.cmd),
+        s.setup.as_ref(),
+        s.prepare.as_ref(),
+        s.check.as_ref(),
+        s.version_cmd.as_ref(),
+    ];
+    for argv in programs.into_iter().flatten() {
+        check_program(argv, wt)?;
+    }
+    Ok(())
+}
+
+/// A program path inside the checkout that exists must resolve inside it.
+/// One on PATH, or named outside the checkout, is left alone.
+fn check_program(argv: &[String], wt: &tak_cli::worktree::Worktree) -> Result<()> {
+    let program = Path::new(&argv[0]);
     if program.is_absolute()
         && program.starts_with(wt.path())
         && let Some(found) = spawned_path(program)

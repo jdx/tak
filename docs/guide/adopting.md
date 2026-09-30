@@ -543,19 +543,22 @@ benchmarks are. A measurement that failed for a reason that does not repeat, suc
 ends with no record at all.
 
 Build output goes to a file in the temporary directory, and a failed build shows its last 20
-lines. `[build].dir`, and a benchmark's `dir` or program inside the checkout, must resolve
-inside the checkout once symlinks are followed. The old tree's own code runs during
-measurement, so they are checked again after every `setup` of a benchmark has run and before
-every sample, after its `prepare`. A commit with a symlink at one of those paths that points
-elsewhere is reported and not recorded. The check before each sample is untimed and took
-about 17µs on a Linux host.
+lines. Every path inside the checkout that tak builds or runs with must resolve inside it once
+symlinks are followed. That covers `[build].dir` and the build's program, and a benchmark's
+`dir` and the programs of its `cmd`, `setup`, `prepare`, `check` and `version_cmd`. The old
+tree's own code runs during measurement, so they are checked again after every `setup` of a
+benchmark has run, before every sample (after its `prepare`), and before every `check`. A commit
+with a symlink at one of those paths that points elsewhere is reported and not recorded. The
+check before each sample is untimed and took about 17µs on a Linux host.
 
 The checkouts are removed when tak finishes, fails, or is stopped with Ctrl-C, SIGTERM or
 SIGHUP, and nothing is recorded or remembered for the commit that was in progress. On Unix,
-during a backfill, the build and each measured command run in a process group of their own,
-and tak kills the one running before it removes the checkout. That covers a terminal's Ctrl-C
-and a signal sent to tak alone, as when CI cancels a job, and it never signals anything else,
-such as the rest of a `tak backfill … | tee log` pipeline. On Windows, and if a subject's
+during a backfill, the build and each measured command run in a process group of their own.
+Before tak removes the checkout, it kills the one running, and any group an earlier command
+left something running in, such as a server a `setup` started. While the backfill runs, such a
+process is left alone, as `tak run` leaves it. That covers a terminal's Ctrl-C and a signal
+sent to tak alone, as when CI cancels a job, and it never signals anything else, such as the
+rest of a `tak backfill … | tee log` pipeline. On Windows, and if a subject's
 `version_cmd` is running when the signal arrives, an interrupted run can leave its checkout in
 the temporary directory. Once that directory is deleted, the next backfill runs
 `git worktree prune`, which clears git's record of it.

@@ -132,14 +132,15 @@ pub fn use_own_groups() {
     tracked::OWN_GROUPS.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// Kill the measured command running now, and any started after this, with
-/// its whole process group. Only effective after [`use_own_groups`]: a
-/// command in tak's own group is left alone.
+/// Kill the measured command running now, any started after this, and
+/// whatever earlier ones left running, each with its whole process group.
+/// Only effective after [`use_own_groups`]: a command in tak's own group is
+/// left alone.
 #[cfg(unix)]
 pub fn stop_running() {
     use std::sync::atomic::Ordering::SeqCst;
     tracked::STOPPED.store(true, SeqCst);
-    tracked::kill(tracked::RUNNING.load(SeqCst));
+    tracked::kill_all();
 }
 
 /// The one measured command running at a time — samples, setup, prepare,
@@ -164,8 +165,52 @@ mod tracked {
         }
     }
 
+    /// Groups whose leader has exited but where something it started is
+    /// still running: a server a `setup` started on purpose, a daemon a tool
+    /// leaves behind. Left alone while the backfill runs, as `tak run` leaves
+    /// them, and killed with the running command on interrupt, since the
+    /// checkout they run in is about to be deleted.
+    static LEFT: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+
+    /// The running command has been reaped. Called after the clock stops,
+    /// since checking its group costs a syscall per remembered group.
+    ///
+    /// A group id is only kept while the group has a member, since a group
+    /// id cannot be reused until then, and each call drops the ones that
+    /// have emptied. A group that empties between the last call and an
+    /// interrupt leaves a window in which its id could be reused, which
+    /// would take the kernel handing out that exact pid again first.
     pub(super) fn finished() {
-        RUNNING.store(0, SeqCst);
+        let pgid = RUNNING.swap(0, SeqCst);
+        if !OWN_GROUPS.load(SeqCst) {
+            return;
+        }
+        let mut left = LEFT.lock().unwrap_or_else(|e| e.into_inner());
+        left.retain(|g| alive(*g));
+        if pgid > 0 && alive(pgid) {
+            left.push(pgid);
+        }
+    }
+
+    /// Kill the running command's group and every group left behind.
+    pub(super) fn kill_all() {
+        kill(RUNNING.load(SeqCst));
+        // A poisoned lock still holds the list; the interrupt must not skip it.
+        let left = LEFT.lock().unwrap_or_else(|e| e.into_inner());
+        for g in left.iter() {
+            kill(*g);
+        }
+    }
+
+    #[cfg(unix)]
+    fn alive(pgid: i32) -> bool {
+        // SAFETY: signal 0 only checks that the group exists.
+        unsafe { libc::killpg(pgid, 0) == 0 }
+    }
+
+    #[cfg(not(unix))]
+    fn alive(_pgid: i32) -> bool {
+        false
     }
 
     #[cfg(unix)]
@@ -224,8 +269,15 @@ fn time_once(cmd: &[String], site: &Site, ok: &[i32]) -> Result<Sample> {
     c.stdout(Stdio::null()).stderr(Stdio::null());
     let bin = &cmd[0];
     let start = Instant::now();
-    let status = run_tracked(&mut c).with_context(|| format!("failed to spawn `{bin}`"))?;
+    let mut child = c
+        .spawn()
+        .with_context(|| format!("failed to spawn `{bin}`"))?;
+    // One atomic store inside the timed window; see `use_own_groups`.
+    tracked::started(child.id());
+    let status = child.wait();
     let ms = start.elapsed().as_secs_f64() * 1000.0;
+    tracked::finished();
+    let status = status.with_context(|| format!("failed to wait for `{bin}`"))?;
     let exit_code = accepted(bin, status, ok, "")?;
     Ok(Sample { ms, exit_code })
 }
@@ -427,8 +479,9 @@ pub trait Observer {
     }
     /// A sample of `subject` is about to be timed: its `prepare`, if any, has
     /// run, and the clock that times the command has not started. Asked
-    /// before every sample, warmups included, since any subject's `prepare`
-    /// or the command itself can change the paths the next one runs in. An
+    /// before every sample, warmups included, and again before its `check`,
+    /// since any subject's `prepare` or the command itself can change the
+    /// paths the next step runs with. Never inside the timed window. An
     /// error drops the subject.
     fn before_run(&mut self, _subject: usize) -> Result<()> {
         Ok(())
@@ -659,7 +712,12 @@ fn run_slots(
         // Only after the clock has stopped: the check is outside the
         // measurement, however long it takes.
         let checked = match (&taken, &s.check) {
-            (Ok(_), Some(check)) if slot.timed => check_once(check, &site).map(Some),
+            // Asked again first: the sample just run can have changed the
+            // paths the check runs with.
+            (Ok(_), Some(check)) if slot.timed => observer
+                .before_run(slot.subject)
+                .and_then(|()| check_once(check, &site))
+                .map(Some),
             _ => Ok(None),
         };
         match taken.and_then(|sample| checked.map(|c| (sample, c))) {

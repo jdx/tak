@@ -1076,3 +1076,156 @@ fn a_prepare_cannot_move_its_dir_out_of_the_checkout() {
         "the sample ran outside the checkout"
     );
 }
+
+/// A build failure retried with `--force` that then builds, and fails to
+/// measure one benchmark, no longer counts as a build failure: the next plain
+/// run still measures the commit's other benchmarks.
+#[test]
+fn a_forced_retry_that_builds_clears_the_build_failure() {
+    let repo = Repo::new();
+    history(&repo);
+    let flag = repo.tmp.parent().unwrap().join("builds-now");
+    repo.write(
+        "tak.toml",
+        &format!(
+            "[build]\ncmd = [\"test\", \"-e\", \"{}\"]\n\
+             [bench.a]\ncmd = [\"sh\", \"-c\", \"exit 1\"]\nruns = 1\nwarmup = 0\n\
+             [bench.b]\ncmd = [\"sh\", \"-c\", \"exit 0\"]\nruns = 1\nwarmup = 0\n",
+            flag.display()
+        ),
+    );
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let range = "main~1..main";
+
+    let first = repo.tak(&["--commits", range]);
+    assert!(
+        stdout(&first).contains("build failed"),
+        "{}",
+        stdout(&first)
+    );
+    std::fs::write(&flag, "").unwrap();
+    let forced = repo.tak(&["--commits", range, "--force", "--bench", "a"]);
+    assert!(
+        stdout(&forced).contains("measurement failed"),
+        "{}",
+        both(&forced)
+    );
+    let plain = repo.tak(&["--commits", range]);
+    assert!(plain.status.success(), "{}", both(&plain));
+    let benches: Vec<String> = repo.notes(&head).into_iter().map(|r| r.bench).collect();
+    assert_eq!(benches, ["b"]);
+}
+
+/// A command can leave something running in its process group — a server a
+/// `setup` starts on purpose. tak leaves it alone while the backfill runs,
+/// and stops it on interrupt with the command running then, since the
+/// checkout it runs in is about to be deleted.
+#[test]
+fn an_interrupt_stops_what_an_earlier_command_left_running() {
+    let repo = Repo::new();
+    let helper = repo.tmp.parent().unwrap().join("helper.pid");
+    let (mut child, subject, _) = start_slow_piped(
+        &repo,
+        |pid| {
+            format!(
+                "[build]\ncmd = [\"true\"]\n\
+                 [bench.startup]\ncmd = [\"sh\", \"-c\", \"{pid}\"]\nruns = 1\nwarmup = 0\n\
+                 setup = [\"sh\", \"-c\", \"sleep 30 & echo $! > {}\"]\n",
+                helper.display()
+            )
+        },
+        false,
+    );
+    let helper: i32 = std::fs::read_to_string(&helper)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // SAFETY: signal 0 only checks that the process exists.
+    assert_eq!(unsafe { libc::kill(helper, 0) }, 0, "the helper is running");
+    // SAFETY: signals the process this test spawned.
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    let status = wait_for(&mut child);
+    assert_eq!(status.code(), Some(143), "{status:?}");
+    assert!(wait_gone(subject), "the measured command outlived tak");
+    assert!(wait_gone(helper), "what setup left running outlived tak");
+    assert_eq!(repo.worktrees(), 1);
+}
+
+/// `prepare`, `check`, `version_cmd` and `setup` run from the checkout as
+/// much as `cmd` does, so a committed symlink at one of their paths is
+/// refused the same way.
+#[test]
+fn every_program_from_the_checkout_is_checked() {
+    let outside = |repo: &Repo| {
+        let p = repo.tmp.parent().unwrap().join("outside-tool");
+        std::fs::write(&p, "#!/bin/sh\ntouch \"$0.ran\"\n").unwrap();
+        make_executable(&p);
+        p
+    };
+    for key in ["prepare", "check", "version_cmd", "setup"] {
+        let repo = Repo::new();
+        repo.write(".gitignore", "tak.toml\n");
+        repo.git(&["add", ".gitignore"]);
+        let base = repo.commit_tool(Some("v1"));
+        let target = outside(&repo);
+        std::os::unix::fs::symlink(&target, repo.dir.join("helper")).unwrap();
+        repo.git(&["add", "helper"]);
+        repo.commit_tool(Some("v2"));
+        repo.write(
+            "tak.toml",
+            &format!(
+                "[build]\ncmd = [\"true\"]\n\
+                 [bench.startup]\ncmd = [\"sh\", \"-c\", \"exit 0\"]\n{key} = [\"./helper\"]\n\
+                 runs = 1\nwarmup = 0\n"
+            ),
+        );
+        let out = repo.tak(&["--commits", &format!("{base}..main")]);
+        assert!(
+            both(&out).contains("helper leads outside the checkout"),
+            "{key}: {}",
+            both(&out)
+        );
+        assert!(
+            !target.with_extension("ran").exists()
+                && !repo.tmp.parent().unwrap().join("outside-tool.ran").exists(),
+            "{key}: the program outside the checkout ran"
+        );
+    }
+}
+
+/// The build's own program, when it is one of the tree's files, likewise.
+#[test]
+fn a_build_program_symlinked_out_of_the_checkout_is_refused() {
+    let repo = Repo::new();
+    repo.write(".gitignore", "tak.toml\n");
+    repo.git(&["add", ".gitignore"]);
+    let base = repo.commit_tool(Some("v1"));
+    let target = repo.tmp.parent().unwrap().join("outside-build");
+    std::fs::write(&target, "#!/bin/sh\ntouch \"$0.ran\"\n").unwrap();
+    make_executable(&target);
+    std::os::unix::fs::symlink(&target, repo.dir.join("build.sh")).unwrap();
+    repo.git(&["add", "build.sh"]);
+    let linked = repo.commit_tool(Some("v2"));
+    repo.write(
+        "tak.toml",
+        "[build]\ncmd = [\"./build.sh\"]\n[bench.startup]\ncmd = [\"./tool.sh\"]\n",
+    );
+    let out = repo.tak(&["--commits", &format!("{base}..main")]);
+    assert!(
+        stdout(&out).contains("build.sh leads outside the checkout"),
+        "{}",
+        both(&out)
+    );
+    assert!(
+        !repo
+            .tmp
+            .parent()
+            .unwrap()
+            .join("outside-build.ran")
+            .exists()
+    );
+    assert!(repo.notes(&linked).is_empty());
+}

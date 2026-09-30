@@ -277,8 +277,9 @@ impl FailedCommits {
         self.rewrite(|lines, _| lines.push(line))
     }
 
-    /// `benches` were recorded at `sha`: forget its build failure and theirs.
-    /// Failures of benchmarks this run passed over stay.
+    /// `sha` built, and `benches` were recorded there (none, when measuring
+    /// failed): forget its build failure and theirs. Failures of other
+    /// benchmarks stay.
     pub fn recorded(&mut self, sha: &str, benches: &[String]) -> Result<()> {
         let Some(k) = self.known.get_mut(sha) else {
             return Ok(());
