@@ -93,7 +93,7 @@ fn command(argv: &[String], site: &Site) -> Result<Command> {
 
 /// Spawn `c`, wait for it, and keep its process group known to
 /// [`stop_running`] meanwhile. `Command::status` split in two: the same
-/// stdio defaults, and only an atomic store between the spawn and the wait.
+/// stdio defaults, and only an uncontended lock between the spawn and the wait.
 fn run_tracked(c: &mut Command) -> std::io::Result<std::process::ExitStatus> {
     let mut child = c.spawn()?;
     tracked::started(child.id());
@@ -146,59 +146,104 @@ pub fn stop_running() {
 /// The one measured command running at a time — samples, setup, prepare,
 /// check and valgrind all run one after another — as its process group.
 mod tracked {
-    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering::SeqCst};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 
     pub(super) static OWN_GROUPS: AtomicBool = AtomicBool::new(false);
-    pub(super) static RUNNING: AtomicI32 = AtomicI32::new(0);
     pub(super) static STOPPED: AtomicBool = AtomicBool::new(false);
+
+    /// Every group an interrupt must kill, behind one lock.
+    ///
+    /// One lock for both, so that moving a group from running to left
+    /// behind is a single step. With the running group in an atomic and the
+    /// others in a list, `finished` cleared the one before adding to the
+    /// other, and an interrupt landing between the two found the group in
+    /// neither: its leftover process then outlived the checkout it ran in.
+    static GROUPS: Mutex<Groups> = Mutex::new(Groups::new());
+
+    /// The state behind [`GROUPS`], with the transitions as plain methods so
+    /// they can be tested without real processes.
+    #[derive(Debug, Default, PartialEq)]
+    pub(super) struct Groups {
+        /// The group of the command running now, or 0.
+        running: i32,
+        /// Groups whose leader has exited but where something it started is
+        /// still running: a server a `setup` started on purpose, a daemon a
+        /// tool leaves behind. Left alone while the backfill runs, as `tak
+        /// run` leaves them, and killed with the running command on
+        /// interrupt, since the checkout they run in is about to be deleted.
+        left: Vec<i32>,
+    }
+
+    impl Groups {
+        pub(super) const fn new() -> Groups {
+            Groups {
+                running: 0,
+                left: Vec::new(),
+            }
+        }
+
+        pub(super) fn start(&mut self, pgid: i32) {
+            self.running = pgid;
+        }
+
+        /// The running command has been reaped. Its group moves to `left`
+        /// while it still has members, and groups that have emptied are
+        /// dropped: a group id is only kept while it cannot be reused. A
+        /// group that empties between this and an interrupt leaves a window
+        /// in which its id could be reused, which would take the kernel
+        /// handing out that exact pid again first.
+        pub(super) fn finish(&mut self, alive: impl Fn(i32) -> bool) {
+            self.left.retain(|g| alive(*g));
+            if self.running > 0 && alive(self.running) {
+                self.left.push(self.running);
+            }
+            self.running = 0;
+        }
+
+        /// Every group an interrupt kills now.
+        pub(super) fn targets(&self) -> Vec<i32> {
+            std::iter::once(self.running)
+                .filter(|g| *g > 0)
+                .chain(self.left.iter().copied())
+                .collect()
+        }
+    }
+
+    fn groups() -> std::sync::MutexGuard<'static, Groups> {
+        // A poisoned lock still holds the groups; an interrupt must not
+        // skip them.
+        GROUPS.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// `pid` leads its own group. If [`super::stop_running`] already ran it
     /// may have looked before this was stored, so the group is killed here:
     /// each side stores before it loads, all `SeqCst`, so one of them acts.
+    /// The uncontended lock this takes is inside the timed window, and costs
+    /// tens of nanoseconds against a fork and exec.
     pub(super) fn started(pid: u32) {
         if !OWN_GROUPS.load(SeqCst) {
             return;
         }
-        RUNNING.store(pid as i32, SeqCst);
+        groups().start(pid as i32);
         if STOPPED.load(SeqCst) {
             kill(pid as i32);
         }
     }
 
-    /// Groups whose leader has exited but where something it started is
-    /// still running: a server a `setup` started on purpose, a daemon a tool
-    /// leaves behind. Left alone while the backfill runs, as `tak run` leaves
-    /// them, and killed with the running command on interrupt, since the
-    /// checkout they run in is about to be deleted.
-    static LEFT: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
-
-    /// The running command has been reaped. Called after the clock stops,
-    /// since checking its group costs a syscall per remembered group.
-    ///
-    /// A group id is only kept while the group has a member, since a group
-    /// id cannot be reused until then, and each call drops the ones that
-    /// have emptied. A group that empties between the last call and an
-    /// interrupt leaves a window in which its id could be reused, which
-    /// would take the kernel handing out that exact pid again first.
+    /// The running command has been reaped; see [`Groups::finish`]. Called
+    /// after the clock stops, since checking the groups costs a syscall each.
     pub(super) fn finished() {
-        let pgid = RUNNING.swap(0, SeqCst);
-        if !OWN_GROUPS.load(SeqCst) {
-            return;
-        }
-        let mut left = LEFT.lock().unwrap_or_else(|e| e.into_inner());
-        left.retain(|g| alive(*g));
-        if pgid > 0 && alive(pgid) {
-            left.push(pgid);
+        if OWN_GROUPS.load(SeqCst) {
+            groups().finish(alive);
         }
     }
 
-    /// Kill the running command's group and every group left behind.
+    /// Kill the running command's group and every group left behind, under
+    /// the same lock `finished` moves them with.
     pub(super) fn kill_all() {
-        kill(RUNNING.load(SeqCst));
-        // A poisoned lock still holds the list; the interrupt must not skip it.
-        let left = LEFT.lock().unwrap_or_else(|e| e.into_inner());
-        for g in left.iter() {
-            kill(*g);
+        for g in groups().targets() {
+            kill(g);
         }
     }
 
@@ -225,6 +270,38 @@ mod tracked {
 
     #[cfg(not(unix))]
     pub(super) fn kill(_pgid: i32) {}
+
+    #[cfg(test)]
+    mod tests {
+        use super::Groups;
+
+        /// A group is always somewhere an interrupt looks: running while its
+        /// command runs, left behind once it exits with a member still there,
+        /// and forgotten only when it is empty.
+        #[test]
+        fn a_group_is_never_untracked_while_it_has_members() {
+            let mut g = Groups::new();
+            assert!(g.targets().is_empty());
+            g.start(10);
+            assert_eq!(g.targets(), [10]);
+
+            // Exits, with a helper still in its group.
+            g.finish(|p| p == 10);
+            assert_eq!(g.targets(), [10]);
+            g.start(20);
+            assert_eq!(g.targets(), [20, 10]);
+
+            // 20 exits empty; 10's helper is still there.
+            g.finish(|p| p == 10);
+            assert_eq!(g.targets(), [10]);
+
+            // 10's helper exits too, and is forgotten at the next finish.
+            g.start(30);
+            g.finish(|_| false);
+            assert!(g.targets().is_empty());
+            assert_eq!(g, Groups::new());
+        }
+    }
 }
 
 /// One successful run of a subject's timed command.
@@ -272,7 +349,7 @@ fn time_once(cmd: &[String], site: &Site, ok: &[i32]) -> Result<Sample> {
     let mut child = c
         .spawn()
         .with_context(|| format!("failed to spawn `{bin}`"))?;
-    // One atomic store inside the timed window; see `use_own_groups`.
+    // An uncontended lock inside the timed window; see `tracked::started`.
     tracked::started(child.id());
     let status = child.wait();
     let ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -614,12 +691,12 @@ pub trait Observer {
     fn set_up(&mut self, _subject: usize) -> Result<()> {
         Ok(())
     }
-    /// A sample of `subject` is about to be timed: its `prepare`, if any, has
-    /// run, and the clock that times the command has not started. Asked
-    /// before every sample, warmups included, and again before its `check`,
-    /// since any subject's `prepare` or the command itself can change the
-    /// paths the next step runs with. Never inside the timed window. An
-    /// error drops the subject.
+    /// A step of `subject` that runs from its paths is about to start: its
+    /// setup, the prepare before a sample, the sample itself (after that
+    /// prepare), or the check after it. Asked before each of them, warmups
+    /// included, since any earlier step, of this subject or another, can
+    /// change the paths the next one runs with. Never inside the timed
+    /// window. An error drops the subject.
     fn before_run(&mut self, _subject: usize) -> Result<()> {
         Ok(())
     }
@@ -751,7 +828,12 @@ pub fn interleaved_with_versions(
             env: &s.env,
             settings,
         };
-        if let Err(e) = required("setup", setup, &site) {
+        // Before as well as after: an earlier subject's setup may have
+        // changed the paths this one runs with.
+        if let Err(e) = observer
+            .before_run(i)
+            .and_then(|()| required("setup", setup, &site))
+        {
             results[i] = Err(e);
             observer.dropped(i);
         }
@@ -838,11 +920,21 @@ fn run_slots(
             settings,
         };
         observer.started(slot.subject);
+        // Before the prepare as well as after it, and outside `began`, which
+        // sizes auto runs: the previous sample, of any subject, may have
+        // changed the paths this prepare runs with.
+        let vetted = if s.prepare.is_some() {
+            observer.before_run(slot.subject)
+        } else {
+            Ok(())
+        };
         let began = Instant::now();
-        let taken = s
-            .prepare
-            .as_deref()
-            .map_or(Ok(()), |p| prepare_once(p, &site))
+        let taken = vetted
+            .and_then(|()| {
+                s.prepare
+                    .as_deref()
+                    .map_or(Ok(()), |p| prepare_once(p, &site))
+            })
             .and_then(|()| observer.before_run(slot.subject))
             .and_then(|()| time_once(&s.cmd, &site, &s.ok_exit_codes));
         let elapsed = began.elapsed();
@@ -1814,7 +1906,10 @@ fn count(
     };
     let mut samples: Vec<u64> = Vec::with_capacity(COUNTER_RUNS as usize);
     for run in 0..COUNTER_RUNS {
+        // Before each step that runs from the subject's paths, as for a
+        // timed sample: the previous run may have changed them.
         if let Some(p) = prepare {
+            vet()?;
             prepare_once(p, site)?;
         }
         vet()?;

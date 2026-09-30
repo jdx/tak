@@ -1354,3 +1354,83 @@ fn a_build_program_symlinked_out_of_the_checkout_is_refused() {
     );
     assert!(repo.notes(&linked).is_empty());
 }
+
+/// A two-commit history whose newest tree has a `wx` directory, and a
+/// directory outside the repository for a symlink to point at.
+fn history_with_wx(repo: &Repo) -> PathBuf {
+    repo.write(".gitignore", "tool\ntak.toml\n");
+    repo.write("wx/keep", "");
+    repo.write("wy/keep", "");
+    repo.git(&["add", ".gitignore", "wx", "wy"]);
+    repo.commit_tool(Some("v1"));
+    repo.commit_tool(Some("v2"));
+    let outside = repo.tmp.parent().unwrap().join("outside-dir");
+    std::fs::create_dir_all(&outside).unwrap();
+    outside
+}
+
+/// A sample can swap its own `dir` for a symlink, and the next sample's
+/// `prepare` runs there before the sample does. The check runs before that
+/// prepare too, not only after it.
+#[test]
+fn a_prepare_does_not_run_through_a_dir_the_last_sample_moved() {
+    let repo = Repo::new();
+    let outside = history_with_wx(&repo);
+    // The path goes in as `$1`, not spliced into the script, so a TMPDIR
+    // with spaces cannot split it; `{:?}` quotes it for TOML.
+    repo.write(
+        "tak.toml",
+        &format!(
+            "[build]\ncmd = [\"true\"]\n\
+             [bench.fixture]\n\
+             cmd = [\"sh\", \"-c\", \"d=$PWD && cd / && rm -rf \\\"$d\\\" && ln -s \\\"$1\\\" \\\"$d\\\"\", \"sh\", {:?}]\n\
+             dir = \"wx\"\nprepare = [\"sh\", \"-c\", \"touch prepared\"]\nruns = 2\nwarmup = 0\n",
+            outside.display().to_string()
+        ),
+    );
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let out = repo.tak(&["--commits", "HEAD~1..HEAD"]);
+    assert!(
+        both(&out).contains("wx leads outside the checkout"),
+        "{}",
+        both(&out)
+    );
+    assert!(
+        !outside.join("prepared").exists(),
+        "the second prepare ran outside the checkout"
+    );
+    assert!(repo.notes(&head).is_empty(), "the commit was recorded");
+}
+
+/// Every subject's setup runs before any sample, so an earlier setup can
+/// move a path a later one acts through. Each setup is checked before it
+/// runs, not only once all of them have.
+#[test]
+fn a_setup_does_not_run_through_a_dir_an_earlier_setup_moved() {
+    let repo = Repo::new();
+    let outside = history_with_wx(&repo);
+    repo.write(
+        "tak.toml",
+        &format!(
+            "[build]\ncmd = [\"true\"]\n\
+             [bench.cmp]\nruns = 1\nwarmup = 0\n\
+             [bench.cmp.subject.x]\ncmd = [\"true\"]\n\
+             setup = [\"sh\", \"-c\", \"rm -rf wy && ln -s \\\"$1\\\" wy\", \"sh\", {:?}]\n\
+             [bench.cmp.subject.y]\ncmd = [\"true\"]\ndir = \"wy\"\n\
+             setup = [\"sh\", \"-c\", \"touch wy/set-up\"]\n",
+            outside.display().to_string()
+        ),
+    );
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let out = repo.tak(&["--commits", "HEAD~1..HEAD"]);
+    assert!(
+        both(&out).contains("wy leads outside the checkout"),
+        "{}",
+        both(&out)
+    );
+    assert!(
+        !outside.join("set-up").exists(),
+        "y's setup ran through the moved directory"
+    );
+    assert!(repo.notes(&head).is_empty(), "the commit was recorded");
+}
