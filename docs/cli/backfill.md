@@ -3,24 +3,22 @@
 
 - **Usage:** `tak backfill [FLAGS] [-- ARGS]…`
 
-Benchmark published release binaries to bootstrap history.
+Benchmark published release binaries, or build and benchmark past commits, to bootstrap history.
 
-A new adopter's first chart is empty. Rather than rebuilding a project at a hundred historical commits, download what it already published.
+By default, downloads the release binaries a project already published and measures one command against each. With `--commits`, checks out each first-parent commit in a range, runs tak.toml's `[build]` there, and measures the benchmarks tak.toml declares.
 
 ## Arguments
 - **`[-- ARGS]…`** — Arguments passed to the downloaded binary, after `--`. Defaults to `--version`, which every CLI answers cheaply.
 
 ## Flags
+- **`--commits <RANGE>`** — Build and measure the first-parent commits in RANGE, such as `main~20..main`, instead of downloading releases.
+- **`--force`** — With --commits, measure every subject again even where this runner class already has a record, and retry commits whose build failed in an earlier run.
 - **`--repo <REPO>`** — Repository to pull releases from, as "owner/name". Defaults to the `origin` remote of the current repository.
 - **`--bin <BIN>`** — Executable name to look for inside each release archive. Defaults to the repository name.
-- **`--bench <BENCH>`** — Name to record measurements under.
-
-  **Default:** `release`
-- **`--limit <LIMIT>`** — Most recent releases to measure.
+- **`--bench <BENCH>`** — Name to record release measurements under; `release` if omitted. With --commits, the one benchmark from tak.toml to measure.
+- **`--limit <LIMIT>`** — Most recent releases to measure. With --commits, most commits to build, newest first, among those not already recorded.
 
   **Default:** `20`
-- **`--runs <RUNS>`** — Timed runs per release.
-
-  **Default:** `10`
-- **`--dry-run`** — Measure but do not write to refs/notes/tak.
+- **`--runs <RUNS>`** — Timed runs per release; 10 if omitted. With --commits, overrides tak.toml's `runs` for every benchmark.
+- **`--dry-run`** — Measure releases but do not write to refs/notes/tak. With --commits, list what would be built, and build nothing.
 - **`-h --help`** — Print help
