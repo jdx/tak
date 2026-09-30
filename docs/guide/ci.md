@@ -78,7 +78,8 @@ says `**Nothing was compared` and the command exits non-zero after printing it. 
 means the base was never recorded, its notes were not fetched, or the two were measured on
 different runner classes. Pass `--allow-empty` when that is expected: on the first pull request
 after adopting tak, or while a runner-class migration has left the base on the old class.
-`--no-gate` also passes an empty comparison, since it never fails.
+`--no-gate` also passes an empty comparison, since it never fails on the comparison. Errors,
+such as an invalid `tak.toml`, still fail.
 
 Older tak releases print the same report and exit 0. A workflow that may run one should also
 fail when the report's first line starts with `**Nothing was compared`, as the
@@ -155,7 +156,7 @@ When the newest commit has no instruction counts, or no series on it has an earl
 the window, the report says **Nothing was compared** and the command fails, because a check
 that examined nothing would otherwise look like a pass. `--allow-empty` waives this case
 only, so a step onto the newest commit still fails. `--no-gate` makes the command report
-without ever failing, covering both, as it does for `tak compare`.
+without failing on either, as it does for `tak compare`. Errors still fail.
 
 On the first recording, or the first on a new runner class, there is nothing earlier to
 compare with. Pass `--allow-empty` for that run, or seed the history first by recording an

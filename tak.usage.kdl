@@ -162,7 +162,7 @@ Fails when an instruction count has risen by more than `gate_pct` and `gate_min_
     flag --remote help="Remote to refresh notes from." default=origin {
         arg <REMOTE>
     }
-    flag --no-gate help="Report without failing, whatever the numbers say. Takes precedence over `--allow-empty`: an empty comparison passes too."
+    flag --no-gate help="Report without failing, whatever the numbers say. Takes precedence over `--allow-empty`: an empty comparison passes too. Errors, such as an invalid `tak.toml`, still fail."
     flag --accept help="Accept a regression in this benchmark: report it, but do not fail on it. Repeatable; each value is one exact benchmark name. Honoured whatever `accept_trailers` says." var=#true {
         arg <BENCH>
     }
@@ -182,7 +182,7 @@ Meant for the main-branch workflow, after recording. Walks REV's first-parent hi
     flag --remote help="Remote to refresh notes from." default=origin {
         arg <REMOTE>
     }
-    flag --no-gate help="Report without ever failing: neither a step nor an empty comparison fails the command."
+    flag --no-gate help="Report without failing on the result: neither a step nor an empty comparison fails the command. Errors, such as an invalid `tak.toml`, still fail."
     flag --accept help="Accept a step onto REV in this benchmark: report it, but do not fail on it. Repeatable; each value is one exact benchmark name. Honoured whatever `accept_trailers` says." var=#true {
         arg <BENCH>
     }

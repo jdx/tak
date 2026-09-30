@@ -568,7 +568,8 @@ TAK_GATE_PCT=2 tak compare origin/main
 ```
 
 Only instruction counts are gated. Wall-clock changes are displayed but never fail the
-comparison. Use `tak compare --no-gate` when a report must always exit successfully. To let
+comparison. Use `tak compare --no-gate` when a report must not fail on the comparison; errors, such as an
+invalid `tak.toml`, still fail it. To let
 one benchmark regress on purpose while the others still gate, pass `--accept BENCH`; see
 [accepting an intentional regression](/guide/ci#accept-an-intentional-regression).
 

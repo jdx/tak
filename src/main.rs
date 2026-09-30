@@ -224,7 +224,8 @@ enum Cmd {
         #[usage(long, default = "origin")]
         remote: String,
         /// Report without failing, whatever the numbers say. Takes precedence
-        /// over `--allow-empty`: an empty comparison passes too.
+        /// over `--allow-empty`: an empty comparison passes too. Errors, such as
+        /// an invalid `tak.toml`, still fail.
         #[usage(long)]
         no_gate: bool,
         /// Accept a regression in this benchmark: report it, but do not fail
@@ -260,8 +261,9 @@ enum Cmd {
         /// Remote to refresh notes from.
         #[usage(long, default = "origin")]
         remote: String,
-        /// Report without ever failing: neither a step nor an empty comparison
-        /// fails the command.
+        /// Report without failing on the result: neither a step nor an empty
+        /// comparison fails the command. Errors, such as an invalid `tak.toml`,
+        /// still fail.
         #[usage(long)]
         no_gate: bool,
         /// Accept a step onto REV in this benchmark: report it, but do not fail

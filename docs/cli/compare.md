@@ -19,7 +19,7 @@ Fails when an instruction count has risen by more than `gate_pct` and `gate_min_
 - **`--remote <REMOTE>`** — Remote to refresh notes from.
 
   **Default:** `origin`
-- **`--no-gate`** — Report without failing, whatever the numbers say. Takes precedence over `--allow-empty`: an empty comparison passes too.
+- **`--no-gate`** — Report without failing, whatever the numbers say. Takes precedence over `--allow-empty`: an empty comparison passes too. Errors, such as an invalid `tak.toml`, still fail.
 - **`--accept <BENCH>`** — Accept a regression in this benchmark: report it, but do not fail on it. Repeatable; each value is one exact benchmark name. Honoured whatever `accept_trailers` says.
 - **`--allow-empty`** — Pass when no series was measured on both sides, instead of failing. For the first pull request after adopting tak, or a runner-class migration. A regression still fails.
 - **`-h --help`** — Print help

@@ -376,13 +376,15 @@ every base series is on the old class. Pass `--allow-empty` for those pull reque
 the report check while it is passed, or the check still fails the job. Restore both once main has
 measurements on the current class. Left in place, `--allow-empty` lets a workflow that has
 stopped recording pass without comparing anything. A regression still fails under
-`--allow-empty`; only `--no-gate` reports without ever failing.
+`--allow-empty`; only `--no-gate` reports without failing on the comparison, and errors still
+fail under it.
 
 If the workflow also posts a sticky pull-request comment, keep the write token in a separate
 reporting job that checks out no code and executes nothing from the pull request. Pass the
 Markdown report and exit status to it as an artifact. mise's
 [pull-request workflow](https://github.com/jdx/mise/blob/main/.github/workflows/perf-pr.yml)
-shows that separation.
+shows that separation, and the `comment` mode of [jdx/tak-action](#use-the-github-action) is
+such a reporting job.
 
 ### When a regression is intentional
 
@@ -409,8 +411,11 @@ trailer in the final paragraph of the squashed commit message.
 trailers on for itself. Set `TAK_ACCEPT_TRAILERS: "0"` in the environment of the job that
 compares, as the workflow above does. The environment takes precedence over the file. With
 [jdx/tak-action](#use-the-github-action), put it in the compare job's `env:` so that it
-reaches the action's steps. Whether the action can pass `--accept` depends on its release;
-its README lists its inputs.
+reaches the action's steps. The action's `accept` input passes each line as its own
+`--accept`. It needs a tak release that includes `--accept`, and tak 0.0.13, pinned in the
+examples above, does not. The action's
+[README](https://github.com/jdx/tak-action#accepting-an-intentional-regression) shows a
+label-driven step.
 
 An acceptance never makes an empty comparison pass. When nothing was measured on both sides,
 `tak compare` still fails unless `--allow-empty` or `--no-gate` is given.
