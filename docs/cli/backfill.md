@@ -12,7 +12,7 @@ By default, downloads the release binaries a project already published and measu
 
 ## Flags
 - **`--commits <RANGE>`** — Build and measure the first-parent commits in RANGE, such as `main~20..main`, instead of downloading releases.
-- **`--force`** — With --commits, measure every subject again even where this runner class already has a record, and retry commits whose build failed in an earlier run.
+- **`--force`** — With --commits, measure every subject again even where this runner class already has a record, and retry commits whose build or measurement failed in an earlier run.
 - **`--repo <REPO>`** — Repository to pull releases from, as "owner/name". Defaults to the `origin` remote of the current repository.
 - **`--bin <BIN>`** — Executable name to look for inside each release archive. Defaults to the repository name.
 - **`--bench <BENCH>`** — Name to record release measurements under; `release` if omitted. With --commits, the one benchmark from tak.toml to measure.

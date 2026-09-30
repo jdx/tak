@@ -512,29 +512,56 @@ that CI already recorded are skipped rather than measured twice.
 continues where the last run stopped. `--bench NAME` limits the backfill to one declared
 benchmark, and `--runs N` overrides the file's run count.
 
-Each commit is recorded whole or not at all. A commit whose build fails is reported and
-skipped, and the rest of the range continues; old commits that no longer build are normal.
-tak remembers that failure in git's directory (`.git/tak/backfill-build-failed`), together
-with the `[build]` and runner class it failed under. Later runs pass over that commit rather
-than retrying it before every other commit. Changing `[build]` (its `cmd`, `dir` or `env`) or
-the runner class, passing `--force`, or deleting that file tries it again. A `[build].dir` missing from the tree, or leading out of it, counts
-as a failed build. The file is local to the clone
-and never pushed. A commit where any benchmark fails, a subject is dropped, or a check fails
-records nothing, not even the benchmarks that did measure. It is not remembered, because a
-measurement can fail for reasons that do not repeat. The command fails only when the range
+Each run of a commit is recorded whole or not at all, and the rest of the range continues
+whatever happens to one commit. A commit is left unrecorded and reported in two cases:
+
+- its build fails, or a `[build].dir` is missing from its tree or leads out of it;
+- it builds, but measuring a benchmark fails: it errors, a subject is dropped, a check fails,
+  an instruction count that was asked for fails with Valgrind present, or a path the current
+  `tak.toml` names is missing or leads out of the checkout.
+
+In either case nothing from that run is written for the commit, not even the benchmarks that
+did measure. Old commits that no longer build or run are normal.
+
+tak remembers each failure in git's directory (`.git/tak/backfill-build-failed`), and later
+runs pass over it. Without that, a commit that can never be recorded would be tried first on
+every run, and with `--limit` the backfill would never reach older commits.
+
+- A build failure covers the whole commit. It is tried again when the runner class or `[build]`
+  (its `cmd`, `dir` or `env`) changes.
+- A measurement failure covers only the benchmark that failed. The next run measures the
+  commit's other benchmarks without it, and a run with `--bench` for another benchmark is not
+  affected. It is tried again when anything in `tak.toml` changes, since editing a benchmark is
+  how one gets fixed. `--runs` is not part of it: a benchmark that fails at five runs fails at
+  ten.
+
+`--force` retries both kinds, and so does deleting the file. The file is local to the clone
+and never pushed. `--dry-run` shows a commit as `build failed before` or `measure failed
+before` when nothing is left to try, and as `would build (…; B failed before)` when only some
+benchmarks are. A measurement that failed for a reason that does not repeat, such as a flaky
+`check`, is passed over too until one of those happens. The command fails only when the range
 ends with no record at all.
 
 Build output goes to a file in the temporary directory, and a failed build shows its last 20
-lines. `[build].dir`, and a benchmark's `dir` or program inside the checkout, must resolve
-inside the checkout once symlinks are followed. A commit whose tree has a symlink at one of
-those paths that points elsewhere is reported and not recorded.
+lines. Every path inside the checkout that tak builds or runs with must resolve inside it once
+symlinks are followed. That covers `[build].dir` and the build's program, and a benchmark's
+`dir` and the programs of its `cmd`, `setup`, `prepare`, `check` and `version_cmd`. The old
+tree's own code runs during measurement, so they are checked again after every `setup` of a
+benchmark has run, before every sample (after its `prepare`), and before every `check`. A commit
+with a symlink at one of those paths that points elsewhere is reported and not recorded. The
+check before each sample is untimed and took about 17µs on a Linux host.
 
 The checkouts are removed when tak finishes, fails, or is stopped with Ctrl-C, SIGTERM or
-SIGHUP. On Unix the build runs in its own process group, and tak kills that group before
-removing the checkout. That also covers a signal sent to tak alone, as when CI cancels a job.
-On Windows, and if a subject's `version_cmd` is running when the signal arrives, an interrupted
-run can leave its checkout in the temporary directory. Once that directory is deleted, the next
-backfill runs `git worktree prune`, which clears git's record of it.
+SIGHUP, and nothing is recorded or remembered for the commit that was in progress. On Unix,
+during a backfill, the build and each measured command run in a process group of their own.
+Before tak removes the checkout, it kills the one running, and any group an earlier command
+left something running in, such as a server a `setup` started. While the backfill runs, such a
+process is left alone, as `tak run` leaves it. That covers a terminal's Ctrl-C and a signal
+sent to tak alone, as when CI cancels a job, and it never signals anything else, such as the
+rest of a `tak backfill … | tee log` pipeline. On Windows, and if a subject's
+`version_cmd` is running when the signal arrives, an interrupted run can leave its checkout in
+the temporary directory. Once that directory is deleted, the next backfill runs
+`git worktree prune`, which clears git's record of it.
 
 The benchmarks come from the current `tak.toml`, not each commit's own copy, so a series keeps
 measuring the same thing when someone edits a benchmark. The cost is that an old tree may lack
