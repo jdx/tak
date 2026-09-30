@@ -54,6 +54,93 @@ pub struct Config {
     /// Subjects declared once, for benchmarks to name in `subjects = [...]`.
     #[serde(default)]
     subject: BTreeMap<String, SubjectDecl>,
+    /// How to build the project from a clean checkout, for
+    /// `tak backfill --commits`. Nothing else runs it: `tak run` measures
+    /// whatever is already built, as it always has.
+    #[serde(default)]
+    build: Option<BuildDecl>,
+}
+
+/// `[build]` as written.
+///
+/// `deny_unknown_fields` because this table is new and small, and a misspelt
+/// `evn` silently building without the variables it names would be measured
+/// at every commit of a backfill before anyone noticed.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuildDecl {
+    cmd: Cmd,
+    /// Relative to `tak.toml`, inside the checkout being built.
+    dir: Option<PathBuf>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+}
+
+/// The build command, resolved and checked.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Build {
+    pub cmd: Vec<String>,
+    /// Relative to the directory holding `tak.toml`; see [`Build::anchor`].
+    pub dir: Option<PathBuf>,
+    pub env: BTreeMap<String, String>,
+}
+
+impl Build {
+    /// Resolve the program and directory against `root`, the directory that
+    /// holds `tak.toml` in the checkout being built. The same rule as
+    /// [`Subject::anchor`]: a program path containing `/` is relative to
+    /// `root`, a bare name is looked up on PATH.
+    pub fn anchor(&mut self, root: &Path) {
+        if let Some(p) = self.cmd.first_mut()
+            && p.contains('/')
+            && Path::new(p.as_str()).is_relative()
+        {
+            *p = root.join(p.as_str()).to_string_lossy().into_owned();
+        }
+        self.dir = Some(match &self.dir {
+            Some(d) => root.join(d),
+            None => root.to_path_buf(),
+        });
+    }
+}
+
+impl BuildDecl {
+    fn resolve(&self) -> Result<Build> {
+        let cmd = self.cmd.argv().context("cmd")?;
+        // Not rendered, so a template here would reach the build as literal
+        // braces. Refusing it keeps the door open to rendering later without
+        // changing what an existing file means.
+        let strings = cmd
+            .iter()
+            .chain(self.env.values())
+            .map(String::as_str)
+            .chain(self.dir.as_ref().and_then(|d| d.to_str()));
+        if let Some(t) = strings
+            .into_iter()
+            .find(|s| crate::template::is_template(s))
+        {
+            bail!("templates are not supported in [build]: {t:?}");
+        }
+        if let Some(d) = &self.dir {
+            // The build runs in a throwaway checkout of an old commit. A
+            // directory outside it would build the live tree instead, and
+            // every commit of the backfill would measure the same binary.
+            if d.is_absolute()
+                || d.components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                bail!(
+                    "dir must stay inside the checkout being built, not {}",
+                    d.display()
+                );
+            }
+        }
+        Ok(Build {
+            cmd,
+            dir: self.dir.clone(),
+            env: self.env.clone(),
+        })
+    }
 }
 
 /// The settings that stack: `[defaults]`, a benchmark, a shared subject and a
@@ -815,8 +902,18 @@ fn ok_exit_codes(codes: &[i64]) -> Result<Vec<i32>> {
 }
 
 impl Config {
+    /// The `[build]` table, if the file declares one.
+    pub fn build(&self) -> Result<Option<Build>> {
+        self.build
+            .as_ref()
+            .map(BuildDecl::resolve)
+            .transpose()
+            .context("in [build]")
+    }
+
     pub fn parse(text: &str) -> Result<Self> {
         let cfg: Config = toml::from_str(text).context("could not parse tak.toml")?;
+        cfg.build()?;
         // Every template in the file, used or not: a typo in a shared subject
         // no benchmark lists yet, or in a value an override replaces, is
         // still a typo, and should not wait to be found until it is used.
@@ -1698,6 +1795,49 @@ cmd = "mycli 'two words'""#,
             msg.contains("subject.spare") && msg.contains("4294967296"),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn a_build_is_optional_and_anchored_like_a_subject() {
+        assert_eq!(Config::parse("").unwrap().build().unwrap(), None);
+        let mut b = Config::parse(
+            "[build]\ncmd = \"./scripts/build --release\"\ndir = \"app\"\nenv = { PROFILE = \"release\" }",
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+        .unwrap();
+        assert_eq!(b.cmd, ["./scripts/build", "--release"]);
+        assert_eq!(b.env["PROFILE"], "release");
+        b.anchor(Path::new("/wt"));
+        assert_eq!(b.cmd[0], "/wt/./scripts/build");
+        assert_eq!(b.dir.unwrap(), Path::new("/wt/app"));
+
+        let mut bare = Config::parse("[build]\ncmd = [\"cargo\", \"build\"]")
+            .unwrap()
+            .build()
+            .unwrap()
+            .unwrap();
+        bare.anchor(Path::new("/wt"));
+        assert_eq!(bare.cmd[0], "cargo", "a bare name is looked up on PATH");
+        assert_eq!(bare.dir.unwrap(), Path::new("/wt"));
+    }
+
+    /// A build outside the checkout would build the live tree at every
+    /// commit, and a typo'd key would build without what it names.
+    #[test]
+    fn a_bad_build_is_rejected_at_parse_time() {
+        for bad in [
+            "cmd = []",
+            "dir = \"x\"",
+            "cmd = \"make\"\ndir = \"/abs\"",
+            "cmd = \"make\"\ndir = \"../elsewhere\"",
+            "cmd = \"make\"\nevn = { A = \"1\" }",
+            "cmd = [\"make\", \"{{ env.HOME }}\"]",
+            "cmd = \"make\"\nenv = { A = \"{{ env.X }}\" }",
+        ] {
+            Config::parse(&format!("[build]\n{bad}")).expect_err(bad);
+        }
     }
 
     /// The syntax check covers the whole file, not only what some benchmark

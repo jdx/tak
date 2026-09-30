@@ -63,7 +63,8 @@ and reasoning.
   when the newest recorded commit introduced one or when nothing could be compared
 - `tak log` shows each benchmark's measurements over first-parent history, as Markdown or as
   a self-contained HTML report
-- `tak backfill` measures published release binaries to bootstrap history
+- `tak backfill` measures published release binaries, or builds and measures past commits
+  with `--commits`, to bootstrap history
 
 tak itself does not post to pull requests. [jdx/tak-action](https://github.com/jdx/tak-action),
 which is also pre-v1, runs `tak compare` on a pull request and reports the result as a sticky

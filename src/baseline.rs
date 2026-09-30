@@ -25,7 +25,39 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::compare::Key;
-use crate::record::{Record, parse_note};
+use crate::record::{Record, SCHEMA_VERSION, parse_note};
+
+/// The schema version of a line written by a newer tak, if it is one.
+///
+/// Read from the `v` field alone, the one field every schema version keeps,
+/// so it works whatever else a newer record changed.
+fn newer_schema(line: &str) -> Option<u64> {
+    let v = serde_json::from_str::<serde_json::Value>(line)
+        .ok()?
+        .get("v")?
+        .as_u64()?;
+    (v > u64::from(SCHEMA_VERSION)).then_some(v)
+}
+
+/// Refuse to save over a baseline that holds a record from a newer schema.
+///
+/// Refused rather than kept or dropped. Kept, the newer line sits beside this
+/// run's line for the same series, and once tak is upgraded again the reader
+/// folds both to their minimum, so a stale value can win. Dropped, an older
+/// tak destroys what a newer one saved. And this version cannot tell which
+/// series the line belongs to: a newer schema may spell its key differently.
+/// A downgrade is rare, and another name costs nothing.
+fn refuse_newer(name: &str, path: &Path, body: &str) -> Result<()> {
+    if let Some(v) = body.lines().find_map(newer_schema) {
+        bail!(
+            "baseline `{name}` holds records from a newer tak (schema {v}; this tak writes \
+             {SCHEMA_VERSION}), and saving over it could leave a stale value beside this \
+             run's. Save under another name, or upgrade tak ({})",
+            path.display()
+        );
+    }
+    Ok(())
+}
 
 /// Extension of a baseline file. Listing only these keeps the temporary file
 /// an interrupted save leaves behind out of "saved baselines".
@@ -171,6 +203,18 @@ impl Store {
         })
     }
 
+    /// Fail now if saving under `name` would be refused later, so a run
+    /// that cannot be saved is not measured first.
+    pub fn check_saveable(&self, name: &str) -> Result<()> {
+        validate_name(name)?;
+        let path = self.path(name);
+        match std::fs::read_to_string(&path) {
+            Ok(body) => refuse_newer(name, &path, &body),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("could not read {}", path.display())),
+        }
+    }
+
     /// Save `records` under `name`, returning the file written.
     ///
     /// Replaces what the baseline held for each series in `records` and keeps
@@ -179,9 +223,10 @@ impl Store {
     /// `compare` uses, runner included: a baseline saved with `--runner` on two
     /// classes keeps one series for each.
     ///
-    /// Lines this version cannot read — a newer schema, a hand edit — are kept
-    /// as they are. They cannot be matched to a series, and dropping them would
-    /// make an older tak destroy what a newer one saved.
+    /// A line that does not parse at all — a hand edit — is kept as it is:
+    /// readers skip it, and dropping it would destroy something someone wrote.
+    /// A record from a newer schema refuses the save instead; see the comment
+    /// where it is found.
     ///
     /// Written to a temporary file and renamed into place, so an interrupted
     /// save leaves the previous baseline whole rather than half of either.
@@ -219,6 +264,9 @@ impl Store {
         // Sorted and deduplicated, as a note is, so the file's bytes depend
         // only on what it holds and not on the order runs were saved in.
         let mut lines = BTreeSet::new();
+        // Checked again under the lock: `check_saveable` ran before measuring,
+        // and a newer tak in another worktree may have saved since.
+        refuse_newer(name, &path, &existing)?;
         for line in existing.lines().filter(|l| !l.trim().is_empty()) {
             match Record::from_line(line) {
                 Ok(Some(r)) if replaced.contains(&key(&r)) => {}
@@ -253,6 +301,9 @@ impl Store {
 /// Why a series this run measured cannot be gated against the baseline.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Gap {
+    /// This run asked for a count, valgrind was present, and counting
+    /// failed. Whatever the baseline holds, nothing here can be compared.
+    CountFailed,
     /// The baseline counted it on this runner class and this run did not:
     /// valgrind missing, counting failed, or counters turned off.
     NotCountedHere,
@@ -281,6 +332,7 @@ fn classes(runners: &[String]) -> String {
 impl std::fmt::Display for Gap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Gap::CountFailed => write!(f, "instruction counting failed in this run"),
             Gap::NotCountedHere => write!(f, "not counted in this run"),
             Gap::SavedWithoutCount => write!(f, "saved without an instruction count"),
             Gap::OnlyOnOtherRunners(runners) => {
@@ -308,13 +360,26 @@ impl std::fmt::Display for Gap {
 /// compared with it. Counting it as a gap failed every gate on both classes.
 ///
 /// A series with no count on either side is left out: a subject with
-/// `counters = false` is wall-clock only by design and never gates.
-pub fn gaps(baseline: &[Record], current: &[Record]) -> Vec<(Key, Gap)> {
+/// `counters = false` is wall-clock only by design and never gates. That rule
+/// cannot tell design from accident by the records alone, which look the same
+/// either way, so `count_failed` names the series whose count this run asked
+/// for, with valgrind present, and did not get. Those are always a gap: a new
+/// benchmark whose count failed has nothing in the baseline either, and was
+/// otherwise skipped while `--gate` passed on its neighbours.
+pub fn gaps(
+    baseline: &[Record],
+    current: &[Record],
+    count_failed: &BTreeSet<Key>,
+) -> Vec<(Key, Gap)> {
     let counted = |r: &Record| r.metrics.contains_key(crate::compare::GATED_METRIC);
     let mut out = Vec::new();
     let keys: BTreeSet<Key> = current.iter().map(key).collect();
     for k in keys {
         let here = current.iter().filter(|r| key(r) == k).any(counted);
+        if !here && count_failed.contains(&k) {
+            out.push((k, Gap::CountFailed));
+            continue;
+        }
         let same: Vec<&Record> = baseline.iter().filter(|r| key(r) == k).collect();
         let saved = same.iter().any(|r| counted(r));
         let gap = match (here, saved) {
@@ -495,20 +560,36 @@ mod tests {
         assert_eq!(s.load("x").unwrap().records.len(), 2);
     }
 
-    /// An older tak must not delete what a newer one saved.
+    /// A line that is not a record at all — a hand edit — survives a save.
     #[test]
-    fn lines_it_cannot_read_survive_a_save() {
+    fn a_malformed_line_survives_a_save() {
+        let (_tmp, s) = store();
+        std::fs::create_dir_all(s.dir()).unwrap();
+        std::fs::write(s.path("x"), "not json\n").unwrap();
+        s.save("x", &[rec("a", "r", 2.0)]).unwrap();
+        let body = std::fs::read_to_string(s.path("x")).unwrap();
+        assert!(body.contains("not json"), "{body}");
+        assert_eq!(s.load("x").unwrap().records.len(), 1);
+    }
+
+    /// An older tak neither deletes a newer one's record nor writes beside
+    /// it: kept next to this run's line for the same series, the stale newer
+    /// value would win the minimum once tak is upgraded again. So the save is
+    /// refused, and the file is left exactly as it was.
+    #[test]
+    fn a_newer_schema_record_refuses_the_save() {
         let (_tmp, s) = store();
         std::fs::create_dir_all(s.dir()).unwrap();
         let mut future = rec("a", "r", 1.0);
         future.v = SCHEMA_VERSION + 1;
-        let future = future.to_line().unwrap();
-        std::fs::write(s.path("x"), format!("{future}\nnot json\n")).unwrap();
-        s.save("x", &[rec("a", "r", 2.0)]).unwrap();
-        let body = std::fs::read_to_string(s.path("x")).unwrap();
-        assert!(body.contains(&future), "{body}");
-        assert!(body.contains("not json"), "{body}");
-        assert_eq!(s.load("x").unwrap().records.len(), 1);
+        let body = format!("{}\n", future.to_line().unwrap());
+        std::fs::write(s.path("x"), &body).unwrap();
+        let e = s.save("x", &[rec("a", "r", 2.0)]).unwrap_err().to_string();
+        assert!(e.contains("holds records from a newer tak"), "{e}");
+        assert!(e.contains("Save under another name"), "{e}");
+        assert_eq!(std::fs::read_to_string(s.path("x")).unwrap(), body);
+        // Another name is unaffected.
+        s.save("y", &[rec("a", "r", 2.0)]).unwrap();
     }
 
     #[test]
@@ -571,6 +652,33 @@ mod tests {
             vec!["x".to_string()],
             "the lock file is listed"
         );
+    }
+
+    /// The gaps of a run in which no count failed.
+    fn gaps(base: &[Record], head: &[Record]) -> Vec<(Key, Gap)> {
+        super::gaps(base, head, &BTreeSet::new())
+    }
+
+    /// A count that was asked for, with valgrind present, and failed is a
+    /// gap whatever the baseline holds — including nothing at all, for a
+    /// benchmark added since it was saved. Counters off by design is not.
+    #[test]
+    fn a_failed_count_is_a_gap_and_counters_off_is_not() {
+        let k: Key = ("new".into(), "self".into(), "r".into());
+        let head = [wall_only("new", "r")];
+        assert_eq!(
+            super::gaps(&[], &head, &BTreeSet::from([k.clone()])),
+            vec![(k.clone(), Gap::CountFailed)]
+        );
+        assert_eq!(
+            super::gaps(
+                &[wall_only("new", "r")],
+                &head,
+                &BTreeSet::from([k.clone()])
+            ),
+            vec![(k, Gap::CountFailed)]
+        );
+        assert_eq!(gaps(&[], &head), vec![]);
     }
 
     fn wall_only(bench: &str, runner: &str) -> Record {

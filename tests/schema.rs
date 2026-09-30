@@ -24,6 +24,11 @@ credit = false
 [runner]
 class = "local-test"
 
+[build]
+cmd = ["cargo", "build", "--release"]
+dir = "."
+env = { PROFILE = "release" }
+
 [defaults]
 runs = "auto"
 warmup = 1
@@ -123,7 +128,7 @@ fn the_schema_and_the_parser_agree_on_every_key() {
     let table = |v: &toml::Value| v.as_table().unwrap().clone();
 
     assert_eq!(keys(&t), props(&s, ""), "top level");
-    for section in ["env", "gate", "report", "runner"] {
+    for section in ["env", "gate", "report", "runner", "build"] {
         assert_eq!(
             keys(&table(&t[section])),
             props(&s, &format!("/properties/{section}")),
