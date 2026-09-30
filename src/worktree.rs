@@ -11,6 +11,7 @@
 //! Git is a subprocess here for the same reason it is in [`crate::notes`].
 
 use anyhow::{Context, Result, bail};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -153,30 +154,78 @@ fn kill_build() {
     }
 }
 
-/// Commits whose build failed, each with the build it failed under.
-///
-/// Without a memory of these, a commit that can never build is chosen again
-/// at the top of every run, and with `--limit` a backfill stops making
-/// progress at the first one. Keyed on the `[build]` definition as well as
-/// the commit, so changing the build — usually to fix exactly that failure —
-/// tries every such commit again. Kept in git's common directory: shared by
-/// the repository's worktrees, never committed, and local to this clone,
-/// since a failure says as much about this machine's toolchain as about the
-/// commit.
-///
-/// Only build failures are remembered. A measurement can fail for reasons
-/// that do not repeat, such as a flaky `check`, and skipping that commit for
-/// good would be the wrong answer to a transient problem.
-pub struct FailedBuilds {
-    path: PathBuf,
-    build: String,
-    shas: std::collections::BTreeSet<String>,
+/// How a remembered commit failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    /// The build failed, or the tree it would run in could not be used.
+    Build,
+    /// It built, and measuring it failed: a benchmark errored, a subject was
+    /// dropped, a check or an instruction count failed.
+    Measure,
 }
 
-impl FailedBuilds {
-    /// The commits that failed under `build`, a stable one-line description
-    /// of the `[build]` definition.
-    pub fn load(build: String) -> Result<FailedBuilds> {
+impl Failure {
+    fn word(self) -> &'static str {
+        match self {
+            Failure::Build => "build-failed",
+            Failure::Measure => "measure-failed",
+        }
+    }
+}
+
+/// Stop the measured commands — subjects, their setup, prepare and check,
+/// and valgrind — which run in tak's own process group, unlike the build.
+///
+/// A terminal's Ctrl-C reaches them directly, but a SIGTERM sent to tak
+/// alone, as when CI cancels a job, does not, and they would carry on in a
+/// checkout that is being deleted. Only when tak leads its group: then every
+/// other member is something tak started, and SIGTERM to the group reaches
+/// exactly those, and tak, whose handler has nothing more to do. When tak
+/// shares a group with whatever launched it, such as a script without job
+/// control, signalling the group would stop that too, so nothing is sent
+/// and a command that was running finishes its one sample on its own.
+#[cfg(unix)]
+fn kill_measured() {
+    // SAFETY: getpgrp, getpid and killpg have no memory-safety preconditions.
+    unsafe {
+        let group = libc::getpgrp();
+        if group == libc::getpid() {
+            libc::killpg(group, libc::SIGTERM);
+        }
+    }
+}
+
+/// Commits that failed in an earlier run, with how and under what.
+///
+/// Without a memory of these, a commit that can never be recorded is chosen
+/// again at the top of every run, and with `--limit` a backfill stops making
+/// progress at the first one. That holds for a failed measurement as much as
+/// for a failed build: at a fixed commit, a benchmark that errors or a
+/// fixture that is missing fails the same way every time. A flaky one costs
+/// a point `--force` can recover, where not remembering it cost every older
+/// commit behind it.
+///
+/// A build failure is keyed on the runner class and `[build]`, so changing
+/// the build — usually to fix exactly that failure — or moving to a new
+/// toolchain tries the commit again. A measurement failure is keyed on those
+/// and on the contents of tak.toml as well, since editing a benchmark is how
+/// one of those gets fixed. Kept in git's common directory: shared by the
+/// repository's worktrees, never committed, and local to this clone, since a
+/// failure says as much about this machine as about the commit.
+///
+/// One line per commit: `SHA \t REASON \t KEY`. A line written before the
+/// reason was recorded, `SHA \t KEY`, is a build failure.
+pub struct FailedCommits {
+    path: PathBuf,
+    build_key: String,
+    measure_key: String,
+    known: BTreeMap<String, Failure>,
+}
+
+impl FailedCommits {
+    /// The commits that failed under these keys: `build_key` describes the
+    /// runner class and `[build]`, `measure_key` those and the benchmarks.
+    pub fn load(build_key: String, measure_key: String) -> Result<FailedCommits> {
         // Plain `--git-common-dir` and `std::path::absolute`, as the baseline
         // store resolves it: `--path-format=absolute` would need git 2.31,
         // newer than anything else tak asks of git. The output is relative
@@ -187,35 +236,58 @@ impl FailedBuilds {
             .with_context(|| format!("could not resolve {}", common.display()))?;
         let path = common.join("tak").join("backfill-build-failed");
         let text = std::fs::read_to_string(&path).unwrap_or_default();
-        let shas = text
-            .lines()
-            .filter_map(|l| l.split_once('\t'))
-            .filter(|(_, b)| *b == build)
-            .map(|(sha, _)| sha.to_string())
-            .collect();
-        Ok(FailedBuilds { path, build, shas })
+        let mut known = BTreeMap::new();
+        for line in text.lines() {
+            if let Some((sha, failure)) = parse_failure(line, &build_key, &measure_key) {
+                known.insert(sha.to_string(), failure);
+            }
+        }
+        Ok(FailedCommits {
+            path,
+            build_key,
+            measure_key,
+            known,
+        })
     }
 
-    pub fn contains(&self, sha: &str) -> bool {
-        self.shas.contains(sha)
+    /// How `sha` failed before under these keys, if it did.
+    pub fn get(&self, sha: &str) -> Option<Failure> {
+        self.known.get(sha).copied()
     }
 
-    /// Remember that `sha` failed to build.
-    pub fn add(&mut self, sha: &str) -> Result<()> {
-        if !self.shas.insert(sha.to_string()) {
+    /// Remember that `sha` failed, replacing whatever was known about it.
+    pub fn add(&mut self, sha: &str, failure: Failure) -> Result<()> {
+        if self.known.get(sha) == Some(&failure) {
             return Ok(());
         }
-        let line = format!("{sha}\t{}", self.build);
-        self.rewrite(|lines| lines.push(line))
+        self.known.insert(sha.to_string(), failure);
+        let line = self.line(sha, failure);
+        self.rewrite(|lines, this| {
+            lines.retain(|l| !this.is_ours(l, sha));
+            lines.push(line);
+        })
     }
 
-    /// Forget `sha` under this build, once it has built.
+    /// Forget `sha` under these keys, once it has been recorded.
     pub fn remove(&mut self, sha: &str) -> Result<()> {
-        if !self.shas.remove(sha) {
+        if self.known.remove(sha).is_none() {
             return Ok(());
         }
-        let line = format!("{sha}\t{}", self.build);
-        self.rewrite(|lines| lines.retain(|l| *l != line))
+        self.rewrite(|lines, this| lines.retain(|l| !this.is_ours(l, sha)))
+    }
+
+    fn line(&self, sha: &str, failure: Failure) -> String {
+        let key = match failure {
+            Failure::Build => &self.build_key,
+            Failure::Measure => &self.measure_key,
+        };
+        format!("{sha}\t{}\t{key}", failure.word())
+    }
+
+    /// Whether `line` is about `sha` under this run's keys. Lines about the
+    /// same commit under another build or runner class are left alone.
+    fn is_ours(&self, line: &str, sha: &str) -> bool {
+        parse_failure(line, &self.build_key, &self.measure_key).is_some_and(|(s, _)| s == sha)
     }
 
     /// Re-read, change and replace the file.
@@ -225,12 +297,12 @@ impl FailedBuilds {
     /// renaming a complete temporary file over it, so a concurrent reader,
     /// or a run killed mid-write, never sees half a file. Two backfills
     /// writing at the same instant can still lose one's entry. There is no
-    /// lock, because the cost of that is small: a commit that failed to build
-    /// gets built once more.
-    fn rewrite(&self, change: impl FnOnce(&mut Vec<String>)) -> Result<()> {
+    /// lock, because the cost of that is small: a commit that failed gets
+    /// tried once more.
+    fn rewrite(&self, change: impl FnOnce(&mut Vec<String>, &Self)) -> Result<()> {
         let text = std::fs::read_to_string(&self.path).unwrap_or_default();
         let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
-        change(&mut lines);
+        change(&mut lines, self);
         lines.sort();
         lines.dedup();
         let dir = self.path.parent().context("no directory for build state")?;
@@ -244,6 +316,39 @@ impl FailedBuilds {
             .with_context(|| format!("could not write {}", self.path.display()))?;
         Ok(())
     }
+}
+
+/// One line of the failure file, if it applies under these keys.
+fn parse_failure<'a>(
+    line: &'a str,
+    build_key: &str,
+    measure_key: &str,
+) -> Option<(&'a str, Failure)> {
+    let mut fields = line.splitn(3, '\t');
+    let sha = fields.next()?;
+    let (reason, key) = match (fields.next()?, fields.next()) {
+        (reason, Some(key)) => (reason, key),
+        // Written before failures had a reason: only builds were kept.
+        (key, None) => ("build-failed", key),
+    };
+    match reason {
+        "build-failed" if key == build_key => Some((sha, Failure::Build)),
+        "measure-failed" if key == measure_key => Some((sha, Failure::Measure)),
+        _ => None,
+    }
+}
+
+/// A 64-bit FNV-1a hash, as lowercase hex: a stable fingerprint of
+/// tak.toml for [`FailedCommits`]'s measurement key. Not std's `Hasher`,
+/// whose output is allowed to change between Rust releases, which would
+/// forget every remembered failure on a toolchain upgrade.
+pub fn fingerprint(bytes: &[u8]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
 }
 
 /// A detached checkout of one commit, removed when dropped.
@@ -390,6 +495,7 @@ pub fn clean_up_on_interrupt(scratch: &Path) -> Result<()> {
         }
         STOPPING.store(true, Ordering::SeqCst);
         kill_build();
+        kill_measured();
         // Never released: the process exits while holding it, so nothing
         // can be checked out after the sweep.
         let live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
@@ -397,6 +503,8 @@ pub fn clean_up_on_interrupt(scratch: &Path) -> Result<()> {
             remove(p);
         }
         let _ = std::fs::remove_dir_all(&scratch);
+        // Again, for a sample the main thread started while the sweep ran.
+        kill_measured();
         eprintln!("\n  interrupted — removed backfill worktrees");
         std::process::exit(128 + i32::from(sig[0]));
     });
@@ -424,7 +532,38 @@ pub fn clean_up_on_interrupt(_scratch: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_commit_time;
+    use super::{Failure, fingerprint, parse_commit_time, parse_failure};
+
+    /// Each line applies only under the key its reason is kept with, and a
+    /// line from before reasons were recorded is a build failure.
+    #[test]
+    fn failure_lines_apply_under_their_own_key() {
+        let (b, m) = ("B", "B f00d");
+        assert_eq!(
+            parse_failure("abc\tbuild-failed\tB", b, m),
+            Some(("abc", Failure::Build))
+        );
+        assert_eq!(
+            parse_failure("abc\tmeasure-failed\tB f00d", b, m),
+            Some(("abc", Failure::Measure))
+        );
+        assert_eq!(parse_failure("abc\tB", b, m), Some(("abc", Failure::Build)));
+        // Another build, another tak.toml, or a reason from the future.
+        assert_eq!(parse_failure("abc\tbuild-failed\tC", b, m), None);
+        assert_eq!(parse_failure("abc\tmeasure-failed\tB beef", b, m), None);
+        assert_eq!(parse_failure("abc\tmeasure-failed\tB", b, m), None);
+        assert_eq!(parse_failure("abc\tflaky\tB", b, m), None);
+        assert_eq!(parse_failure("", b, m), None);
+    }
+
+    /// FNV-1a's published test vectors: the fingerprint must not change
+    /// between releases, or every remembered failure would be retried.
+    #[test]
+    fn the_fingerprint_is_stable() {
+        assert_eq!(fingerprint(b""), "cbf29ce484222325");
+        assert_eq!(fingerprint(b"a"), "af63dc4c8601ec8c");
+        assert_eq!(fingerprint(b"foobar"), "85944171f73967e8");
+    }
 
     #[test]
     fn a_commit_time_is_the_committer_header_timestamp() {

@@ -325,6 +325,13 @@ pub trait Observer {
     /// `subject`'s setup step is starting. Untimed and not a sample, so it
     /// counts toward neither the samples taken nor their average.
     fn setting_up(&mut self, _subject: usize) {}
+    /// `subject`'s setup succeeded, and nothing of it has run yet: not its
+    /// version, not a warmup. An error drops the subject as a failed setup
+    /// would. `tak backfill --commits` checks here that a setup from an old
+    /// tree has not left a path leading out of the checkout.
+    fn set_up(&mut self, _subject: usize) -> Result<()> {
+        Ok(())
+    }
     /// A sample of `subject` is starting.
     fn started(&mut self, _subject: usize) {}
     /// A sample of `subject` finished; `elapsed` covers its prepare step too.
@@ -453,7 +460,7 @@ pub fn interleaved_with_versions(
             env: &s.env,
             settings,
         };
-        if let Err(e) = required("setup", setup, &site) {
+        if let Err(e) = required("setup", setup, &site).and_then(|_| observer.set_up(i)) {
             results[i] = Err(e);
             observer.dropped(i);
         }

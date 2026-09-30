@@ -911,8 +911,8 @@
           {
             "name": "force",
             "usage": "--force",
-            "help": "With --commits, measure every subject again even where this runner class already has a record, and retry commits whose build failed in an earlier run.",
-            "help_first_line": "With --commits, measure every subject again even where this runner class already has a record, and retry commits whose build failed in an earlier run.",
+            "help": "With --commits, measure every subject again even where this runner class already has a record, and retry commits whose build or measurement failed in an earlier run.",
+            "help_first_line": "With --commits, measure every subject again even where this runner class already has a record, and retry commits whose build or measurement failed in an earlier run.",
             "short": [],
             "long": [
               "force"

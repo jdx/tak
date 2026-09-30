@@ -646,18 +646,38 @@ fn a_commit_dated_before_1970_is_recorded() {
 /// Start a backfill whose build records its pid and then sleeps, and wait
 /// until that build is running. Returns tak and the build's pid.
 fn start_slow_build(repo: &Repo) -> (std::process::Child, i32) {
+    start_slow(repo, |pid| {
+        format!(
+            "[build]\ncmd = [\"sh\", \"-c\", \"{pid}\"]\n\
+             [bench.startup]\ncmd = [\"./tool\"]\n"
+        )
+    })
+}
+
+/// The same, with the slow command in the measurement instead: the build is
+/// quick, and the benchmark's one sample records its pid and sleeps.
+fn start_slow_measurement(repo: &Repo) -> (std::process::Child, i32) {
+    start_slow(repo, |pid| {
+        format!(
+            "[build]\ncmd = [\"true\"]\n\
+             [bench.startup]\ncmd = [\"sh\", \"-c\", \"{pid}\"]\nruns = 1\nwarmup = 0\n"
+        )
+    })
+}
+
+/// Start a backfill of the newest commit with `toml` as its tak.toml, where
+/// `toml` is given a shell snippet that records its pid and then sleeps, and
+/// wait until that snippet is running.
+fn start_slow(repo: &Repo, toml: impl Fn(&str) -> String) -> (std::process::Child, i32) {
     use std::os::unix::process::CommandExt;
 
     history(repo);
-    let pidfile = repo.tmp.parent().unwrap().join("build.pid");
-    repo.write(
-        "tak.toml",
-        &format!(
-            "[build]\ncmd = [\"sh\", \"-c\", \"echo $$ > {}.tmp && mv {0}.tmp {0} && exec sleep 30\"]\n\
-             [bench.startup]\ncmd = [\"./tool\"]\n",
-            pidfile.display()
-        ),
+    let pidfile = repo.tmp.parent().unwrap().join("slow.pid");
+    let snippet = format!(
+        "echo $$ > {0}.tmp && mv {0}.tmp {0} && exec sleep 30",
+        pidfile.display()
     );
+    repo.write("tak.toml", &toml(&snippet));
     // Its own group, standing in for a terminal's foreground job.
     let child = repo
         .tak_cmd(&["--commits", "main~1..main"])
@@ -680,8 +700,8 @@ fn start_slow_build(repo: &Repo) -> (std::process::Child, i32) {
     (child, pid)
 }
 
-/// A build tak killed on the way out is not the commit's fault, and must not
-/// be remembered as a failure that later runs pass over.
+/// A build or measurement tak killed on the way out is not the commit's
+/// fault, and must not be remembered as a failure later runs pass over.
 fn assert_no_failure_remembered(repo: &Repo) {
     let memory = repo.dir.join(".git/tak/backfill-build-failed");
     let text = std::fs::read_to_string(memory).unwrap_or_default();
@@ -750,4 +770,155 @@ fn a_sigterm_to_tak_alone_stops_the_build() {
     assert_no_failure_remembered(&repo);
     assert_eq!(repo.worktrees(), 1);
     assert!(repo.tmp_is_empty());
+}
+
+/// The same during the measurement: the measured command shares tak's own
+/// process group, not the build's, and tak leads that group here as it does
+/// as a terminal's job. Nothing is recorded, and nothing remembered.
+#[test]
+fn a_sigterm_during_measurement_stops_the_subject() {
+    let repo = Repo::new();
+    let (mut child, subject) = start_slow_measurement(&repo);
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    // SAFETY: signals the process this test spawned.
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    let status = wait_for(&mut child);
+    assert_eq!(status.code(), Some(143), "{status:?}");
+    assert!(wait_gone(subject), "the measured command outlived tak");
+    assert_no_failure_remembered(&repo);
+    assert!(repo.notes(&head).is_empty());
+    assert_eq!(repo.worktrees(), 1);
+    assert!(repo.tmp_is_empty());
+}
+
+/// A commit that builds and then fails to measure is remembered like one
+/// that fails to build, so `--limit 1` reaches the next commit on the next
+/// run instead of rebuilding the same one forever. `--force`, or an edit to
+/// tak.toml, tries it again.
+#[test]
+fn a_failed_measurement_is_passed_over_next_time() {
+    let repo = Repo::new();
+    config(&repo, "");
+    repo.write(".gitignore", "tool\ntak.toml\n");
+    repo.git(&["add", ".gitignore"]);
+    let v1 = repo.commit_tool(Some("v1"));
+    let v2 = repo.commit_tool(Some("v2"));
+    repo.write("tool.sh", "#!/bin/sh\nexit 1\n");
+    repo.git(&["commit", "-q", "-am", "broken benchmark"]);
+    let broken = repo.git(&["rev-parse", "HEAD"]);
+    let range = format!("{v1}..main");
+
+    let first = repo.tak(&["--commits", &range, "--limit", "1"]);
+    assert!(
+        !first.status.success(),
+        "nothing recorded: {}",
+        both(&first)
+    );
+    assert!(
+        stdout(&first).contains(&format!("measurement failed: {}", &broken[..12])),
+        "{}",
+        stdout(&first)
+    );
+    assert_eq!(repo.builds(), 1);
+
+    let dry = repo.tak(&["--commits", &range, "--dry-run"]);
+    assert!(
+        stdout(&dry).contains(&format!("{}  measure failed before", &broken[..12])),
+        "{}",
+        stdout(&dry)
+    );
+    let second = repo.tak(&["--commits", &range, "--limit", "1"]);
+    assert!(second.status.success(), "{}", both(&second));
+    assert_eq!(versions(&repo, &v2), ["v2"], "the next commit was reached");
+    assert!(
+        stdout(&second).contains(
+            "1 commit(s) passed over: they failed in an earlier run (0 build, 1 measurement"
+        ),
+        "{}",
+        stdout(&second)
+    );
+    assert_eq!(repo.builds(), 2);
+
+    let forced = repo.tak(&["--commits", &range, "--force", "--limit", "1"]);
+    assert!(
+        stdout(&forced).contains(&broken[..12]),
+        "{}",
+        stdout(&forced)
+    );
+    assert_eq!(repo.builds(), 3, "--force built it again");
+
+    config(&repo, "# edited\n");
+    let edited = repo.tak(&["--commits", &range, "--dry-run"]);
+    assert!(
+        stdout(&edited).contains(&format!("{}  would build", &broken[..12])),
+        "{}",
+        stdout(&edited)
+    );
+}
+
+/// A `setup` is the old tree's own code, run after the paths were first
+/// checked; one that leaves a symlink out of the checkout where `dir` is must
+/// stop the subject before it runs there.
+#[test]
+fn a_setup_that_links_out_of_the_checkout_is_refused() {
+    let repo = Repo::new();
+    history(&repo);
+    let outside = repo.tmp.parent().unwrap().join("outside-dir");
+    std::fs::create_dir_all(&outside).unwrap();
+    repo.write(
+        "tak.toml",
+        &format!(
+            "[build]\ncmd = [\"true\"]\n\
+             [bench.fixture]\ncmd = [\"sh\", \"-c\", \"touch ran\"]\ndir = \"work\"\n\
+             setup = [\"ln\", \"-s\", \"{}\", \"work\"]\nruns = 1\nwarmup = 0\n",
+            outside.display()
+        ),
+    );
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let out = repo.tak(&["--commits", "main~1..main"]);
+    assert!(
+        stdout(&out).contains("work leads outside the checkout"),
+        "{}",
+        both(&out)
+    );
+    assert!(!outside.join("ran").exists(), "the subject ran outside");
+    assert!(repo.notes(&head).is_empty());
+}
+
+/// Counting was asked for, valgrind is there, and the count failed: a
+/// timing-only record would look like counters were off, so nothing is
+/// recorded for the commit and the failure is remembered like any other.
+#[test]
+fn a_failed_instruction_count_records_nothing() {
+    if !tak_cli::measure::valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let repo = Repo::new();
+    history(&repo);
+    // Exits 3 under valgrind and 0 otherwise: valgrind's tool is mapped into
+    // the shell, and the `grep` it spawns runs natively and sees it.
+    repo.write(
+        "tak.toml",
+        "[build]\ncmd = [\"true\"]\n\
+         [bench.startup]\n\
+         cmd = [\"sh\", \"-c\", \"grep -q -e cachegrind -e valgrind /proc/$$/maps && exit 3; exit 0\"]\n\
+         runs = 2\nwarmup = 0\n",
+    );
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let out = repo.tak(&["--commits", "main~1..main"]);
+    assert!(
+        stdout(&out).contains("instruction counting failed: startup"),
+        "{}",
+        both(&out)
+    );
+    assert!(repo.notes(&head).is_empty());
+    let dry = repo.tak(&["--commits", "main~1..main", "--dry-run"]);
+    assert!(
+        stdout(&dry).contains("measure failed before"),
+        "{}",
+        stdout(&dry)
+    );
 }

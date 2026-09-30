@@ -554,6 +554,11 @@ with nothing to build can declare `cmd = ["true"]`.
 `env_deny` does not apply to the build. It exists to keep a token from changing what a measured
 command does, and a build that fetches a private dependency may need exactly that token.
 
+A commit whose build or measurement failed is remembered, and later backfills pass over it; see
+[how failures are remembered](/guide/adopting#backfill-commits-by-building-them). Changing
+`[build]` retries every commit remembered under the old one. Any other edit to `tak.toml`
+retries the commits whose measurement failed, but not those whose build did.
+
 ## Environment and runner settings
 
 tak removes known sources of non-determinism from measured commands. Inspect every resolved
