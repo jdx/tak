@@ -1800,26 +1800,7 @@ fn cmd_compare(
         .map(|r| (r.bench.clone(), r.tool.clone()))
         .collect();
     let changed = proposed.changes_from(&policy, &measured);
-    let later = (!changed.is_empty()).then(|| {
-        format!(
-            " This revision changes the gate policy ({}), and the change takes effect \
-             once it is merged.",
-            changed.join(", ")
-        )
-    });
-    comparison.gate_source = match (&from, later) {
-        (None, later) => Some(format!(
-            "No `{}` at the base, `{at}`, so the gate is tak's defaults plus any flags \
-             and environment variables.{}",
-            config::FILE_NAME,
-            later.unwrap_or_default()
-        )),
-        (Some(path), Some(later)) => Some(format!(
-            "The gate comes from `{}` at the base, `{at}`.{later}",
-            compare::escape_control(path)
-        )),
-        (Some(_), None) => None,
-    };
+    comparison.gate_source = compare::gate_source(from.as_deref(), at, &changed);
     print!(
         "{}",
         compare::markdown(&comparison, &trend, gates, settings.credit)

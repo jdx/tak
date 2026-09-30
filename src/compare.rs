@@ -885,6 +885,40 @@ pub(crate) fn code_cell(text: &str) -> String {
     text.replace('|', "\\|")
 }
 
+/// The [`Comparison::gate_source`] line: where the gate came from, when the
+/// base had no `tak.toml` or the head's would gate differently; `None` when
+/// there is nothing to say.
+///
+/// `path` is the base's `tak.toml` from the repository root, `at` the base
+/// commit's short SHA, and `changed` what [`Gates::changes_from`] and the
+/// caller named, each already a code span. Every interpolation goes through
+/// [`code`]: the path is a directory name, which can hold a backtick that a
+/// hand-written span would end early on, or a control character.
+pub fn gate_source(path: Option<&str>, at: &str, changed: &[String]) -> Option<String> {
+    let later = (!changed.is_empty()).then(|| {
+        format!(
+            " This revision changes the gate policy ({}), and the change takes effect \
+             once it is merged.",
+            changed.join(", ")
+        )
+    });
+    match (path, later) {
+        (None, later) => Some(format!(
+            "No {} at the base, {}, so the gate is tak's defaults plus any flags and \
+             environment variables.{}",
+            code(crate::config::FILE_NAME),
+            code(at),
+            later.unwrap_or_default()
+        )),
+        (Some(path), Some(later)) => Some(format!(
+            "The gate comes from {} at the base, {}.{later}",
+            code(path),
+            code(at)
+        )),
+        (Some(_), None) => None,
+    }
+}
+
 /// One line naming trailers that were ignored, so an author whose trailer did
 /// nothing can see why rather than assume tak failed to read it.
 fn ignored_trailers(c: &Comparison) -> String {
@@ -1066,6 +1100,26 @@ mod tests {
     /// Only effective differences are named, and every name is escaped: a
     /// declared benchmark at the global gate is no change, and a newline in a
     /// measured series' name cannot start a line of the report.
+    #[test]
+    fn a_gate_source_path_with_a_backtick_stays_one_code_span() {
+        let changed = [code("[gate]")];
+        let line = gate_source(Some("we`ird/tak.toml"), "a1b2c3d4e5f6", &changed).unwrap();
+        assert_eq!(
+            line,
+            "The gate comes from `` we`ird/tak.toml `` at the base, `a1b2c3d4e5f6`. \
+             This revision changes the gate policy (`[gate]`), and the change takes \
+             effect once it is merged."
+        );
+        let line = gate_source(Some("a\nb/tak.toml"), "a1b2c3d4e5f6", &changed).unwrap();
+        assert!(!line.contains('\n'), "{line}");
+        assert_eq!(gate_source(Some("tak.toml"), "a1b2c3d4e5f6", &[]), None);
+        assert_eq!(
+            gate_source(None, "a1b2c3d4e5f6", &[]).unwrap(),
+            "No `tak.toml` at the base, `a1b2c3d4e5f6`, so the gate is tak's defaults \
+             plus any flags and environment variables."
+        );
+    }
+
     #[test]
     fn gate_changes_are_effective_and_escaped() {
         let global = gate(1.0, 0, true);
