@@ -68,6 +68,16 @@ survive the whole size range:
 | `-small` | 18 | no | 32–48px — the ticks turn to mush below ~48 |
 | `-tiny` | 30 | no | 16px — an 18px ring lands under one device pixel and antialiases to brown mud |
 
+## Share card
+
+`docs/public/og.png` (1200x630) is built by [`og.py`](og.py) from the mark and
+wordmark above, so it cannot drift from them. It sets its text in Inter, which is
+not vendored, so point it at a copy:
+
+```bash
+pip install resvg-py && python3 assets/og.py --fonts /path/to/inter/extras/ttf
+```
+
 ## Favicons
 
 `docs/public/` holds the generated favicon set, in the same layout as mise, hk,
