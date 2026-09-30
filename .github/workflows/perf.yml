@@ -245,7 +245,8 @@ jobs:
       # Proof this job has the data before anything may pass for want of it.
       # tak detect treats a failed notes refresh as "offline" and carries on
       # with what is local, which in this fresh checkout is nothing — and with
-      # --allow-empty below that would pass without examining anything. So the
+      # tak.toml's `allow_empty` that would pass, with only a warning, without
+      # examining anything. So the
       # fetch must succeed, and the commit publish just wrote must carry an
       # instruction count that tak itself can read.
       #
@@ -265,18 +266,25 @@ jobs:
             exit 1
           fi
 
-      # --allow-empty, deliberately, and only after the step above. TAK_RUNNER
-      # embeds the GitHub image and Rust versions, so the runner class changes
-      # on routine image and toolchain updates, and the first run after each
-      # has no earlier point in its new series. Failing main for that would
-      # make a red perf check routine, which is the fastest way to teach
-      # everyone to ignore it. Every other way to compare nothing is ruled out
-      # first: fetch-depth: 0 gives the walk its history, and the step above
-      # proves this commit's instruction counts are here. What is left for the
-      # flag to waive is a new runner class. A step onto this commit beyond
-      # an enabled gate still fails; see the note at the top of this job for
-      # why there are none today.
+      # An empty comparison passes with a warning, deliberately, and only after
+      # the step above. TAK_RUNNER embeds the GitHub image and Rust versions,
+      # so the runner class changes on routine image and toolchain updates,
+      # and the first run after each has no earlier point in its new series.
+      # Failing main for that would make a red perf check routine, which is
+      # the fastest way to teach everyone to ignore it. Every other way to
+      # compare nothing is ruled out first: fetch-depth: 0 gives the walk its
+      # history, and the step above proves this commit's instruction counts
+      # are here. What is left to waive is a new runner class. A step onto
+      # this commit beyond an enabled gate still fails; see the note at the
+      # top of this job for why there are none today.
+      #
+      # The waiver is tak.toml's `[gate] allow_empty = true`, not a flag here,
+      # so the pull-request check and this one follow one setting and cannot
+      # drift apart; tak detect reads it from this commit's tak.toml. It still
+      # shows: tak prints a `::warning::` annotation when it applies. Should
+      # tak.toml ever turn it off, this job fails on the next new runner
+      # class, which is the setting doing what it says.
       - name: Detect
         run: |
           set -o pipefail
-          /tmp/tak-build/tak detect --allow-empty | tee -a "$GITHUB_STEP_SUMMARY"
+          /tmp/tak-build/tak detect | tee -a "$GITHUB_STEP_SUMMARY"
