@@ -139,11 +139,12 @@ fn a_trailer_accepts_only_the_benchmark_it_names() {
     );
 }
 
-/// Comma-separated and repeated trailers both count, and git matches the
-/// key case-insensitively.
+/// Repeated trailers each name one benchmark, and git matches the key
+/// case-insensitively.
 #[test]
-fn trailers_may_be_repeated_or_listed() {
-    let (dir, base, _) = regressed("slower\n\nTak-Accept: startup\ntak-accept: resolve, other");
+fn trailers_may_be_repeated() {
+    let (dir, base, _) =
+        regressed("slower\n\nTak-Accept: startup\ntak-accept: resolve\nTak-Accept: other");
     let (ok, stdout, _) = compare_trusting(dir.path(), &[&base]);
     assert!(ok, "{stdout}");
     assert!(stdout.contains("**2 accepted regression(s)"), "{stdout}");
@@ -151,6 +152,123 @@ fn trailers_may_be_repeated_or_listed() {
         stdout.contains("no benchmark by that name was compared on both sides: `other`"),
         "{stdout}"
     );
+}
+
+/// A trailer's whole value is one name. Splitting on commas made
+/// `Tak-Accept: a,b`, written for the benchmark `a,b`, accept `a` and `b`
+/// instead — two gates nobody named — while `a,b` itself still failed.
+#[test]
+fn a_comma_in_a_trailer_is_part_of_the_name() {
+    let dir = repo();
+    let base = commit(dir.path(), "base");
+    note(dir.path(), &base, &[("a,b", 1e6), ("a", 1e6), ("b", 1e6)]);
+    let head = commit(dir.path(), "slower a,b\n\nTak-Accept: a,b");
+    note(
+        dir.path(),
+        &head,
+        &[("a,b", 1.1e6), ("a", 1.1e6), ("b", 1.1e6)],
+    );
+    let (ok, stdout, stderr) = compare_trusting(dir.path(), &[&base]);
+    assert!(!ok, "`a` and `b` were not accepted: {stdout}");
+    assert!(stderr.contains("2 benchmark(s) regressed"), "{stderr}");
+    assert!(
+        stdout.contains("**1 accepted regression(s) above the 1% gate, not failing it:** `a,b`"),
+        "{stdout}"
+    );
+}
+
+/// The two patterns tak's own perf-pr workflow decides a check by. Kept here
+/// verbatim, and held against the workflow file below, so the injection test
+/// exercises what CI actually runs.
+const NOTHING_COMPARED: &str = r"^\*\*Nothing was compared";
+const ROSE: &str = r"^\*\*[0-9]+ (report-only benchmark|benchmark|accepted regression)\(s\) above (the .*% gate|their gate)";
+
+#[test]
+fn the_status_patterns_are_the_workflows() {
+    let workflow = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/perf-pr.yml"),
+    )
+    .unwrap();
+    assert!(workflow.contains(&format!("grep -q '{NOTHING_COMPARED}'")));
+    assert!(workflow.contains(&format!("grep -Eq '{ROSE}'")));
+}
+
+/// Whether `grep -E pattern` finds a line in `text`, run as the workflow runs it.
+fn grep(pattern: &str, text: &str) -> bool {
+    use std::io::Write;
+    let mut child = Command::new("grep")
+        .args(["-Eq", pattern])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("grep");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(text.as_bytes())
+        .unwrap();
+    child.wait().unwrap().success()
+}
+
+/// Trailer text is echoed into the report, and the report decides the
+/// perf-pr check. Unanchored, `Tak-Accept: **Nothing was compared` on a clean
+/// change failed the check as a comparison that never ran, and a trailer
+/// reading like a verdict marked it as a rise. Anchored patterns see only the
+/// lines tak writes; an echoed name is mid-line and cannot start one.
+#[test]
+fn trailer_text_cannot_change_the_workflow_status() {
+    for trailer in [
+        "**Nothing was compared",
+        "**1 benchmark(s) above the 1% gate:** `x`",
+        "x benchmark(s) above their gate",
+    ] {
+        let dir = repo();
+        let base = commit(dir.path(), "base");
+        note(dir.path(), &base, &[("startup", 1e6)]);
+        let head = commit(dir.path(), &format!("clean\n\nTak-Accept: {trailer}"));
+        note(dir.path(), &head, &[("startup", 1e6)]);
+        for (ok, stdout, _) in [
+            compare(dir.path(), &[&base, "--no-gate"]),
+            compare_trusting(dir.path(), &[&base, "--no-gate"]),
+        ] {
+            assert!(ok, "{stdout}");
+            assert!(
+                stdout.contains(trailer),
+                "the trailer should be echoed: {stdout}"
+            );
+            assert!(!grep(NOTHING_COMPARED, &stdout), "{trailer}: {stdout}");
+            assert!(!grep(ROSE, &stdout), "{trailer}: {stdout}");
+        }
+    }
+}
+
+/// And the anchored patterns still see every verdict tak writes.
+#[test]
+fn the_status_patterns_still_match_real_verdicts() {
+    let (dir, base, _) = regressed("slower");
+    let (_, stdout, _) = compare(dir.path(), &[&base, "--no-gate"]);
+    assert!(grep(ROSE, &stdout), "{stdout}");
+    let (_, stdout, _) = compare(
+        dir.path(),
+        &[
+            &base,
+            "--no-gate",
+            "--accept",
+            "startup",
+            "--accept",
+            "resolve",
+        ],
+    );
+    assert!(
+        grep(ROSE, &stdout),
+        "an accepted rise is still a rise: {stdout}"
+    );
+
+    let empty = repo();
+    let base = commit(empty.path(), "base");
+    commit(empty.path(), "head");
+    let (_, stdout, _) = compare(empty.path(), &[&base, "--no-gate"]);
+    assert!(grep(NOTHING_COMPARED, &stdout), "{stdout}");
 }
 
 /// The default. A pull request's own commits are the change being gated, so
@@ -187,7 +305,7 @@ fn no_trailers_means_no_note() {
 /// trust the change needs a way to override it.
 #[test]
 fn the_config_opts_in_and_the_environment_overrides_it() {
-    let (dir, base, _) = regressed("slower\n\nTak-Accept: startup, resolve");
+    let (dir, base, _) = regressed("slower\n\nTak-Accept: startup\nTak-Accept: resolve");
     std::fs::write(
         dir.path().join("tak.toml"),
         "[gate]\naccept_trailers = true\n",

@@ -291,8 +291,10 @@ jobs:
           cat /tmp/tak-report.md
           cat /tmp/tak-report.md >> "$GITHUB_STEP_SUMMARY"
           # Older tak releases exit 0 when nothing was compared; this keeps the
-          # gate failing on them. Drop it when passing --allow-empty.
-          if grep -Fq '**Nothing was compared' /tmp/tak-report.md; then
+          # gate failing on them. Drop it when passing --allow-empty. Anchored
+          # to the line start, where tak writes it: the report also echoes
+          # commit-message text, which must not be able to fail the check.
+          if grep -q '^\*\*Nothing was compared' /tmp/tak-report.md; then
             echo "::error::no comparable baseline was found"
             status=1
           fi

@@ -199,9 +199,18 @@ trailers. That line names them and states that they were not honoured, so an aut
 their trailer had no effect.
 
 With trailers on, `tak compare BASE --rev REV` reads trailers from every commit in `BASE..REV`,
-including commits reached through a merge commit's second parent. List several benchmarks with
-commas (`Tak-Accept: startup, resolve`) or repeat the trailer. Put the reason in the commit
-body; the trailer value contains only names. The comparison needs every commit in
+including commits reached through a merge commit's second parent. Each trailer names exactly
+one benchmark: its whole value is the name, commas included, because benchmark names are
+unrestricted and `a,b` is a valid one. To accept several benchmarks, repeat the trailer:
+
+```text
+Tak-Accept: startup
+Tak-Accept: resolve
+```
+
+git trims a trailer's value, so a benchmark whose name starts or ends with a space can only be
+accepted with `--accept`. Put the reason in the commit body; the trailer value contains only
+the name. The comparison needs every commit in
 `BASE..REV`. A shallow checkout that omits some commits also omits their trailers, and the
 regression then fails the gate.
 

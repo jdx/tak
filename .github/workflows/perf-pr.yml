@@ -218,6 +218,13 @@ jobs:
       # rise too, so an acceptance can only ever turn this check neutral,
       # never green.
       #
+      # Both patterns are anchored to the start of a line, where tak writes its
+      # verdicts. The report also echoes text from the pull request — trailer
+      # values, benchmark names — and unanchored, a commit whose message said
+      # `Tak-Accept: **Nothing was compared` turned a clean run into a failed
+      # check. tak writes echoed names mid-line and escapes any newline in
+      # them, so none can start a line.
+      #
       # TAK_ACCEPT_TRAILERS=0 because tak.toml comes from the pull request's
       # own checkout: a pull request could set `[gate] accept_trailers = true`
       # and accept its own regression with a trailer. The environment takes
@@ -233,9 +240,9 @@ jobs:
           set -e
           if [ "$ran" -ne 0 ]; then
             echo 2 > /tmp/tak-gate-status
-          elif grep -Fq '**Nothing was compared' /tmp/tak-report.md; then
+          elif grep -q '^\*\*Nothing was compared' /tmp/tak-report.md; then
             echo 2 > /tmp/tak-gate-status
-          elif grep -Eq '(benchmark|accepted regression)\(s\) above (the .*% gate|their gate)' /tmp/tak-report.md; then
+          elif grep -Eq '^\*\*[0-9]+ (report-only benchmark|benchmark|accepted regression)\(s\) above (the .*% gate|their gate)' /tmp/tak-report.md; then
             echo 1 > /tmp/tak-gate-status
           else
             echo 0 > /tmp/tak-gate-status
