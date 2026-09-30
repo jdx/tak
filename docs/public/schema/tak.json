@@ -57,6 +57,10 @@
           "description": "Instructions a count may rise by before `tak compare` fails, whatever the percentage. A regression must exceed both. Default 0, no floor.",
           "type": "integer",
           "minimum": 0
+        },
+        "accept_trailers": {
+          "description": "Honour `Tak-Accept:` commit trailers in `tak compare`. Off by default: the trailers are written by the change being gated.",
+          "type": "boolean"
         }
       }
     },

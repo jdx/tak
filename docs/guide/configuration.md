@@ -261,7 +261,8 @@ run the concurrent fixers lost an edit every time, and were faster for it:
   rate fits neither rule, so it isn't stored alongside them. Instead, tak names each subject
   whose check failed and how many of its samples failed, writes no notes, and exits
   non-zero, as it does when a subject is dropped. `--export-json` is still written, with the
-  verdicts.
+  verdicts. `--save-baseline` follows the same rule, because a
+  [local baseline](/guide/getting-started#measure-a-local-change) stores the same records.
 
 ## Recording other metrics
 
@@ -311,8 +312,9 @@ benchmark adds them to the end of each subject's summary line. With GNU `ls` cop
 - **A metric that can't be taken fails the run.** A missing file or a command that exits
   non-zero or prints something other than one number is reported on stderr. Every benchmark
   is still measured and `--export-json` is still written, with that metric as `null`. Then tak
-  exits non-zero, recording or not, and `--record` writes nothing: a commit with a declared
-  metric missing would look like one where the metric had been removed.
+  exits non-zero, recording or not, and neither `--record` nor `--save-baseline` writes anything:
+  a stored run with a declared metric missing would look like one where the metric had been
+  removed.
 - **Names** use lowercase letters, digits and `_`, start with a letter, and are at most 64
   characters. `instructions` and anything starting with `wall_` are reserved for what tak
   measures itself. End the name with its unit, `_bytes`, `_kb`, `_count`, `_ms`, so a report
@@ -648,7 +650,20 @@ TAK_GATE_PCT=2 tak compare origin/main
 ```
 
 Only instruction counts are gated. Wall-clock changes and
-[custom metrics](#recording-other-metrics) are displayed but never fail the comparison. Use `tak compare --no-gate` when a report must always exit successfully.
+[custom metrics](#recording-other-metrics) are displayed but never fail the comparison. Use `tak compare --no-gate` when a report must always exit successfully. To let
+one benchmark regress on purpose while the others still gate, pass `--accept BENCH`; see
+[accepting an intentional regression](/guide/ci#accept-an-intentional-regression).
+
+`Tak-Accept:` commit trailers do the same, but only when the project opts in. Trailers are
+written by the change being gated, so they are ignored by default:
+
+```toml
+[gate]
+accept_trailers = true
+```
+
+`TAK_ACCEPT_TRAILERS=0` in a workflow overrides the file. Use it where the gate is enforced
+against pull requests you do not trust, because a pull request can edit `tak.toml`.
 
 ### An absolute floor
 
