@@ -738,12 +738,25 @@ fn wait_gone(pid: i32) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         // SAFETY: signal 0 only checks that the process exists.
-        if unsafe { libc::kill(pid, 0) } != 0 {
+        if unsafe { libc::kill(pid, 0) } != 0 || is_zombie(pid) {
             return true;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     false
+}
+
+/// Dead and waiting to be reaped. An orphan is reparented to PID 1, and in a
+/// container whose PID 1 is not an init — `docker run … sleep infinity` —
+/// nothing ever reaps it, so it exists for `kill(pid, 0)` forever.
+fn is_zombie(pid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|s| {
+            s.rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().next().map(|st| st == "Z"))
+        })
+        .unwrap_or(false)
 }
 
 fn wait_for(child: &mut std::process::Child) -> std::process::ExitStatus {
