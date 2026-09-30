@@ -5,7 +5,7 @@
 
 Compare this commit's measurements against another's.
 
-Fails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate` in the working tree's tak.toml, or when no series was measured on both sides. Wall clock is reported and never gated. A regression in a benchmark named by `--accept` is reported as accepted and does not fail. So is one named by a `Tak-Accept:` trailer on a commit in BASE..REV, but only when the `accept_trailers` setting is on.
+Fails when an instruction count has risen by more than `gate_pct` and `gate_min_delta`, or by more than a benchmark's own `gate`, or when no series was measured on both sides. The gate comes from BASE's tak.toml, not the working tree's, so a change cannot loosen its own; flags and environment variables still override it. Wall clock is reported and never gated. A regression in a benchmark named by `--accept` is reported as accepted and does not fail. So is one named by a `Tak-Accept:` trailer on a commit in BASE..REV, but only when the `accept_trailers` setting is on.
 
 ## Arguments
 - **`[BASE]`** — Revision to compare against.

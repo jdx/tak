@@ -59,6 +59,8 @@ and reasoning.
   opts in
 - `tak run --save-baseline NAME` and `tak run --baseline NAME` compare a local, uncommitted
   change against a saved measurement, without touching git notes
+- `tak run --profile-dir` and `tak explain` show which functions an instruction-count change
+  came from
 - `tak detect` reports instruction-count steps that already landed on a branch, and fails
   when the newest recorded commit introduced one or when nothing could be compared
 - `tak log` shows each benchmark's measurements over first-parent history, as Markdown or as

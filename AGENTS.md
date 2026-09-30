@@ -73,12 +73,14 @@ src/machine.rs     the OS, CPU and memory an export was measured on; never recor
 src/progress.rs    the stderr progress bar and its per-subject time estimate
 src/notes.rs       refs/notes/tak storage; shells out to git for all network I/O
 src/record.rs      the on-disk line format and its schema version
+src/profile.rs     cachegrind profiles for `--profile-dir`; parsing and diffing for `tak explain`
 src/config.rs      tak.toml — declared benchmarks, [defaults], shared [subject.NAME] tables
 src/template.rs    tera templates in tak.toml values, rendered before measuring
 src/backfill.rs    benchmark published release binaries to bootstrap history
 crates/asset-picker/   release-asset selection, extracted from mise; published separately
 tests/counters.rs  exercises the real cachegrind subprocess
 tests/schema.rs    docs/public/schema/tak.json and the parser accept the same keys
+tests/profiles.rs  profiles from real cachegrind, and `tak explain` end to end
 ```
 
 `src/lib.rs` re-exports the modules so integration tests can reach them. That is the only

@@ -329,8 +329,9 @@ jobs:
       - name: Compare and gate
         env:
           BASE_SHA: ${{ steps.base.outputs.sha }}
-          # tak.toml comes from the pull request, which could otherwise turn on
-          # `accept_trailers` and accept its own regression with a trailer.
+          # The gate comes from the base's tak.toml, so the pull request cannot
+          # turn on `accept_trailers` itself. This keeps trailers off here even
+          # if tak.toml turns them on for the main branch.
           TAK_ACCEPT_TRAILERS: "0"
         run: |
           set +e
@@ -354,6 +355,12 @@ jobs:
 Checking out the pull request's head SHA avoids measuring GitHub's synthetic merge commit.
 Using the merge base avoids attributing unrelated changes that landed on main after the branch
 was created to the pull request.
+
+`tak compare` reads the gate from the merge base's `tak.toml`, not the pull request's, so a pull
+request cannot loosen its own gate. A gate change takes effect once it is merged, and the report
+says so on the pull request that makes it. This needs the merge base's commit and tree in the
+clone, which `fetch-depth: 0` and the base-branch fetch above provide. See
+[where the gate comes from](/guide/ci#where-the-gate-comes-from).
 
 The example passes the read-only token to git through the environment of the one step that
 fetches the base branch and notes, so it is never written to `.git/config` and is out of reach
@@ -408,9 +415,11 @@ with `[gate] accept_trailers = true`. Trailers are written by the change being g
 are ignored by default. If the project opts in and squash-merges pull requests, keep the
 trailer in the final paragraph of the squashed commit message.
 
-`tak compare` reads `tak.toml` from the pull request's checkout, so a pull request can turn
-trailers on for itself. Set `TAK_ACCEPT_TRAILERS: "0"` in the environment of the job that
-compares, as the workflow above does. The environment takes precedence over the file. With
+`tak compare` reads `accept_trailers` from the merge base's `tak.toml`, so a pull request cannot
+turn trailers on for itself. If `tak.toml` turns them on for the main branch, they are on for
+pull requests too. Set `TAK_ACCEPT_TRAILERS: "0"` in the environment of the job that compares,
+as the workflow above does, to keep them off there. The environment takes precedence over the
+file. With
 [jdx/tak-action](#use-the-github-action), put it in the compare job's `env:` so that it
 reaches the action's steps. The action's `accept` input passes each line as its own
 `--accept`. It needs a tak release that includes `--accept`, and tak 0.0.13, pinned in the

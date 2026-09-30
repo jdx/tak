@@ -82,6 +82,7 @@ export default defineConfig({
           { text: "Adopt tak in a project", link: "/guide/adopting" },
           { text: "Benchmark configuration", link: "/guide/configuration" },
           { text: "CI and git notes", link: "/guide/ci" },
+          { text: "Explain a change", link: "/guide/attribution" },
         ],
       },
       {

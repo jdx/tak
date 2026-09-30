@@ -30,6 +30,7 @@
 - [`tak init [--remote <REMOTE>]`](/cli/init.md)
 - [`tak backfill [FLAGS] [-- ARGS]…`](/cli/backfill.md)
 - [`tak compare [FLAGS] [BASE]`](/cli/compare.md)
+- [`tak explain [--top <N>] <BASE> <HEAD>`](/cli/explain.md)
 - [`tak detect [FLAGS] [REV]`](/cli/detect.md)
 - [`tak doctor`](/cli/doctor.md)
 - [`tak settings [--docs]`](/cli/settings.md)

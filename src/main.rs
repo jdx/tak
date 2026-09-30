@@ -117,6 +117,10 @@ enum Cmd {
         /// Write every sample and summary to PATH as hyperfine-compatible JSON.
         #[usage(long, value_name = "PATH")]
         export_json: Option<std::path::PathBuf>,
+        /// Keep the cachegrind profile behind each instruction count, as
+        /// `DIR/<bench>/<subject>.cachegrind.out`, for `tak explain`.
+        #[usage(long, value_name = "DIR")]
+        profile_dir: Option<std::path::PathBuf>,
         /// Save the results as a named local baseline, kept in the git
         /// directory rather than in refs/notes/tak. Replaces what NAME held
         /// for the benchmarks measured and keeps the rest.
@@ -223,11 +227,12 @@ enum Cmd {
     /// Compare this commit's measurements against another's.
     ///
     /// Fails when an instruction count has risen by more than `gate_pct` and
-    /// `gate_min_delta`, or by more than a benchmark's own `gate` in the
-    /// working tree's tak.toml, or when no series was measured on both
-    /// sides. Wall clock is reported and never gated. A regression in a
-    /// benchmark named by `--accept` is reported as accepted and does not
-    /// fail. So is one named by a `Tak-Accept:` trailer on a commit in
+    /// `gate_min_delta`, or by more than a benchmark's own `gate`, or when no
+    /// series was measured on both sides. The gate comes from BASE's
+    /// tak.toml, not the working tree's, so a change cannot loosen its own;
+    /// flags and environment variables still override it. Wall clock is
+    /// reported and never gated. A regression in a benchmark named by
+    /// `--accept` is reported as accepted and does not fail. So is one named by a `Tak-Accept:` trailer on a commit in
     /// BASE..REV, but only when the `accept_trailers` setting is on.
     Compare {
         /// Revision to compare against.
@@ -254,6 +259,23 @@ enum Cmd {
         /// migration. A regression still fails.
         #[usage(long)]
         allow_empty: bool,
+    },
+    /// Show which functions an instruction-count change came from.
+    ///
+    /// Reads two sets of profiles written by `tak run --profile-dir`, pairs
+    /// them by benchmark and subject, and prints the functions whose counts
+    /// changed most as markdown. Reports only; it never fails on the numbers.
+    Explain {
+        /// Base profiles: a directory written by `tak run --profile-dir`, or
+        /// one profile file.
+        #[usage(arg)]
+        base: std::path::PathBuf,
+        /// Head profiles, in the same form as the base.
+        #[usage(arg)]
+        head: std::path::PathBuf,
+        /// Functions to list for each benchmark.
+        #[usage(long, default = "10", value_name = "N")]
+        top: usize,
     },
     /// Find instruction-count steps that already landed on a branch.
     ///
@@ -411,6 +433,8 @@ struct RunOpts {
     subjects: Vec<String>,
     seed: Option<u64>,
     export_json: Option<std::path::PathBuf>,
+    /// Absolute, so a subject's own `dir` cannot move where profiles land.
+    profile_dir: Option<std::path::PathBuf>,
     config: Option<std::path::PathBuf>,
     dry_run: bool,
     save_baseline: Option<String>,
@@ -512,6 +536,32 @@ struct Measured {
     /// Kept apart from counters being off: the record looks the same either
     /// way, and only one of them is a benchmark `--gate` meant to check.
     count_failed: bool,
+    /// The cachegrind profile behind the instruction count, when
+    /// `--profile-dir` asked for one and the count succeeded.
+    profile: Option<Vec<u8>>,
+}
+
+/// Check every profile path before measuring anything, so a benchmark name
+/// that cannot be a file name fails now rather than after an hour of
+/// benchmarks before it.
+fn check_profile_paths<'a>(
+    opts: &RunOpts,
+    plans: impl IntoIterator<Item = (&'a str, bool, &'a [Subject])>,
+) -> Result<()> {
+    let Some(dir) = &opts.profile_dir else {
+        return Ok(());
+    };
+    if opts.no_counters {
+        bail!(
+            "--profile-dir keeps the profiles of instruction counts, and --no-counters turns them off"
+        );
+    }
+    for (bench, multi, subjects) in plans {
+        for s in subjects {
+            tak_cli::profile::path_for(dir, bench, &record_tool(multi, s))?;
+        }
+    }
+    Ok(())
 }
 
 /// Reject the recorded names that come from outside `tak.toml` — the runner
@@ -579,6 +629,10 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         ok_exit_codes: config::DEFAULT_OK_EXIT_CODES.to_vec(),
         metrics: BTreeMap::new(),
     };
+    check_profile_paths(
+        &opts,
+        [(bench.as_str(), false, std::slice::from_ref(&subject))],
+    )?;
     let seed = opts.seed.unwrap_or_else(random_seed);
     if opts.dry_run {
         print_plan(
@@ -671,6 +725,12 @@ fn run_declared(opts: RunOpts, settings: &Settings, local: &Local) -> Result<()>
         return Ok(());
     }
 
+    check_profile_paths(
+        &opts,
+        plans
+            .iter()
+            .map(|(name, multi, subjects)| (name.as_str(), *multi, subjects.as_slice())),
+    )?;
     if opts.dry_run {
         println!("{}", path.display());
         for (name, multi, subjects) in &plans {
@@ -1002,6 +1062,33 @@ fn finish(
             measured.len(),
             path.display()
         );
+    }
+    // Written when the export is and for the same reason: they describe this
+    // run, and a subject that failed simply has none, which `tak explain`
+    // reports as a profile on one side only.
+    if let Some(dir) = &opts.profile_dir {
+        let runner = runner_class(settings);
+        // What `--record` would attach the counts to, so `tak explain` can
+        // find them. Outside a repository there is nothing to check against.
+        let commit = notes::rev_parse("HEAD").ok();
+        let mut written = 0usize;
+        for m in &measured {
+            if let Some(raw) = &m.profile {
+                // Named, like the origin inside it, by the series the record
+                // uses — what the notes are looked up by, and for a single
+                // command that may be TAK_TOOL rather than `self`.
+                let dest = tak_cli::profile::path_for(dir, &m.bench, &m.record.tool)?;
+                let origin = tak_cli::profile::Origin {
+                    runner: runner.clone(),
+                    commit: commit.clone(),
+                    bench: m.bench.clone(),
+                    subject: m.record.tool.clone(),
+                };
+                tak_cli::profile::write(&dest, raw, &origin)?;
+                written += 1;
+            }
+        }
+        println!("\n  wrote {written} profile(s) to {}", dir.display());
     }
     let failing = failing_checks(&measured);
     // Reported before a failed subject stops the run: the question this
@@ -1551,8 +1638,13 @@ fn measure_bench(
                 samples.first_failure.as_deref().unwrap_or("(no detail)")
             );
         }
-        let count_failed =
-            s.counters && !opts.no_counters && !count_into(&mut metrics, s, settings);
+        let (count_failed, profile) = if s.counters && !opts.no_counters {
+            let (counted, profile) =
+                count_into(&mut metrics, s, settings, opts.profile_dir.is_some());
+            (!counted, profile)
+        } else {
+            (false, None)
+        };
         // Last, once the subject is done running: setup or the samples may
         // be what produced the file or output being measured. A failure is
         // reported here and fails the run in `finish`, after every other
@@ -1624,6 +1716,7 @@ fn measure_bench(
             samples,
             custom,
             count_failed,
+            profile,
             record: Record {
                 v: SCHEMA_VERSION,
                 bench: bench.to_string(),
@@ -1644,7 +1737,9 @@ fn measure_bench(
 ///
 /// TAK_TOOL only ever renames the single-command series. Keyed on the
 /// benchmark's shape rather than the subject's name, so a declared subject
-/// can never be recorded as anything but itself.
+/// can never be recorded as anything but itself. Profiles are named by it
+/// too, so two `TAK_TOOL`s measured into one `--profile-dir` are two files,
+/// not one overwriting the other under `self`.
 fn record_tool(multi: bool, s: &Subject) -> String {
     if multi {
         s.name.clone()
@@ -1659,9 +1754,34 @@ fn record_tool(multi: bool, s: &Subject) -> String {
 /// False only when valgrind was there and the count still failed. A missing
 /// valgrind is not a failure: nothing on this host could be counted, and
 /// `--gate` already has nothing to check then.
-fn count_into(metrics: &mut BTreeMap<String, f64>, s: &Subject, settings: &Settings) -> bool {
-    match measure::subject_instructions(s, settings) {
-        Ok(Some(c)) => {
+///
+/// With `profile`, also returns the cachegrind profile behind the count.
+fn count_into(
+    metrics: &mut BTreeMap<String, f64>,
+    s: &Subject,
+    settings: &Settings,
+    profile: bool,
+) -> (bool, Option<Vec<u8>>) {
+    let counted = if profile {
+        measure::subject_profile(s, settings).map(|c| c.map(|(c, p)| (c, Some(p))))
+    } else {
+        measure::subject_instructions(s, settings).map(|c| c.map(|c| (c, None)))
+    };
+    match counted {
+        Ok(Some((c, profile))) => {
+            // The count stands without its profile; only the explanation is
+            // lost, and saying so beats a missing file nobody notices.
+            let profile = match profile {
+                Some(Ok(raw)) => Some(raw),
+                Some(Err(e)) => {
+                    eprintln!(
+                        "warning: {}: instruction count kept, but its profile was not: {e:#}",
+                        s.name
+                    );
+                    None
+                }
+                None => None,
+            };
             metrics.insert("instructions".into(), c.min as f64);
             if c.is_suspect() {
                 eprintln!(
@@ -1674,7 +1794,7 @@ fn count_into(metrics: &mut BTreeMap<String, f64>, s: &Subject, settings: &Setti
                     c.runs
                 );
             }
-            true
+            (true, profile)
         }
         Ok(None) => {
             eprintln!(
@@ -1682,13 +1802,13 @@ fn count_into(metrics: &mut BTreeMap<String, f64>, s: &Subject, settings: &Setti
                  Instruction counts are the only gate-able metric; on macOS/Windows \
                  run tak in a Linux container to get them."
             );
-            true
+            (true, None)
         }
         // Valgrind exists but the measurement failed. Say so rather than
         // blaming a missing install, and keep the timing we did collect.
         Err(e) => {
             eprintln!("warning: instruction counting failed: {e}");
-            false
+            (false, None)
         }
     }
 }
@@ -1816,6 +1936,10 @@ fn floor_suffix(gate: &compare::Gate) -> String {
 }
 
 /// Compare `rev` against `base`, print the report, and gate on it.
+///
+/// `cli` beside `settings`: the base's gate is resolved afresh under the same
+/// flags, so they have to arrive unresolved as well.
+#[allow(clippy::too_many_arguments)]
 fn cmd_compare(
     base: String,
     rev: String,
@@ -1823,11 +1947,24 @@ fn cmd_compare(
     no_gate: bool,
     accept_flags: Vec<String>,
     allow_empty: bool,
+    cli: &CliLayer,
     settings: &Settings,
 ) -> Result<()> {
-    let gates = compare_gates(settings, None)?;
-    let base_sha = notes::rev_parse(&base).with_context(|| format!("cannot resolve {base}"))?;
+    // The working tree's policy is loaded first, and still has to be valid:
+    // it is what this change will gate with once merged, and a bad gate should
+    // fail here, on its own pull request, before anything is fetched.
+    let proposed = Policy {
+        gates: compare_gates(settings, None)?,
+        accept_trailers: settings.accept_trailers,
+    };
+    // The commit itself is needed, not only its notes: the gate is read out of
+    // its tree. A workflow that found the merge base has already fetched it.
+    let base_sha = notes::rev_parse(&base).with_context(|| {
+        format!("cannot resolve {base}; tak compare needs the base commit locally, so fetch it")
+    })?;
     let head_sha = notes::rev_parse(&rev).with_context(|| format!("cannot resolve {rev}"))?;
+    let (policy, from) = base_policy(&base_sha, cli)?;
+    let gates = &policy.gates;
 
     let mut accepted = Acceptances::default();
     for name in &accept_flags {
@@ -1839,7 +1976,7 @@ fn cmd_compare(
     // trailer was ignored should be told, not left guessing.
     let log = notes::trailers(&base_sha, &head_sha, accept::TRAILER, false);
     let mut ignored = Acceptances::default();
-    if settings.accept_trailers {
+    if policy.accept_trailers {
         // Fatal when honoured, unlike the trend below. Carrying on would still
         // fail closed, but on a regression the author accepted, with a report
         // that says nothing about why the acceptance was not seen.
@@ -1860,15 +1997,25 @@ fn cmd_compare(
     let base_records = notes::read(Some(&remote), &base_sha)?;
     let head_records = notes::read(None, &head_sha)?;
 
-    let comparison = compare::compare(&base_records, &head_records)
+    let mut comparison = compare::compare(&base_records, &head_records)
         .with_accepted(accepted)
         .with_ignored_trailers(ignored);
     // Never fatal: a shallow checkout has no history to walk, and a missing
     // sparkline is a smaller loss than a failed gate.
     let trend = gather_trend(&base_sha, &head_sha, &head_records).unwrap_or_default();
+    // Beside the verdict, where a pull request that edits a gate on purpose
+    // looks when the gate it wrote did not apply.
+    let at = detect::short(&base_sha);
+    let measured = base_records
+        .iter()
+        .chain(&head_records)
+        .map(|r| (r.bench.clone(), r.tool.clone()))
+        .collect();
+    let changed = proposed.changes_from(&policy, &measured);
+    comparison.gate_source = compare::gate_source(from.as_deref(), at, &changed);
     print!(
         "{}",
-        compare::markdown(&comparison, &trend, &gates, settings.credit)
+        compare::markdown(&comparison, &trend, gates, settings.credit)
     );
 
     if no_gate {
@@ -1889,13 +2036,13 @@ fn cmd_compare(
         )
     }
     // Accepted regressions are reported above and do not count here.
-    let regressions = comparison.failures(&gates);
+    let regressions = comparison.failures(gates);
     if regressions.is_empty() {
         return Ok(());
     }
     // A non-zero exit is the gate. The table above already says which and by
     // how much, so this only has to be unambiguous about why the job failed.
-    if comparison.gated_uniformly(&gates) {
+    if comparison.gated_uniformly(gates) {
         let floor = floor_suffix(&gates.global);
         bail!(
             "{} benchmark(s) regressed by more than {}%{floor}",
@@ -1907,6 +2054,34 @@ fn cmd_compare(
         "{} benchmark(s) regressed beyond their gate",
         regressions.len()
     )
+}
+
+/// Print which functions account for the instruction-count changes between
+/// two sets of profiles.
+///
+/// Settings are not read: nothing here measures or gates, and the credit line
+/// is left to `tak compare`, whose report this is meant to sit under.
+fn cmd_explain(base: &Path, head: &Path, top: usize) -> Result<()> {
+    if top == 0 {
+        bail!("--top must be at least 1");
+    }
+    let (pairs, unpaired) = tak_cli::profile::load(base, head)?;
+    // Local notes only, no fetch: the check is a warning, and a report that
+    // waits on the network, or fails without one, costs more than it adds.
+    let recorded = |o: &tak_cli::profile::Origin| {
+        let records = notes::read(None, o.commit.as_deref()?).ok()?;
+        records
+            .iter()
+            .filter(|r| r.bench == o.bench && r.tool == o.subject && r.runner == o.runner)
+            .filter_map(|r| r.metrics.get(compare::GATED_METRIC))
+            .map(|v| *v as u64)
+            .min()
+    };
+    print!(
+        "{}",
+        tak_cli::profile::markdown(&pairs, &unpaired, top, &recorded)
+    );
+    Ok(())
 }
 
 /// Walk `rev`'s recorded history, print the steps, and gate on the newest.
@@ -2008,11 +2183,10 @@ fn cmd_detect(
 /// The gate for every series: `[gate]` and its flags, overridden per benchmark
 /// by the `tak.toml` in the working tree.
 ///
-/// The working tree's file, not one read from either revision's history. That
-/// is where `[gate]` already comes from, and in CI it is the checked-out head:
-/// a pull request that loosens a benchmark's gate does so in its own diff,
-/// where a reviewer can see it. Reading the base's file instead would make a
-/// new benchmark's gate take effect one merge late.
+/// The working tree's file is right for `tak detect`, which runs on the merged
+/// branch, and for `tak run --baseline`, which is local. `tak compare`
+/// enforces [`base_policy`] instead and uses this only to tell a pull request
+/// that its own file would gate differently.
 ///
 /// Loaded before any notes are read, so a bad gate fails the command before it
 /// has fetched anything. No `tak.toml` is fine — every series gets the global
@@ -2031,6 +2205,112 @@ fn compare_gates(settings: &Settings, config: Option<&Path>) -> Result<compare::
         Some((_, cfg)) => cfg.gates(global),
         None => compare::Gates::uniform(global),
     })
+}
+
+/// Everything a `tak.toml` can say about whether `tak compare` fails.
+struct Policy {
+    gates: compare::Gates,
+    accept_trailers: bool,
+}
+
+impl Policy {
+    /// What this policy would enforce differently from `base`, named for the
+    /// report; empty when it would gate every series the same way.
+    ///
+    /// Both sides are resolved under the same flags and environment, so a
+    /// difference an override masks is not reported: with the workflow
+    /// unchanged, merging it changes nothing either.
+    fn changes_from(&self, base: &Policy, measured: &BTreeSet<(String, String)>) -> Vec<String> {
+        let mut out = self.gates.changes_from(&base.gates, measured);
+        if self.accept_trailers != base.accept_trailers {
+            out.push("`accept_trailers`".to_string());
+        }
+        out
+    }
+}
+
+/// The gate policy `tak compare` enforces, read from `tak.toml` in the base
+/// revision's tree, and the path it was found at.
+///
+/// Not the working tree's. In CI that is the change under review, and a gate
+/// the change can edit is a gate it can waive: raise `pct`, mark the benchmark
+/// it regressed `enabled = false`, or turn on `accept_trailers` and add a
+/// trailer. The base is already reviewed and merged. The cost is that a gate
+/// change takes effect one merge late, which the report says when it applies.
+///
+/// Only the gate moves. `[report] credit` is cosmetic, and nothing else in
+/// the file bears on a comparison, which measures nothing: the benchmarks the
+/// working tree declares are what `tak run` measured on this side. Flags and
+/// environment variables still override the base's file, because the workflow
+/// sets them, not the change.
+///
+/// Found by searching upward from the current directory, as `tak run` finds
+/// its file, but through the base's tree rather than the disk. A path taken
+/// from the working tree would let a change pick which file gates it: delete
+/// or move `tak.toml`, or add one nearer the working directory, and the base
+/// would have nothing there. For the same reason a base with no `tak.toml`
+/// falls back to the defaults, never to the working tree's file.
+///
+/// A base file that does not parse is an error, not a fallback: the base is
+/// the trusted side, and whatever it failed to say would otherwise be replaced
+/// by defaults nobody chose. Missing objects are an error too, rather than
+/// being read as a missing file.
+fn base_policy(base_sha: &str, cli: &CliLayer) -> Result<(Policy, Option<String>)> {
+    let at = detect::short(base_sha);
+    let found = find_at(base_sha).with_context(|| {
+        format!(
+            "cannot read the gate policy from the base, {at}: tak compare reads {} out \
+             of the base commit's tree, so its objects must be in this clone",
+            config::FILE_NAME
+        )
+    })?;
+    let (layer, config, path) = match found {
+        None => (TakConfigLayer::empty(), None, None),
+        Some((path, text)) => {
+            let origin = format!("{at}:{path}");
+            let context = || {
+                format!(
+                    "in {path} at the base, {at}, which sets the gate for this comparison; \
+                     fix it there"
+                )
+            };
+            let layer = TakConfigLayer::parse(&origin, &text).with_context(context)?;
+            let config = Config::parse(&text).with_context(context)?;
+            (layer, Some(config), Some(path))
+        }
+    };
+    let settings = Settings::resolve(cli, &EnvLayer::from_process(), &layer)
+        .with_context(|| format!("could not read settings from the base, {at}"))?;
+    let global = global_gate(&settings)?;
+    let gates = match config {
+        Some(cfg) => cfg.gates(global),
+        None => compare::Gates::uniform(global),
+    };
+    let policy = Policy {
+        gates,
+        accept_trailers: settings.accept_trailers,
+    };
+    Ok((policy, path))
+}
+
+/// The nearest `tak.toml` in `commit`'s tree, searching from the current
+/// directory up to the repository root: its path from the root, and its text.
+fn find_at(commit: &str) -> Result<Option<(String, String)>> {
+    let prefix = notes::prefix()?;
+    let mut dir = prefix.trim_end_matches('/');
+    loop {
+        let path = match dir {
+            "" => config::FILE_NAME.to_string(),
+            _ => format!("{dir}/{}", config::FILE_NAME),
+        };
+        if let Some(text) = notes::file_at(commit, &path)? {
+            return Ok(Some((path, text)));
+        }
+        if dir.is_empty() {
+            return Ok(None);
+        }
+        dir = dir.rsplit_once('/').map_or("", |(parent, _)| parent);
+    }
 }
 
 /// The `[gate]` settings, checked, from whichever source set them.
@@ -2387,6 +2667,7 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
         subjects: Vec::new(),
         seed: None,
         export_json: None,
+        profile_dir: None,
         config: None,
         dry_run: o.dry_run,
         // Backfill records to each commit's note; local baselines belong to
@@ -2950,6 +3231,7 @@ fn main() -> Result<()> {
             subject,
             seed,
             export_json,
+            profile_dir,
             config,
             dry_run,
             save_baseline,
@@ -2958,6 +3240,12 @@ fn main() -> Result<()> {
             cmd,
         } => {
             let settings = Settings::from_process_at(&overrides, config.as_deref())?;
+            let profile_dir = profile_dir
+                .map(|d| {
+                    std::path::absolute(&d)
+                        .with_context(|| format!("could not resolve {}", d.display()))
+                })
+                .transpose()?;
             cmd_run(
                 RunOpts {
                     bench,
@@ -2969,6 +3257,7 @@ fn main() -> Result<()> {
                     subjects: subject,
                     seed,
                     export_json,
+                    profile_dir,
                     config,
                     dry_run,
                     save_baseline,
@@ -3103,8 +3392,10 @@ fn main() -> Result<()> {
             no_gate,
             accept,
             allow_empty,
+            &overrides,
             &resolve_settings(&overrides)?,
         ),
+        Cmd::Explain { base, head, top } => cmd_explain(&base, &head, top),
         Cmd::Detect {
             rev,
             window,
