@@ -81,8 +81,10 @@ after adopting tak, or while a runner-class migration has left the base on the o
 `--no-gate` also passes an empty comparison, since it never fails.
 
 Older tak releases print the same report and exit 0. A workflow that may run one should also
-fail when the report contains `**Nothing was compared`, as the
-[pull-request example](/guide/adopting#gate-pull-requests) does.
+fail when the report's first line starts with `**Nothing was compared`, as the
+[pull-request example](/guide/adopting#gate-pull-requests) does. Check only the first line.
+tak writes that verdict before any benchmark name, and the rest of the report echoes text from
+the change under test.
 
 Each benchmark can have its own gate in `tak.toml`: a different percentage, an absolute
 `min_delta` floor, or `enabled = false` to report a benchmark without failing on it. See
@@ -94,12 +96,21 @@ change to a gate is part of the diff under review.
 When some benchmark's gate differs from `[gate]`, the verdict says
 `N benchmark(s) above their gate` instead of `N benchmark(s) above the 1% gate`, and a
 report-only benchmark that rose is listed as `N report-only benchmark(s) above their gate`.
-A script that greps the report for a regression should match both forms, and should anchor
-the pattern to the start of a line, for example `^\*\*[0-9]+ benchmark\(s\) above`. tak writes
-its verdicts at the start of a line, but the report also echoes text from the change under
-test, such as trailer values and benchmark names, in the middle of other lines. An unanchored
-pattern can match that text. The exit status is simpler to rely on: `tak compare` exits non-zero only for a regression in a gated benchmark, for
-an empty comparison without `--allow-empty`, or for an error.
+Classify a result by its exit status first. `tak compare` exits non-zero only for a regression
+in a gated benchmark, for an empty comparison without `--allow-empty`, or for an error. The
+report echoes text from the change under test, such as benchmark names and trailer values, so
+use it only to tell those non-zero cases apart:
+
+- **Nothing compared:** the report's first line starts with `**Nothing was compared`. tak writes
+  that line before any name.
+- **Regression:** a line matching `^\*\*[0-9]+ benchmark\(s\) above (the .*% gate|their gate)`.
+  Anchor the pattern to the start of a line, and match both forms.
+- **Anything else** is an error.
+
+tak rejects control characters in names and escapes them in reports, so echoed text cannot
+start a line. The exit status still keeps a check correct even if it did. tak's own
+[`perf-pr.yml`](https://github.com/jdx/tak/blob/main/.github/workflows/perf-pr.yml) classifies
+its check this way.
 
 Always keep measurements partitioned by runner class. Comparing numbers across runner classes
 turns an infrastructure change into an apparent code regression.

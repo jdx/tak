@@ -517,11 +517,16 @@ pub fn markdown(c: &Comparison, trend: &Trend, gates: &Gates, credit: bool) -> S
 
 /// How a series is named in a table row or a verdict: the bench, plus the tool
 /// when it is not the project itself.
+///
+/// Control characters are escaped. `tak.toml` rejects them at load, but a
+/// note written by an older tak can still hold one, and a newline in a table
+/// cell or a verdict would start a report line of its own.
 fn name(bench: &str, tool: &str) -> String {
+    let bench = escape_control(bench);
     if tool == SELF_TOOL {
-        bench.to_string()
+        bench.into_owned()
     } else {
-        format!("{bench} ({tool})")
+        format!("{bench} ({})", escape_control(tool))
     }
 }
 
@@ -878,7 +883,7 @@ fn unused_acceptances(c: &Comparison, gates: &Gates) -> String {
 /// A report is read line by line, and tak's own workflows decide a check by
 /// what a line starts with. A name holding a newline could begin a line of its
 /// own that reads as a verdict, so no name reaches the report with one.
-fn escape_control(text: &str) -> std::borrow::Cow<'_, str> {
+pub fn escape_control(text: &str) -> std::borrow::Cow<'_, str> {
     if !text.chars().any(char::is_control) {
         return std::borrow::Cow::Borrowed(text);
     }
@@ -903,7 +908,7 @@ fn escape_control(text: &str) -> std::borrow::Cow<'_, str> {
 ///
 /// Control characters are escaped: `tak detect` names accepted steps through
 /// this, and a benchmark name comes from the `tak.toml` under test.
-pub(crate) fn describe(key: &Key) -> String {
+pub fn describe(key: &Key) -> String {
     let (bench, tool, runner) = key;
     let (bench, tool, runner) = (
         escape_control(bench),

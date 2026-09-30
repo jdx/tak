@@ -19,7 +19,7 @@ use tak_cli::detect;
 use tak_cli::export::{self, ExportResult};
 use tak_cli::measure::{self, Plan};
 use tak_cli::notes;
-use tak_cli::record::{Record, SCHEMA_VERSION};
+use tak_cli::record::{self, Record, SCHEMA_VERSION};
 use tak_cli::settings::{CliLayer, EnvLayer, Settings, TakConfigLayer, config_source};
 
 #[derive(Cli)]
@@ -478,8 +478,24 @@ struct Measured {
     record: Record,
 }
 
+/// Reject the recorded names that come from outside `tak.toml` — the runner
+/// class, `--bench`, `TAK_TOOL` — before anything is measured, for the reason
+/// `record::check_name` gives. `tak.toml`'s own names are checked when it
+/// loads.
+fn check_recorded_names(settings: &Settings, bench: Option<&str>) -> Result<()> {
+    record::check_name("runner class", &runner_class(settings))?;
+    if let Some(bench) = bench {
+        record::check_name("benchmark", bench)?;
+    }
+    if let Ok(tool) = std::env::var("TAK_TOOL") {
+        record::check_name("TAK_TOOL", &tool)?;
+    }
+    Ok(())
+}
+
 fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
     global_gate(settings)?;
+    check_recorded_names(settings, opts.bench.as_deref())?;
     let local = open_local(&opts, settings, !cmd.is_empty())?;
     // An explicit command always wins; tak.toml is only consulted when none is
     // given, so ad-hoc measurement never depends on repository state.
@@ -1123,19 +1139,15 @@ fn describe_gaps(gaps: &[(compare::Key, baseline::Gap)]) -> String {
 fn quoted(names: &BTreeSet<&str>) -> String {
     names
         .iter()
-        .map(|n| format!("`{n}`"))
+        .map(|n| format!("`{}`", compare::escape_control(n)))
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-/// A series for a message, spelled as the comparison report spells one.
+/// A series for a message, spelled — and escaped — as the comparison report
+/// spells one.
 fn describe_series(key: &compare::Key) -> String {
-    let (bench, tool, runner) = key;
-    if tool == SELF_TOOL {
-        format!("`{bench}` on `{runner}`")
-    } else {
-        format!("`{bench}` ({tool}) on `{runner}`")
-    }
+    compare::describe(key)
 }
 
 /// Fail on a regression against a baseline, for `--gate`.
@@ -1474,9 +1486,16 @@ fn cmd_history(rev: String, remote: String) -> Result<()> {
             .get("wall_min_ms")
             .map(|v| format!("{v:.2}ms"))
             .unwrap_or_else(|| "-".into());
+        // Escaped: the main-branch workflow reads this output line by line to
+        // prove a commit's counts were recorded, and a name holding a newline
+        // could forge a line of its own.
         println!(
             "  {:<16} {:<10} {:<22} instructions={:<14} wall_min={}",
-            r.bench, r.tool, r.runner, ins, wall
+            compare::escape_control(&r.bench),
+            compare::escape_control(&r.tool),
+            compare::escape_control(&r.runner),
+            ins,
+            wall
         );
     }
     Ok(())
@@ -1891,6 +1910,7 @@ fn cmd_backfill(
     dry_run: bool,
     settings: &Settings,
 ) -> Result<()> {
+    check_recorded_names(settings, Some(&bench))?;
     let repo = repo
         .or_else(repo_from_origin)
         .context("could not infer the repository — pass --repo owner/name")?;

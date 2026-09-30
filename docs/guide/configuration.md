@@ -35,6 +35,11 @@ warmup = 2
 `cmd` may be an argument list or a whitespace-split string. tak deliberately never starts a
 shell because shell startup would add work and variance to the subject.
 
+A benchmark or subject name can be any text except control characters, newlines included.
+Names are printed in reports that CI reads line by line, and a newline in a name could make
+part of it read as one of tak's verdicts. tak rejects such a name when `tak.toml` loads, before
+anything is measured. The same rule applies to `--bench`, `TAK_TOOL` and the runner class.
+
 Command-line values override the file:
 
 ```sh
