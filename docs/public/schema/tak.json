@@ -245,7 +245,55 @@
         "additionalProperties": {
           "type": "string"
         }
+      },
+      "metric": {
+        "description": "Custom metrics by name, recorded beside the timings and reported by `tak compare`, never gated. Merged by name across layers. Names use a-z, 0-9 and _, start with a letter, and cannot be `instructions` or start with `wall_`; end them with their unit, such as `binary_bytes`. Lower is taken as better.",
+        "type": "object",
+        "propertyNames": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "not": {
+            "anyOf": [
+              {
+                "const": "instructions"
+              },
+              {
+                "pattern": "^wall_"
+              }
+            ]
+          }
+        },
+        "additionalProperties": {
+          "$ref": "#/definitions/metric"
+        }
       }
+    },
+    "metric": {
+      "description": "One custom metric: exactly one of `file` or `cmd`.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "description": "A file whose size in bytes is the value, relative to tak.toml (not `dir`). Read once after the subject's samples. May be a tera template.",
+          "type": "string",
+          "minLength": 1
+        },
+        "cmd": {
+          "description": "Run once, untimed, after the subject's samples, in its `dir` and `env`. Must exit 0 and print one non-negative number, such as 1234 or 12.5, and nothing else.",
+          "$ref": "#/definitions/cmd"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "file"
+          ]
+        },
+        {
+          "required": [
+            "cmd"
+          ]
+        }
+      ]
     },
     "layer": {
       "type": "object",
@@ -289,6 +337,9 @@
         },
         "vars": {
           "$ref": "#/definitions/layerProperties/vars"
+        },
+        "metric": {
+          "$ref": "#/definitions/layerProperties/metric"
         }
       }
     },
@@ -341,6 +392,9 @@
         },
         "vars": {
           "$ref": "#/definitions/layerProperties/vars"
+        },
+        "metric": {
+          "$ref": "#/definitions/layerProperties/metric"
         },
         "when": {
           "description": "Measure only when this expr condition holds, e.g. '(env.VLT_BIN ?? \"\") != \"\"'. Sees env, os, arch, ci, bench and subject.",
@@ -415,6 +469,9 @@
         },
         "vars": {
           "$ref": "#/definitions/layerProperties/vars"
+        },
+        "metric": {
+          "$ref": "#/definitions/layerProperties/metric"
         },
         "when": {
           "description": "Run this benchmark only when this expr condition holds. Sees env, os, arch, ci and bench.",

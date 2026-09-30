@@ -528,6 +528,9 @@ struct Measured {
     /// `Some(None)` when it failed.
     version: Option<Option<String>>,
     samples: measure::Samples,
+    /// Each declared custom metric's value, `None` when it could not be
+    /// taken. Also in `record.metrics` when it could.
+    custom: BTreeMap<String, Option<f64>>,
     record: Record,
     /// Counting was asked for, valgrind was there, and no count came back.
     /// Kept apart from counters being off: the record looks the same either
@@ -624,6 +627,7 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         warmup: opts.warmup.unwrap_or(DEFAULT_WARMUP),
         counters: true,
         ok_exit_codes: config::DEFAULT_OK_EXIT_CODES.to_vec(),
+        metrics: BTreeMap::new(),
     };
     check_profile_paths(
         &opts,
@@ -980,6 +984,16 @@ fn print_plan(bench: &str, multi: bool, subjects: &[Subject], no_counters: bool)
         if s.counters && !no_counters {
             println!("{pad}counters on");
         }
+        for (name, source) in &s.metrics {
+            match source {
+                config::MetricSource::File(p) => {
+                    println!("{pad}metric   {name}  file {}", p.display())
+                }
+                config::MetricSource::Cmd(c) => {
+                    println!("{pad}metric   {name}  cmd {}", shell_words(c))
+                }
+            }
+        }
     }
 }
 
@@ -1025,6 +1039,7 @@ fn finish(
                 let mut r = ExportResult::new(&m.bench, &m.subject.name, command, &m.samples.times)
                     .with_exit_codes(&m.samples.exit_codes);
                 r.version = m.version.clone();
+                r.metrics = m.custom.clone();
                 if m.subject.check.is_some() {
                     r.with_checks(&m.samples.checks)
                 } else {
@@ -1099,6 +1114,20 @@ fn finish(
             eprintln!("\n  not {storing}: a run with a failed subject would be stored incomplete");
         }
         bail!("{} subject(s) failed: {}", failed.len(), failed.join(", "));
+    }
+    // A declared metric that could not be taken fails the run, recording or
+    // not. Unlike a failed check it is not a finding about the subject — a
+    // missing file or a broken script is a broken benchmark — and storing the
+    // rest, in git notes or as a baseline, would leave the metric silently
+    // absent, which reads as it having been dropped rather than having failed.
+    let broken = failed_metrics(&measured);
+    if !broken.is_empty() {
+        if let Some(storing) = &storing {
+            eprintln!(
+                "\n  not {storing}: a run missing a declared metric would be stored incomplete"
+            );
+        }
+        bail!("{} metric(s) failed: {}", broken.len(), broken.join(", "));
     }
     // Decided before anything is stored, reported after: a regression is
     // exactly the measurement a `--record` run exists to keep, and failing
@@ -1448,6 +1477,44 @@ fn save_baseline(store: &Store, name: &str, records: &[Record]) -> Result<()> {
     Ok(())
 }
 
+/// Each declared metric that could not be taken, as `bench (subject)
+/// \`name\``. One list for every path that stores a run, `tak run` and
+/// `tak backfill --commits` alike, so that none of them keeps a run with a
+/// declared metric silently missing.
+fn failed_metrics(measured: &[Measured]) -> Vec<String> {
+    measured
+        .iter()
+        .flat_map(|m| {
+            m.custom
+                .iter()
+                .filter(|(_, v)| v.is_none())
+                .map(|(name, _)| format!("{} `{name}`", label(m)))
+        })
+        .collect()
+}
+
+/// How a measured subject is named in messages: the benchmark, plus the
+/// subject when it is one of several.
+fn label(m: &Measured) -> String {
+    if m.subject.name == SELF_TOOL {
+        m.bench.clone()
+    } else {
+        format!("{} ({})", m.bench, m.subject.name)
+    }
+}
+
+/// A metric value for the summary: whole numbers without a fraction, since
+/// most custom metrics are sizes and counts, and anything else as written.
+/// Never negative: `parse_metric_value` refuses a sign and a size has none.
+/// Past 1e15 the fraction test says nothing, so large values print as-is.
+fn metric_value(v: f64) -> String {
+    if v.fract() == 0.0 && v < 1e15 {
+        format!("{v:.0}")
+    } else {
+        v.to_string()
+    }
+}
+
 /// Append every record in one write, so a run is stored whole or not at all.
 fn record_all(records: &[Record]) -> Result<()> {
     if records.is_empty() {
@@ -1608,6 +1675,27 @@ fn measure_bench_vetted(
         } else {
             (false, None)
         };
+        // Last, once the subject is done running: setup or the samples may
+        // be what produced the file or output being measured. A failure is
+        // reported here and fails the run in `finish`, after every other
+        // benchmark has been measured, so one broken script does not throw
+        // away the rest of a long run.
+        let mut custom = BTreeMap::new();
+        for (name, source) in &s.metrics {
+            // Vetted again right before, as each sample is: the samples
+            // just run can have changed what the metric's path resolves to.
+            let value = match vet(s).and_then(|()| measure::custom_metric(source, s, settings)) {
+                Ok(v) => {
+                    metrics.insert(name.clone(), v);
+                    Some(v)
+                }
+                Err(e) => {
+                    eprintln!("  error: {label}: metric `{name}` failed: {e:#}");
+                    None
+                }
+            };
+            custom.insert(name.clone(), value);
+        }
 
         if multi {
             // One line per subject, in the order of a quick read: the floor
@@ -1618,8 +1706,12 @@ fn measure_bench_vetted(
                 .get("instructions")
                 .map_or(String::new(), |i| format!("  instructions {i:.0}"));
             let checked = checks.map_or(String::new(), |(p, t)| format!("  checks {p}/{t}"));
+            let extra: String = custom
+                .iter()
+                .filter_map(|(k, v)| v.map(|v| format!("  {k} {}", metric_value(v))))
+                .collect();
             println!(
-                "    {:<width$}  min {:>9.2}  p50 {:>9.2}  mean {:>9.2} ± {:<8.2} max {:>9.2} ms  n={}{checked}{count}",
+                "    {:<width$}  min {:>9.2}  p50 {:>9.2}  mean {:>9.2} ± {:<8.2} max {:>9.2} ms  n={}{checked}{count}{extra}",
                 s.name,
                 metrics["wall_min_ms"],
                 metrics["wall_p50_ms"],
@@ -1638,6 +1730,8 @@ fn measure_bench_vetted(
             }
             if k == "instructions" {
                 println!("  {k:<16} {v:>14.0}");
+            } else if s.metrics.contains_key(k) {
+                println!("  {k:<16} {:>14}", metric_value(*v));
             } else {
                 println!("  {k:<16} {v:>14.2}");
             }
@@ -1652,6 +1746,7 @@ fn measure_bench_vetted(
             subject: s.clone(),
             version: version.clone(),
             samples,
+            custom,
             count_failed,
             profile,
             record: Record {
@@ -3048,8 +3143,19 @@ fn backfill_commit(
                             }
                         })
                         .collect();
+                    // And a declared metric that could not be taken — its
+                    // file missing at this commit, say — as `tak run
+                    // --record` refuses it: the commit would count as
+                    // measured with the metric absent.
+                    let broken = failed_metrics(&measured);
                     if !failing.is_empty() {
                         Some(format!("check failed: {}", labels(&failing)))
+                    } else if !broken.is_empty() {
+                        Some(format!(
+                            "{} metric(s) failed: {}",
+                            broken.len(),
+                            broken.join(", ")
+                        ))
                     } else if !uncounted.is_empty() {
                         Some(format!(
                             "instruction counting failed: {}",
@@ -3128,9 +3234,10 @@ fn check_inputs(subjects: &[Subject], wt: &tak_cli::worktree::Worktree) -> Optio
 /// and exist, still resolve inside it with symlinks followed.
 ///
 /// Every program tak runs for the subject counts, not only `cmd`: `setup`,
-/// `prepare`, `check` and `version_cmd` are the old tree's code as much as
-/// the subject is, and a committed symlink at one of their paths would run
-/// something from outside the commit just the same.
+/// `prepare`, `check`, `version_cmd` and metric commands are the old tree's
+/// code as much as the subject is, and a committed symlink at one of their
+/// paths would run something from outside the commit just the same. So is a
+/// metric's file, which is read rather than run.
 fn check_contained(s: &Subject, wt: &tak_cli::worktree::Worktree) -> Result<()> {
     if let Some(d) = &s.dir
         && d.starts_with(wt.path())
@@ -3147,6 +3254,20 @@ fn check_contained(s: &Subject, wt: &tak_cli::worktree::Worktree) -> Result<()> 
     ];
     for argv in programs.into_iter().flatten() {
         check_program(argv, wt)?;
+    }
+    // A custom metric's command is a program like the rest, and its file is
+    // read from the checkout: a committed symlink to the live tree would
+    // record the live binary's size at every commit. A file missing here is
+    // left for the metric itself to fail on, which names it.
+    for source in s.metrics.values() {
+        match source {
+            config::MetricSource::Cmd(argv) => check_program(argv, wt)?,
+            config::MetricSource::File(p) => {
+                if p.starts_with(wt.path()) && p.exists() {
+                    wt.check_contains(p)?;
+                }
+            }
+        }
     }
     Ok(())
 }

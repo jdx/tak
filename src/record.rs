@@ -69,6 +69,20 @@ impl Record {
     }
 }
 
+/// Whether tak itself writes metric `name`: the instruction count, or one of
+/// the wall-clock statistics.
+///
+/// Everything else in [`Record::metrics`] was declared by a project in a
+/// `[bench.B.metric.NAME]` table. The line is drawn here, beside the format,
+/// because two things depend on it staying the same: `tak.toml` refuses a
+/// declared metric that would overwrite a built-in one in the same record, and
+/// `compare` reports the rest in a table of their own. `wall_` is reserved as
+/// a whole prefix rather than name by name, so a timing statistic added later
+/// cannot land on a name some project already records something else under.
+pub fn is_builtin_metric(name: &str) -> bool {
+    name == "instructions" || name.starts_with("wall_")
+}
+
 /// Reject a name that will be recorded — benchmark, subject or tool, runner
 /// class — if it holds a control character.
 ///

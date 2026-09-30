@@ -205,6 +205,7 @@ fn a_subject_is_prepared_before_every_counted_run() {
         warmup: 0,
         counters: true,
         ok_exit_codes: vec![0],
+        metrics: std::collections::BTreeMap::new(),
     };
     let c = measure::subject_instructions(&s, &Settings::default())
         .expect("cachegrind invocation failed")
@@ -252,6 +253,7 @@ fn ok_exit_codes_apply_under_valgrind() {
         warmup: 0,
         counters: true,
         ok_exit_codes: ok,
+        metrics: std::collections::BTreeMap::new(),
     };
     let c = measure::subject_instructions(&subject(vec![0, 1]), &Settings::default())
         .expect("exit 1 is allowed")

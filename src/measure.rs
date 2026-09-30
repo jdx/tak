@@ -13,7 +13,7 @@
 //! clock (~1%) but not deterministic, because they move with thread scheduling.
 //! They are recorded, and may be flagged, but must not gate at a tight threshold.
 
-use crate::config::{AutoRuns, DEFAULT_OK_EXIT_CODES, Runs, SELF_TOOL, Subject};
+use crate::config::{AutoRuns, DEFAULT_OK_EXIT_CODES, MetricSource, Runs, SELF_TOOL, Subject};
 use crate::settings::Settings;
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
@@ -364,6 +364,143 @@ fn untimed(step: &str, cmd: &[String], site: &Site) -> Result<Option<String>> {
         Some(last) => format!("{step} `{bin}` exited with {status}: {}", last.trim()),
         None => format!("{step} `{bin}` exited with {status}"),
     }))
+}
+
+/// The most a metric command may print. One number and a newline is a few
+/// dozen bytes; anything near this is a log or a report, not a value, and
+/// guessing which part of it was meant would record the wrong thing.
+const METRIC_OUTPUT_MAX: usize = 1024;
+
+/// A subject's custom metric: a file's size in bytes, or the one number a
+/// command prints.
+///
+/// Taken once, after the subject's samples and instruction counts, and not
+/// part of either. After, because `setup` or the samples themselves may be
+/// what produces the file or the output being measured.
+///
+/// A file is `stat`ed, following symlinks, and must be a regular file: a
+/// directory's size is filesystem bookkeeping, not the size of what is in it.
+///
+/// A command runs in the subject's `dir` and `env`, with the same variables
+/// removed, no shell, and no deadline, like `setup` or `check`. It must exit 0
+/// and print exactly one number; see [`parse_metric_value`]. Its output is
+/// captured the way `version_cmd`'s is, through [`capture`]: bounded while it
+/// is read, so a script that dumps a report is stopped at
+/// [`METRIC_OUTPUT_MAX`] instead of filling memory or a disk, and not waited
+/// on past its exit, so one that leaves something running in the background
+/// holding the pipe open does not hang the run.
+pub fn custom_metric(source: &MetricSource, s: &Subject, settings: &Settings) -> Result<f64> {
+    match source {
+        MetricSource::File(path) => {
+            let meta = std::fs::metadata(path)
+                .with_context(|| format!("could not read the size of {}", path.display()))?;
+            if !meta.is_file() {
+                bail!("{} is not a regular file", path.display());
+            }
+            Ok(meta.len() as f64)
+        }
+        MetricSource::Cmd(argv) => {
+            let site = Site {
+                dir: s.dir.as_deref(),
+                env: &s.env,
+                settings,
+            };
+            metric_cmd_once(argv, &site)
+        }
+    }
+}
+
+fn metric_cmd_once(argv: &[String], site: &Site) -> Result<f64> {
+    let bin = &argv[0];
+    let out = capture(argv, site, None, METRIC_OUTPUT_MAX, true)?;
+    // Either way the metric is lost, and whatever the command started is
+    // stopped, unlike after a `version_cmd`: a metric is taken between
+    // benchmarks, and a leftover would compete with the next one's samples.
+    // `capture` stops the group only while the command itself runs, so a
+    // background writer that crosses the cap after it exited, or that still
+    // holds stdout, is stopped here. Harmless when nothing is left.
+    if out.overflowed || out.stdout_open {
+        stop_leftovers(out.pgid);
+    }
+    // Before the status: a command stopped for printing too much died of
+    // tak's signal, and saying so would hide why it was stopped.
+    if out.overflowed {
+        bail!(
+            "`{bin}` and what it started printed more than {METRIC_OUTPUT_MAX} bytes, so they were \
+             stopped; a metric command prints one number and nothing else"
+        );
+    }
+    // Something the command left running still holds its stdout and may
+    // print more, so what arrived so far is not known to be the whole answer.
+    if out.stdout_open {
+        bail!(
+            "`{bin}` exited but left a process holding its stdout open, so that was stopped; \
+             a metric command must finish its output before it exits"
+        );
+    }
+    if !out.status.success() {
+        bail!(
+            "`{bin}` exited with {}: {}",
+            out.status,
+            last_line(&out.stderr_tail)
+        );
+    }
+    let text = std::str::from_utf8(&out.stdout)
+        .map_err(|_| anyhow::anyhow!("`{bin}` printed something that is not UTF-8"))?;
+    parse_metric_value(text).with_context(|| format!("`{bin}`"))
+}
+
+/// Read a metric command's stdout as one number.
+///
+/// Deliberately strict. Surrounding whitespace, a trailing newline included,
+/// is ignored; what is left must be a single non-negative decimal: digits,
+/// optionally a fraction, optionally an exponent — `1234`, `12.5`, `1.2e6`.
+/// No sign, no `inf` or `nan`, no hex, no thousands separators, no unit, and
+/// nothing else on the line or on another one. A script that prints
+/// `bundle: 42 kB` or two numbers has a bug worth hearing about, and pulling
+/// the first number out of it would record whichever one happened to come
+/// first. Negative values are refused because `compare` reports a change as a
+/// percentage of the base, which is meaningless against a negative one, and
+/// nothing a size or a count measures goes below zero.
+pub fn parse_metric_value(text: &str) -> Result<f64> {
+    let t = text.trim_matches(|c: char| c.is_ascii_whitespace());
+    if t.is_empty() {
+        bail!("printed nothing; a metric command prints one number");
+    }
+    let bytes = t.as_bytes();
+    let digits = |i: &mut usize| {
+        let start = *i;
+        while *i < bytes.len() && bytes[*i].is_ascii_digit() {
+            *i += 1;
+        }
+        *i > start
+    };
+    let mut i = 0;
+    let mut ok = digits(&mut i);
+    if ok && i < bytes.len() && bytes[i] == b'.' {
+        i += 1;
+        ok = digits(&mut i);
+    }
+    if ok && i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
+        i += 1;
+        if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+            i += 1;
+        }
+        ok = digits(&mut i);
+    }
+    if !ok || i != bytes.len() {
+        bail!(
+            "printed {t:?}, not one number; a metric command prints a single non-negative \
+             number such as `1234` or `12.5`, and nothing else"
+        );
+    }
+    let v: f64 = t
+        .parse()
+        .with_context(|| format!("printed {t:?}, which is not a number"))?;
+    if !v.is_finite() {
+        bail!("printed {t:?}, which is too large to record");
+    }
+    Ok(v)
 }
 
 /// The last [`UNTIMED_STDERR_TAIL`] bytes of a step's stderr file.
@@ -872,6 +1009,7 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
         warmup: plan.warmup,
         counters: false,
         ok_exit_codes: DEFAULT_OK_EXIT_CODES.to_vec(),
+        metrics: BTreeMap::new(),
     };
     // One subject has one possible order, so the seed is irrelevant.
     let samples = interleaved(
@@ -1070,7 +1208,19 @@ const VERSION_OUTPUT_GRACE: Duration = Duration::from_millis(500);
 /// Read `r` to the end, keeping the first `cap` bytes in `kept` and
 /// discarding the rest. Draining it all means the writer never blocks on a
 /// full pipe, so the command can finish and report its real exit status.
-fn keep_prefix(mut r: impl std::io::Read, cap: usize, kept: &Mutex<Vec<u8>>) {
+/// `overflow` is set once anything past `cap` arrives, for a caller that
+/// treats more output than that as a failure and stops the command.
+///
+/// With `tail`, the last [`UNTIMED_STDERR_TAIL`] bytes are kept there too:
+/// an error message is at the end of a log, and a long one pushes it past
+/// any prefix.
+fn keep_prefix(
+    mut r: impl std::io::Read,
+    cap: usize,
+    kept: &Mutex<Vec<u8>>,
+    overflow: &std::sync::atomic::AtomicBool,
+    tail: Option<&Mutex<Vec<u8>>>,
+) {
     let mut buf = [0u8; 8192];
     loop {
         match r.read(&mut buf) {
@@ -1078,7 +1228,15 @@ fn keep_prefix(mut r: impl std::io::Read, cap: usize, kept: &Mutex<Vec<u8>>) {
             Ok(n) => {
                 let Ok(mut k) = kept.lock() else { return };
                 let room = cap.saturating_sub(k.len());
+                if n > room {
+                    overflow.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 k.extend_from_slice(&buf[..n.min(room)]);
+                if let Some(Ok(mut t)) = tail.map(Mutex::lock) {
+                    t.extend_from_slice(&buf[..n]);
+                    let excess = t.len().saturating_sub(UNTIMED_STDERR_TAIL);
+                    t.drain(..excess);
+                }
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => return,
@@ -1362,13 +1520,14 @@ mod forward_signals {
     }
 }
 
-/// Stop a timed-out `version_cmd` and everything it started, then reap it.
+/// Stop a command run by [`capture`] and everything it started, then reap it:
+/// a `version_cmd` past its deadline, or a metric command past its output cap.
 ///
 /// On Unix that is its whole process group, so a helper it spawned cannot go
 /// on using CPU through the samples that follow, or hold the output pipes
 /// open. Elsewhere only the command itself is stopped.
 ///
-/// Only on a timeout: a command that exits on its own may have started a
+/// Only then: a command that exits on its own may have started a
 /// daemon on purpose — a version check that launches a language server or
 /// build daemon — and that is the tool's business, not tak's to kill.
 fn stop_group(child: &mut std::process::Child) {
@@ -1391,6 +1550,104 @@ fn version_once(argv: &[String], site: &Site, timeout: Duration) -> Result<Strin
         .first()
         .map(String::as_str)
         .unwrap_or("(empty command)");
+    let Captured {
+        status,
+        stdout,
+        stderr,
+        stderr_tail,
+        ..
+    } = capture(argv, site, Some(timeout), VERSION_OUTPUT_CAP, false)?;
+
+    // A failing command's output is an error message or a usage dump, not a
+    // version, however much of it there is.
+    if !status.success() {
+        bail!("`{bin}` exited with {status}: {}", last_line(&stderr_tail));
+    }
+    let first = |bytes: &[u8]| {
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(str::to_string)
+    };
+    first(&stdout)
+        .or_else(|| first(&stderr))
+        .with_context(|| format!("`{bin}` printed nothing"))
+}
+
+/// The last non-empty line of a captured stream, for an error message.
+fn last_line(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .unwrap_or("(no output)")
+        .to_string()
+}
+
+/// What [`capture`] got from a command that finished.
+struct Captured {
+    status: std::process::ExitStatus,
+    /// At most the cap passed to [`capture`].
+    stdout: Vec<u8>,
+    /// The first [`VERSION_OUTPUT_CAP`] bytes, where a version is.
+    stderr: Vec<u8>,
+    /// The last [`UNTIMED_STDERR_TAIL`] bytes, where an error is.
+    stderr_tail: Vec<u8>,
+    /// stdout went past the cap. With `stop_past_cap`, the command was
+    /// stopped as soon as that was seen, and `status` is how it died.
+    overflowed: bool,
+    /// stdout was still open when the grace period after the command's exit
+    /// ran out: something it left running holds it and may yet write to it.
+    stdout_open: bool,
+    /// The command's process group on Unix, which is also its pid, for a
+    /// caller that has to stop what it left behind.
+    pgid: u32,
+}
+
+/// Stop whatever is left of a finished command's process group: a caller's
+/// decision, since leaving a daemon running can be the point; see
+/// [`stop_group`]. The command itself has been reaped, but its group id
+/// cannot be handed to a new process while any member of the group lives,
+/// so this reaches only what the command started. Elsewhere there is no
+/// group to reach. When nothing is left, `killpg` fails with ESRCH, which
+/// is expected and ignored. It is called only when the output was rejected,
+/// which is when something may be left.
+fn stop_leftovers(pgid: u32) {
+    #[cfg(unix)]
+    // SAFETY: killpg only sends a signal.
+    unsafe {
+        libc::killpg(pgid as libc::pid_t, libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    let _ = pgid;
+}
+
+/// Run `argv` at `site` with both streams piped, keeping the first
+/// `stdout_cap` bytes of stdout and [`VERSION_OUTPUT_CAP`] of stderr, and
+/// reading and discarding the rest so the command never blocks on a full
+/// pipe. Memory and disk stay bounded however much it prints.
+///
+/// It runs in its own process group, so a `timeout` or `stop_past_cap` can
+/// stop everything it started. With `stop_past_cap`, output beyond the cap
+/// is a failure the caller will report anyway, so the command is stopped the
+/// moment it arrives rather than left to print for as long as it likes.
+/// `timeout: None` waits as long as the command takes, as `setup` does.
+///
+/// Once the command exits, its output is waited for only briefly: a process
+/// it left in the background may hold a pipe open indefinitely.
+fn capture(
+    argv: &[String],
+    site: &Site,
+    timeout: Option<Duration>,
+    stdout_cap: usize,
+    stop_past_cap: bool,
+) -> Result<Captured> {
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    let bin = argv
+        .first()
+        .map(String::as_str)
+        .unwrap_or("(empty command)");
     let mut cmd = command(argv, site)?;
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1408,40 +1665,89 @@ fn version_once(argv: &[String], site: &Site, timeout: Duration) -> Result<Strin
     #[cfg(unix)]
     forward_signals::Guard::spawned(spawned.as_ref().ok().map(std::process::Child::id));
     let mut child = spawned.with_context(|| format!("failed to spawn `{bin}`"))?;
+    // Known to `stop_running` like every other command tak runs, so a
+    // backfill's interrupt stops it, and anything it leaves behind, before
+    // deleting the checkout it ran in. Finished on every way out, early
+    // returns included.
+    tracked::started(child.id());
+    struct Finished;
+    impl Drop for Finished {
+        fn drop(&mut self) {
+            tracked::finished();
+        }
+    }
+    let _finished = Finished;
 
     // One thread per stream, so neither pipe can fill while the other is
     // read. They are never joined: a background process the command started
     // may hold a pipe open long after it exits, and the run must not wait on
     // that. Each thread ends when its pipe finally closes.
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
-    let spawn_reader = |r: Option<Box<dyn std::io::Read + Send>>| {
+    let overflow = Arc::new(AtomicBool::new(false));
+    // stderr's overflow is never acted on: it only feeds an error message.
+    let ignored = Arc::new(AtomicBool::new(false));
+    let stdout_done = Arc::new(AtomicBool::new(false));
+    let unused = Arc::new(AtomicBool::new(false));
+    let spawn_reader = |r: Option<Box<dyn std::io::Read + Send>>,
+                        cap: usize,
+                        flag: &Arc<AtomicBool>,
+                        done: &Arc<AtomicBool>,
+                        tail: Option<&Arc<Mutex<Vec<u8>>>>| {
         let kept = Arc::new(Mutex::new(Vec::new()));
         if let Some(r) = r {
-            let (kept, tx) = (Arc::clone(&kept), done_tx.clone());
+            let (kept, tx, flag, done) = (
+                Arc::clone(&kept),
+                done_tx.clone(),
+                Arc::clone(flag),
+                Arc::clone(done),
+            );
+            let tail = tail.map(Arc::clone);
             std::thread::spawn(move || {
-                keep_prefix(r, VERSION_OUTPUT_CAP, &kept);
+                keep_prefix(r, cap, &kept, &flag, tail.as_deref());
+                done.store(true, SeqCst);
                 let _ = tx.send(());
             });
         } else {
+            done.store(true, SeqCst);
             let _ = done_tx.send(());
         }
         kept
     };
-    let stdout = spawn_reader(child.stdout.take().map(|o| Box::new(o) as _));
-    let stderr = spawn_reader(child.stderr.take().map(|e| Box::new(e) as _));
+    let stdout = spawn_reader(
+        child.stdout.take().map(|o| Box::new(o) as _),
+        stdout_cap,
+        &overflow,
+        &stdout_done,
+        None,
+    );
+    let stderr_tail = Arc::new(Mutex::new(Vec::new()));
+    let stderr = spawn_reader(
+        child.stderr.take().map(|e| Box::new(e) as _),
+        VERSION_OUTPUT_CAP,
+        &ignored,
+        &unused,
+        Some(&stderr_tail),
+    );
 
-    let deadline = Instant::now() + timeout;
+    let deadline = timeout.map(|t| Instant::now() + t);
     let status = loop {
+        if stop_past_cap && overflow.load(SeqCst) {
+            stop_group(&mut child);
+            // Reaped by `stop_group`; this only reads the status it left.
+            break child
+                .wait()
+                .with_context(|| format!("failed to wait for `{bin}`"))?;
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => {
+            Ok(None) if deadline.is_none_or(|d| Instant::now() < d) => {
                 std::thread::sleep(Duration::from_millis(5));
             }
             Ok(None) => {
                 stop_group(&mut child);
                 bail!(
                     "`{bin}` did not finish within {}, so it was stopped",
-                    crate::progress::fmt(timeout)
+                    crate::progress::fmt(timeout.unwrap_or_default())
                 );
             }
             Err(e) => {
@@ -1458,31 +1764,15 @@ fn version_once(argv: &[String], site: &Site, timeout: Duration) -> Result<Strin
         }
     }
     let take = |kept: &Mutex<Vec<u8>>| kept.lock().map(|k| k.clone()).unwrap_or_default();
-    let (stdout, stderr) = (take(&stdout), take(&stderr));
-
-    // A failing command's output is an error message or a usage dump, not a
-    // version, however much of it there is.
-    if !status.success() {
-        let stderr = String::from_utf8_lossy(&stderr);
-        bail!(
-            "`{bin}` exited with {status}: {}",
-            stderr
-                .lines()
-                .map(str::trim)
-                .rfind(|l| !l.is_empty())
-                .unwrap_or("(no output)")
-        );
-    }
-    let first = |bytes: &[u8]| {
-        String::from_utf8_lossy(bytes)
-            .lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty())
-            .map(str::to_string)
-    };
-    first(&stdout)
-        .or_else(|| first(&stderr))
-        .with_context(|| format!("`{bin}` printed nothing"))
+    Ok(Captured {
+        status,
+        stdout: take(&stdout),
+        stderr: take(&stderr),
+        stderr_tail: take(&stderr_tail),
+        overflowed: overflow.load(SeqCst),
+        stdout_open: !stdout_done.load(SeqCst),
+        pgid: child.id(),
+    })
 }
 
 /// `ok` applies to the subject under valgrind: cachegrind exits with its
@@ -1872,6 +2162,7 @@ mod tests {
             warmup: 1,
             counters: false,
             ok_exit_codes: vec![0],
+            metrics: BTreeMap::new(),
         };
         let res = interleaved(
             &[mk("ok", &["true"]), mk("bad", &["false"])],
@@ -1881,6 +2172,180 @@ mod tests {
         );
         assert_eq!(res[0].as_ref().unwrap().times.len(), 4);
         assert!(format!("{:#}", res[1].as_ref().unwrap_err()).contains("exited with"));
+    }
+
+    /// One number and nothing else; anything a script might print around it
+    /// is refused rather than picked apart.
+    #[test]
+    fn a_metric_value_is_exactly_one_non_negative_number() {
+        for (text, want) in [
+            ("1234", 1234.0),
+            ("1234\n", 1234.0),
+            ("  \t12.5\r\n", 12.5),
+            ("0", 0.0),
+            ("1.5e3", 1500.0),
+            ("2E-2", 0.02),
+            ("007", 7.0),
+        ] {
+            assert_eq!(parse_metric_value(text).unwrap(), want, "{text:?}");
+        }
+        for bad in [
+            "", "\n", "-1", "+1", ".5", "5.", "1e", "1e+", "nan", "inf", "0x10", "1,234", "12 kB",
+            "1 2", "1\n2", "size: 3", "1e999",
+        ] {
+            assert!(parse_metric_value(bad).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    fn with_metrics(dir: &Path, env: &[(&str, &str)]) -> Subject {
+        Subject {
+            name: "s".into(),
+            cmd: vec!["true".into()],
+            prepare: None,
+            setup: None,
+            setup_dir: None,
+            check: None,
+            dir: Some(dir.to_path_buf()),
+            version_cmd: None,
+            env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            vars: BTreeMap::new(),
+            when: None,
+            runs: Runs::Fixed(1),
+            auto: AutoRuns {
+                budget: Duration::from_secs(30),
+                min: 5,
+                max: 50,
+            },
+            warmup: 0,
+            counters: false,
+            ok_exit_codes: vec![0],
+            metrics: BTreeMap::new(),
+        }
+    }
+
+    /// A file's size is its length in bytes; a directory has none worth
+    /// recording, and a missing file is an error that names it.
+    #[test]
+    fn a_file_metric_is_its_size_in_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("bin");
+        std::fs::write(&file, vec![0u8; 4321]).unwrap();
+        let s = with_metrics(dir.path(), &[]);
+        let settings = Settings::default();
+        assert_eq!(
+            custom_metric(&MetricSource::File(file), &s, &settings).unwrap(),
+            4321.0
+        );
+        let err = custom_metric(&MetricSource::File(dir.path().into()), &s, &settings).unwrap_err();
+        assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
+        let missing = dir.path().join("missing");
+        let err = custom_metric(&MetricSource::File(missing), &s, &settings).unwrap_err();
+        assert!(format!("{err:#}").contains("missing"), "{err:#}");
+    }
+
+    /// A metric command runs where the subject does, with its env, and must
+    /// exit 0 and print one number. The scrub is checked end to end in
+    /// `tests/subjects.rs`, which can set a token for tak without touching
+    /// this test binary's environment.
+    #[cfg(unix)]
+    #[test]
+    fn a_cmd_metric_runs_in_the_subjects_dir_and_env() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("here"), "").unwrap();
+        let s = with_metrics(dir.path(), &[("N", "42")]);
+        let settings = Settings::default();
+        let sh = |script: &str| {
+            custom_metric(
+                &MetricSource::Cmd(vec!["sh".into(), "-c".into(), script.into()]),
+                &s,
+                &settings,
+            )
+        };
+        assert_eq!(sh("test -e here && echo $N").unwrap(), 42.0);
+        let err = format!("{:#}", sh("echo 5; echo broke >&2; exit 3").unwrap_err());
+        assert!(
+            err.contains("exit status: 3") && err.contains("broke"),
+            "{err}"
+        );
+        let err = format!("{:#}", sh("echo 'bundle: 12 kB'").unwrap_err());
+        assert!(err.contains("not one number"), "{err}");
+        let err = format!("{:#}", sh("yes 1 | head -c 4096").unwrap_err());
+        assert!(err.contains("more than 1024 bytes"), "{err}");
+        // Exactly at the cap is still judged as output, not as too much.
+        let err = format!("{:#}", sh("yes 1 | head -c 1024").unwrap_err());
+        assert!(err.contains("not one number"), "{err}");
+        // A command that never stops printing is stopped at the cap, not
+        // left to fill memory or a disk; `exec` so it is the command itself.
+        let start = Instant::now();
+        let err = format!("{:#}", sh("exec yes 1").unwrap_err());
+        assert!(err.contains("so they were stopped"), "{err}");
+        assert!(start.elapsed() < Duration::from_secs(4));
+        // The error at the end of a long log is the one reported, not a line
+        // from its start.
+        let err = format!(
+            "{:#}",
+            sh("yes 'noise line' | head -c 20000 >&2; echo 'the real error' >&2; exit 2")
+                .unwrap_err()
+        );
+        assert!(err.ends_with("the real error"), "{err}");
+        assert!(!err.contains("noise"), "{err}");
+    }
+
+    /// A metric command that exits while something it started still holds
+    /// its stdout has not finished its answer: that is an error rather than
+    /// whatever number arrived first, it does not hold up the run, and the
+    /// leftover is stopped rather than left running into the next samples.
+    #[cfg(unix)]
+    #[test]
+    fn a_metric_cmd_leaving_stdout_open_fails_and_is_stopped() {
+        let err = leftover_metric("sleep 30 & echo $! > pid; echo 7");
+        assert!(err.contains("stdout open"), "{err}");
+    }
+
+    /// A background writer that goes past the cap only after the command has
+    /// exited — too late for `capture` to stop the command itself — is still
+    /// stopped, and the error says what happened.
+    #[cfg(unix)]
+    #[test]
+    fn a_leftover_that_floods_stdout_after_exit_is_stopped() {
+        let err = leftover_metric("(sleep 0.1; exec yes 1) & echo $! > pid; echo 7");
+        assert!(
+            err.contains("more than 1024 bytes") && err.contains("what it started"),
+            "{err}"
+        );
+    }
+
+    /// Runs `script` as a metric command whose background process writes its
+    /// pid to `pid`, and checks that the metric fails promptly and the
+    /// background process does not outlive it. Returns the error.
+    #[cfg(unix)]
+    fn leftover_metric(script: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let s = with_metrics(dir.path(), &[]);
+        let start = Instant::now();
+        let err = custom_metric(
+            &MetricSource::Cmd(vec!["sh".into(), "-c".into(), script.into()]),
+            &s,
+            &Settings::default(),
+        )
+        .unwrap_err();
+        assert!(start.elapsed() < Duration::from_secs(4));
+        let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
+        let pid = pid.trim();
+        // SIGKILL is delivered asynchronously; give it a moment to land.
+        // `running`, not `kill -0`: the orphan may linger as a zombie.
+        let until = Instant::now() + Duration::from_secs(2);
+        while running(pid) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !running(pid),
+            "the background process {pid} was left running"
+        );
+        format!("{err:#}")
     }
 
     /// Runs `sh -c script` as a `version_cmd` with the given deadline.
@@ -1930,13 +2395,28 @@ mod tests {
         );
         let kept = Mutex::new(Vec::new());
         let mut src = std::io::Cursor::new(vec![7u8; 100]);
-        keep_prefix(&mut src, 10, &kept);
+        let overflow = std::sync::atomic::AtomicBool::new(false);
+        keep_prefix(&mut src, 10, &kept, &overflow, None);
         assert_eq!(kept.lock().unwrap().len(), 10, "only the cap is kept");
         assert_eq!(
             src.position(),
             100,
             "the rest is read, not left in the pipe"
         );
+        assert!(overflow.into_inner(), "and going past the cap is noticed");
+
+        let (kept, overflow) = (
+            Mutex::new(Vec::new()),
+            std::sync::atomic::AtomicBool::new(false),
+        );
+        keep_prefix(
+            std::io::Cursor::new(vec![7u8; 10]),
+            10,
+            &kept,
+            &overflow,
+            None,
+        );
+        assert!(!overflow.into_inner(), "exactly the cap is not past it");
     }
 
     /// A failing command that prints a lot — a usage dump after an unknown
@@ -2076,6 +2556,7 @@ mod tests {
                 warmup: 0,
                 counters: false,
                 ok_exit_codes: vec![0],
+                metrics: BTreeMap::new(),
             }],
             0,
             &Settings::default(),
@@ -2119,6 +2600,7 @@ mod tests {
             warmup,
             counters: false,
             ok_exit_codes: vec![0],
+            metrics: BTreeMap::new(),
         }
     }
 
@@ -2276,6 +2758,7 @@ mod tests {
             warmup: 1,
             counters: false,
             ok_exit_codes: vec![0],
+            metrics: BTreeMap::new(),
         };
         let mut log = Log::default();
         let res = interleaved(
@@ -2326,6 +2809,7 @@ mod tests {
             warmup,
             counters: false,
             ok_exit_codes: vec![0],
+            metrics: BTreeMap::new(),
         };
         let mut log = Log::default();
         // The slow one has no warmup, so its first kept sample sizes it.

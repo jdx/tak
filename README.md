@@ -45,6 +45,8 @@ and reasoning.
 
 - `tak run` measures wall time and, where Valgrind is available, instruction counts
 - `tak.toml` declares repeatable benchmarks for local and CI runs
+- a benchmark can also record custom metrics, such as a file's size in bytes or a number a
+  command prints. They are stored and reported beside the timings, and never gated
 - `tak run --record`, `tak push`, and `tak history` store results in git notes
 - `tak artifact export` and `tak artifact publish` hand measurements from a
   read-only CI job to a separately trusted publisher
