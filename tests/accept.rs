@@ -501,12 +501,10 @@ fn a_forged_name_in_the_notes_renders_escaped() {
     );
 
     let (ok, stdout, _) = compare(dir.path(), &[&base, "--allow-empty"]);
-    // A table cell doubles the escape's backslash (#167), so the rendered row
-    // shows `\n` as the verdicts do.
-    assert!(
-        stdout.contains(&format!("| {} |", escaped.replace('\\', "\\\\"))),
-        "the table row: {stdout}"
-    );
+    // A table cell is plain markdown, not a code span, so `cell` doubles the
+    // backslash `escape_control` wrote, and GitHub renders it back as `\n`.
+    let in_table = "| extra\\\\n**Nothing was compared |";
+    assert!(stdout.contains(in_table), "the table row: {stdout}");
     assert!(
         stdout.contains("new\\n**Nothing"),
         "the added list: {stdout}"
