@@ -450,6 +450,9 @@ fn open_local(opts: &RunOpts, settings: &Settings, adhoc: bool) -> Result<Local>
         return Ok(Local::default());
     }
     let store = Store::locate()?;
+    if let Some(name) = &opts.save_baseline {
+        store.check_saveable(name)?;
+    }
     let against = opts
         .baseline
         .as_deref()
@@ -478,6 +481,10 @@ struct Measured {
     version: Option<Option<String>>,
     samples: measure::Samples,
     record: Record,
+    /// Counting was asked for, valgrind was there, and no count came back.
+    /// Kept apart from counters being off: the record looks the same either
+    /// way, and only one of them is a benchmark `--gate` meant to check.
+    count_failed: bool,
 }
 
 /// Reject the recorded names that come from outside `tak.toml` — the runner
@@ -1063,6 +1070,8 @@ struct Against {
     comparison: compare::Comparison,
     /// Series this run measured that cannot be gated; see [`baseline::gaps`].
     gaps: Vec<(compare::Key, baseline::Gap)>,
+    /// Every series this run measured, compared or not.
+    measured: BTreeSet<compare::Key>,
 }
 
 /// Print how this run compares with a saved baseline, and return the
@@ -1082,7 +1091,18 @@ fn report_against(
     let comparison = compare::compare(&base, &current);
     // A report-only series is never a reason to fail, so it cannot leave a
     // gap in what the gate checked either.
-    let gaps: Vec<_> = baseline::gaps(&against.records, &current)
+    let count_failed: BTreeSet<compare::Key> = measured
+        .iter()
+        .filter(|m| m.count_failed)
+        .map(|m| {
+            (
+                m.record.bench.clone(),
+                m.record.tool.clone(),
+                m.record.runner.clone(),
+            )
+        })
+        .collect();
+    let gaps: Vec<_> = baseline::gaps(&against.records, &current, &count_failed)
         .into_iter()
         .filter(|(k, _)| gates.get(&k.0, &k.1).enabled)
         .collect();
@@ -1145,7 +1165,11 @@ fn report_against(
     if !gaps.is_empty() {
         println!("\nNot gated: {}", describe_gaps(&gaps));
     }
-    Against { comparison, gaps }
+    Against {
+        comparison,
+        gaps,
+        measured: keys,
+    }
 }
 
 fn describe_gaps(gaps: &[(compare::Key, baseline::Gap)]) -> String {
@@ -1214,6 +1238,20 @@ fn gate_against(
         );
     }
     let comparison = &compared.comparison;
+    let enabled = |bench: &str, tool: &str| gates.get(bench, tool).enabled;
+    // Report-only never fails, so a run of nothing else passes, counted or
+    // not. It says so on stderr as well as in the table: an exit status of 0
+    // from `--gate` otherwise reads, to a script, as "checked and fine".
+    let nothing_gated = |why: &str| {
+        eprintln!(
+            "  note: nothing was gated against baseline `{}`: {why}",
+            against.name
+        );
+        Ok(())
+    };
+    if !compared.measured.iter().any(|k| enabled(&k.0, &k.1)) {
+        return nothing_gated("every benchmark measured is report-only");
+    }
     if !comparison
         .changes
         .iter()
@@ -1224,6 +1262,13 @@ fn gate_against(
              baseline `{}`",
             against.name
         );
+    }
+    if !comparison
+        .changes
+        .iter()
+        .any(|c| c.metric == compare::GATED_METRIC && enabled(&c.bench, &c.tool))
+    {
+        return nothing_gated("every benchmark compared by instruction count is report-only");
     }
     let regressions = comparison.regressions(gates);
     if regressions.is_empty() {
@@ -1387,9 +1432,8 @@ fn measure_bench(
                 samples.first_failure.as_deref().unwrap_or("(no detail)")
             );
         }
-        if s.counters && !opts.no_counters {
-            count_into(&mut metrics, s, settings);
-        }
+        let count_failed =
+            s.counters && !opts.no_counters && !count_into(&mut metrics, s, settings);
 
         if multi {
             // One line per subject, in the order of a quick read: the floor
@@ -1441,6 +1485,7 @@ fn measure_bench(
             subject: s.clone(),
             version: version.clone(),
             samples,
+            count_failed,
             record: Record {
                 v: SCHEMA_VERSION,
                 bench: bench.to_string(),
@@ -1459,7 +1504,11 @@ fn measure_bench(
 
 /// Add a subject's instruction count to its metrics, warning rather than
 /// failing when it cannot be had: the timing already collected is still good.
-fn count_into(metrics: &mut BTreeMap<String, f64>, s: &Subject, settings: &Settings) {
+///
+/// False only when valgrind was there and the count still failed. A missing
+/// valgrind is not a failure: nothing on this host could be counted, and
+/// `--gate` already has nothing to check then.
+fn count_into(metrics: &mut BTreeMap<String, f64>, s: &Subject, settings: &Settings) -> bool {
     match measure::subject_instructions(s, settings) {
         Ok(Some(c)) => {
             metrics.insert("instructions".into(), c.min as f64);
@@ -1474,15 +1523,22 @@ fn count_into(metrics: &mut BTreeMap<String, f64>, s: &Subject, settings: &Setti
                     c.runs
                 );
             }
+            true
         }
-        Ok(None) => eprintln!(
-            "note: valgrind not found — recording timing only. \
-             Instruction counts are the only gate-able metric; on macOS/Windows \
-             run tak in a Linux container to get them."
-        ),
+        Ok(None) => {
+            eprintln!(
+                "note: valgrind not found — recording timing only. \
+                 Instruction counts are the only gate-able metric; on macOS/Windows \
+                 run tak in a Linux container to get them."
+            );
+            true
+        }
         // Valgrind exists but the measurement failed. Say so rather than
         // blaming a missing install, and keep the timing we did collect.
-        Err(e) => eprintln!("warning: instruction counting failed: {e}"),
+        Err(e) => {
+            eprintln!("warning: instruction counting failed: {e}");
+            false
+        }
     }
 }
 
