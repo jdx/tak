@@ -6,6 +6,8 @@ local linters = new Mapping<String, Step> {
     // Same invocation as `mise run lint:clippy` and CI.
     ["cargo-clippy"] = (Builtins.cargo_clippy) {
         check = "cargo clippy --all-targets -- -D warnings"
+        // Same as `mise run lint-fix`, so fixes cover the targets check does.
+        fix = "cargo clippy --all-targets --fix --allow-dirty --allow-staged -- -D warnings"
     }
 }
 
