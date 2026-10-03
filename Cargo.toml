@@ -16,6 +16,7 @@ exclude = [
     ".gitignore",
     "docs/",
     "docker/",
+    "hk.pkl",
     "AGENTS.md",
     "CLAUDE.md",
     "cliff.toml",
