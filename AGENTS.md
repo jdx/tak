@@ -40,6 +40,9 @@ mise run lint-fix     # auto-fix what can be auto-fixed
 mise run ci           # build + test + lint, everything CI runs
 ```
 
+`hk.pkl` runs the same two checks through [hk](https://hk.jdx.dev): `hk check`, `hk fix`, and (after
+`hk install`) a pre-commit hook.
+
 `mise run lint:fmt` and `mise run lint:clippy` are separately runnable. `mise tasks` lists
 everything.
 
