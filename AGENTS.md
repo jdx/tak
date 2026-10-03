@@ -40,8 +40,14 @@ mise run lint-fix     # auto-fix what can be auto-fixed
 mise run ci           # build + test + lint, everything CI runs
 ```
 
-`hk.pkl` runs the same two checks through [hk](https://hk.jdx.dev): `hk check`, `hk fix`, and (after
-`hk install`) a pre-commit hook. `mise install` provides hk, which `mise.toml` pins.
+`hk.pkl` runs the same two checks through [hk](https://hk.jdx.dev). `mise install` provides hk, which
+`mise.toml` pins; run it through mise so the pinned version is used without shell activation:
+
+```sh
+mise x hk -- hk check --all   # what CI runs; plain `hk check` only looks at changed files
+mise x hk -- hk fix           # auto-fix
+mise x hk -- hk install --mise  # pre-commit hook; needs mise on Git's runtime PATH
+```
 
 `mise run lint:fmt` and `mise run lint:clippy` are separately runnable. `mise tasks` lists
 everything.
