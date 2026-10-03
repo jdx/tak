@@ -48,7 +48,10 @@ jobs:
 
       - run: valgrind --version
 
-      - run: mise run lint
+      # hk.pkl runs exactly what `mise run lint` does (cargo fmt --check and
+      # clippy -D warnings), so it replaces that task here rather than
+      # running both. `mise run lint` stays for local use.
+      - run: mise x hk -- hk check --all
       - run: mise run test
 
   docs:

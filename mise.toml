@@ -1,6 +1,8 @@
 min_version = "2026.9.7"
 
 [tools]
+# Pinned to the version hk.pkl amends.
+hk = "2.0.1"
 mr-boxington = { version = "latest", minimum_release_age = "0s" }
 usage = { version = "latest", minimum_release_age = "0s" }
 # communique rewrites release bodies and Node builds the docs. Rust-only CI jobs
