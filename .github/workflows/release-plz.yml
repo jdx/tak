@@ -122,6 +122,9 @@ jobs:
     if: ${{ needs.release-plz-release.outputs.tag != '' }}
     permissions:
       contents: write
+      pull-requests: read
+      issues: write
+      discussions: write
       # A called workflow's token can only be narrower than its caller's, so
       # the packslip's signing and attestation permissions are granted here.
       id-token: write
