@@ -9,15 +9,19 @@ local linters = new Mapping<String, Step> {
         // Same as `mise run lint-fix`, so fixes cover the targets check does.
         fix = "cargo clippy --all-targets --fix --allow-dirty --allow-staged -- -D warnings"
     }
-    // lints GitHub Actions workflows (jdx/jactionlint, a maintained actionlint fork)
+    // lints GitHub Actions workflows (jdx/jactionlint)
     ["jactionlint"] {
-        glob = List(".github/workflows/*.yml", ".github/workflows/*.yaml")
+        glob = List(".github/workflows/*.yml", ".github/workflows/*.yaml", ".github/actions/**/action.yml", ".github/actions/**/action.yaml", ".github/dependabot.yml", ".github/dependabot.yaml")
         batch = true
         check = new CommandSpec {
             // `mise x` installs it on demand: the CI test job runs mise-action with
             // `install: false`, so tools in mise.toml are not on PATH otherwise.
             command = "mise x jactionlint -- jactionlint {{ files }}"
             effect = "read"
+        }
+        fix = new CommandSpec {
+            command = "mise x jactionlint -- jactionlint --fix {{ files }}"
+            effect = "write"
         }
     }
 }

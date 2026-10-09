@@ -21,7 +21,9 @@ name: perf-pr
 # main contributes to the history — a branch's numbers are not the trunk's, and
 # a series that mixes them cannot be read.
 
-on: # zizmor: ignore[dangerous-triggers] validates live PR metadata before any self-hosted job
+# validates live PR metadata before any self-hosted job
+# jactionlint ignore=dangerous-triggers
+on:
   workflow_run:
     workflows: [perf-pr-preflight]
     types: [completed]
@@ -89,6 +91,7 @@ jobs:
 
   authorize:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       authorized: ${{ steps.pr.outputs.authorized }}
       base_ref: ${{ steps.pr.outputs.base_ref }}
