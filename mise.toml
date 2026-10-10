@@ -3,7 +3,7 @@ min_version = "2026.9.7"
 [tools]
 # hk.pkl amends a pinned hk package; the tool itself floats and is resolved by mise.lock.
 hk = { version = "latest", minimum_release_age = "0s" }
-jactionlint = "2.1.0"
+jactionlint = "latest"
 mr-boxington = { version = "latest", minimum_release_age = "0s" }
 usage = { version = "latest", minimum_release_age = "0s" }
 # communique rewrites release bodies and Node builds the docs. Rust-only CI jobs
