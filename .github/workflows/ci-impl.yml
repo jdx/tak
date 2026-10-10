@@ -7,6 +7,9 @@ on:
         required: true
         type: boolean
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -35,7 +38,7 @@ jobs:
         with:
           install: false
           cache: false
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ inputs.trusted && github.ref == 'refs/heads/main' }}
 
@@ -51,7 +54,12 @@ jobs:
       # hk.pkl runs exactly what `mise run lint` does (cargo fmt --check and
       # clippy -D warnings), so it replaces that task here rather than
       # running both. `mise run lint` stays for local use.
+      # Online checks (known-vulnerable actions, impostor commits, stale refs) run
+      # in CI only; locally: JACTIONLINT_ONLINE=1 hk check --all
       - run: mise x hk -- hk check --all
+        env:
+          JACTIONLINT_ONLINE: 1
+          GITHUB_TOKEN: ${{ github.token }}
       - run: mise run test
 
   docs:
@@ -62,7 +70,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5.0.0
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ inputs.trusted && github.ref == 'refs/heads/main' }}
       - run: mise run docs:check
@@ -80,7 +88,7 @@ jobs:
         with:
           install: false
           cache: false
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ inputs.trusted && github.ref == 'refs/heads/main' }}
       - run: mise run test

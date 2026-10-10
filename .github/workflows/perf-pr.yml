@@ -21,7 +21,9 @@ name: perf-pr
 # main contributes to the history — a branch's numbers are not the trunk's, and
 # a series that mixes them cannot be read.
 
-on: # zizmor: ignore[dangerous-triggers] validates live PR metadata before any self-hosted job
+# validates live PR metadata before any self-hosted job
+# jactionlint ignore=dangerous-triggers
+on:
   workflow_run:
     workflows: [perf-pr-preflight]
     types: [completed]
@@ -34,8 +36,11 @@ defaults:
   run:
     shell: bash
 
+# Only a successful preflight shares the per-branch group. A superseded
+# (cancelled) preflight also completes and triggers this workflow; giving it a
+# unique group keeps it from cancelling the controller of the newer run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.conclusion == 'success' && format('{0}-{1}', github.event.workflow_run.head_repository.full_name, github.event.workflow_run.head_branch) || github.run_id }}
   cancel-in-progress: true
 
 env:
@@ -89,6 +94,7 @@ jobs:
 
   authorize:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       authorized: ${{ steps.pr.outputs.authorized }}
       base_ref: ${{ steps.pr.outputs.base_ref }}
