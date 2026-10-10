@@ -75,7 +75,7 @@ signer = "sigstore-oidc:https://github.com/jdx/hk/.github/workflows/release.yml"
 [[tools.jactionlint]]
 version = "2.0.2"
 backend = "github:jdx/jactionlint"
-specifiers = ["latest"]
+specifiers = ["2.0.2"]
 
 [tools.jactionlint."platforms.linux-arm64"]
 checksum = "sha256:978a9f32cc4ed1d81b94563fc49643b8b3a48dcba4d1ea089d9ba05f7e17e7a7"

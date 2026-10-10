@@ -36,8 +36,11 @@ defaults:
   run:
     shell: bash
 
+# Only a successful preflight shares the per-branch group. A superseded
+# (cancelled) preflight also completes and triggers this workflow; giving it a
+# unique group keeps it from cancelling the controller of the newer run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.conclusion == 'success' && format('{0}-{1}', github.event.workflow_run.head_repository.full_name, github.event.workflow_run.head_branch) || github.run_id }}
   cancel-in-progress: true
 
 env:
