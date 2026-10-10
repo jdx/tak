@@ -3,8 +3,7 @@ min_version = "2026.9.7"
 [tools]
 # hk.pkl amends a pinned hk package; the tool itself floats and is resolved by mise.lock.
 hk = { version = "latest", minimum_release_age = "0s" }
-# Exact pin: jactionlint 2.0.2 is newer than the default 24h release-age holdback until 2026-10-10 20:00Z. Loosen to the previous selector after that.
-jactionlint = "2.0.2"
+jactionlint = "2.1.0"
 mr-boxington = { version = "latest", minimum_release_age = "0s" }
 usage = { version = "latest", minimum_release_age = "0s" }
 # communique rewrites release bodies and Node builds the docs. Rust-only CI jobs
