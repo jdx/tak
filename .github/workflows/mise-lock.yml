@@ -14,7 +14,9 @@ on:
 permissions: {}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Not "mise-lock-<ref>": the called workflow uses that group for its own job,
+  # and a shared group makes the two cancel each other before any step runs.
+  group: ${{ github.workflow }}-caller-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
