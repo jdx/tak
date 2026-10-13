@@ -174,7 +174,7 @@ jobs:
           POWERSHELL
           pwsh -NoProfile -NonInteractive -File completion-syntax-check.ps1
           gh release upload "$TAG" tak.usage.kdl tak.bash tak.zsh tak.fish tak.powershell --repo "$REPO" --clobber
-      - uses: jdx/packslip@87479dfc6443253dff69601cace5fc6ea07e6df5 # v1.4.0
+      - uses: jdx/packslip@2af36e792faa28130987c8af509e475c7458405d # v1.6.0
         with:
           tag: ${{ inputs.tag }}
           artifacts: release-assets/tak-*.tar.gz release-assets/tak-*.zip
