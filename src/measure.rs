@@ -3306,7 +3306,9 @@ git version 2.43.0
 
     /// `runs = "auto"` sizes each subject from its own speed: a subject too
     /// slow for the budget gets the floor, a faster one gets more. Uses real
-    /// sleeps, so the fast count is only bounded, not exact.
+    /// sleeps, so the fast count is only bounded, not exact. The fast subject
+    /// needs a sample under budget/3 to beat the floor, so the margin is 20x:
+    /// at 6.5x a loaded macOS runner pushed it to the floor of 2 and failed CI.
     #[cfg(unix)]
     #[test]
     fn auto_runs_give_a_slow_subject_the_floor_and_a_fast_one_more() {
@@ -3324,7 +3326,7 @@ git version 2.43.0
             when: None,
             runs: Runs::Auto,
             auto: AutoRuns {
-                budget: Duration::from_millis(400),
+                budget: Duration::from_millis(600),
                 min: 2,
                 max: 6,
             },
@@ -3337,14 +3339,14 @@ git version 2.43.0
         let mut log = Log::default();
         // The slow one has no warmup, so its first kept sample sizes it.
         let res = interleaved(
-            &[mk("fast", "0.02", 1), mk("slow", "0.3", 0)],
+            &[mk("fast", "0.01", 1), mk("slow", "0.5", 0)],
             9,
             &Settings::default(),
             &mut log,
         );
         let fast = res[0].as_ref().unwrap().times.len();
         let slow = res[1].as_ref().unwrap().times.len();
-        assert_eq!(slow, 2, "0.4s budget / 0.3s sample is below the floor");
+        assert_eq!(slow, 2, "0.6s budget / 0.5s sample is below the floor");
         assert!(fast > slow && fast <= 6, "fast got {fast}");
         // Planned on the floors first, then on the settled counts.
         assert_eq!(log.plans[0], [1 + 2, 2]);
