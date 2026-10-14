@@ -91,7 +91,12 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ inputs.trusted && github.ref == 'refs/heads/main' }}
+      # mise installs the task's tools lazily here, and without a token it hits
+      # the 60/hr per-IP GitHub API limit that macOS runners share, failing the
+      # job before cargo starts.
       - run: mise run test
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
   # docker/Dockerfile is the documented way to get instruction counts on macOS
   # and Windows, where there is no usable valgrind. Nothing built it, so it sat
