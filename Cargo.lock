@@ -352,7 +352,7 @@ dependencies = [
 
 [[package]]
 name = "tak-cli"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "anyhow",
  "asset-picker",
