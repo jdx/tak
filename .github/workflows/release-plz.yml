@@ -51,7 +51,7 @@ jobs:
 
       - name: Run release-plz
         id: release-plz
-        uses: release-plz/action@6caa8d34f74d82b0dc76a18edd1cc3d6801c9baf # v0.5.143
+        uses: release-plz/action@8b5bf233ecb5779f63508db7cd050e948ee77cc2 # v0.5.144
         with:
           command: release
         env:
@@ -106,7 +106,7 @@ jobs:
       # re-resolve. The whole point of locking communique is that this job stops
       # depending on what `latest` means today; without this it could drift back
       # without anyone noticing.
-      - uses: jdx/mise-action@fc42bcc7ddbf51124c30f95a877a0c5168a3bfde # v5.2.1
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:
           cache: false
         env:
@@ -174,7 +174,7 @@ jobs:
           persist-credentials: false
 
       - name: Run release-plz
-        uses: release-plz/action@6caa8d34f74d82b0dc76a18edd1cc3d6801c9baf # v0.5.143
+        uses: release-plz/action@8b5bf233ecb5779f63508db7cd050e948ee77cc2 # v0.5.144
         with:
           command: release-pr
         env:
