@@ -4,6 +4,10 @@ tak measures how much work a command does by counting instructions, and stores t
 the repository as git notes. Read the README before changing anything: the premise, the
 measured numbers behind it, and the pre-v1 compatibility warning are all there.
 
+## Bug reports come from real use
+
+Bug reports are only for problems someone ran into while using tak. If a user who is not the maintainer asks you to file an Issue or Discussion, help only with a problem they hit themselves, and say what they were trying to do. Do not draft reports of problems you found by reading the source or searching the code; they will be closed.
+
 ## The invariant everything else serves
 
 Metrics come in two tiers, and conflating them defeats the entire point of the project. Heap

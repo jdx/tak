@@ -2,6 +2,13 @@
 
 Use the mise tasks documented in `AGENTS.md` for development and validation.
 
+## Report a bug
+
+Bug reports, in Issues or Discussions, are only for problems you ran into while
+using tak. Say what you were trying to do, what you ran, the relevant config,
+and what happened. Reports found by reading the source or by having an agent
+search the code will be closed.
+
 ## mbx build cache
 
 mise wraps `cargo` with [mbx](https://mr-boxington.jdx.dev), so compiled work is
