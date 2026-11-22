@@ -110,6 +110,10 @@ enum Cmd {
         /// Do not report progress on stderr.
         #[usage(long)]
         no_progress: bool,
+        /// Run only the benchmarks that name this `[group.NAME]` in tak.toml.
+        /// Repeatable. Cannot be combined with --bench.
+        #[usage(long, value_name = "NAME")]
+        group: Vec<String>,
         /// Measure only this subject of each multi-subject benchmark.
         /// Repeatable. Benchmarks with none of the named subjects are skipped.
         #[usage(long, value_name = "NAME")]
@@ -436,6 +440,7 @@ struct RunOpts {
     allocations: bool,
     record: bool,
     no_progress: bool,
+    groups: Vec<String>,
     subjects: Vec<String>,
     seed: Option<u64>,
     export_json: Option<std::path::PathBuf>,
@@ -611,6 +616,11 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
             "--subject selects subjects declared in tak.toml; it cannot be used with a command after `--`"
         );
     }
+    if !opts.groups.is_empty() {
+        bail!(
+            "--group selects benchmarks declared in tak.toml; it cannot be used with a command after `--`"
+        );
+    }
     let bench = opts.bench.clone().unwrap_or_else(|| "default".to_string());
     let subject = Subject {
         name: SELF_TOOL.to_string(),
@@ -772,6 +782,52 @@ struct Planned {
 }
 
 /// Resolve the benchmarks `opts` selects from `cfg`, found at `path`.
+/// Keep the benchmarks in one of `--group`'s groups, or all of them when it
+/// names none. A group tak.toml does not declare fails the run before any
+/// benchmark is measured.
+fn select_groups<'a>(
+    cfg: &Config,
+    path: &Path,
+    opts: &RunOpts,
+    selected: Vec<(String, &'a tak_cli::config::Bench)>,
+) -> Result<Vec<(String, &'a tak_cli::config::Bench)>> {
+    if opts.groups.is_empty() {
+        return Ok(selected);
+    }
+    if opts.bench.is_some() {
+        bail!("--bench and --group cannot be combined; --bench already names one benchmark");
+    }
+    for g in &opts.groups {
+        if !cfg.has_group(g) {
+            let found: Vec<_> = cfg.group_names().collect();
+            bail!(
+                "no group `{g}` in {} (found: {})",
+                path.display(),
+                if found.is_empty() {
+                    "none".to_string()
+                } else {
+                    found.join(", ")
+                }
+            );
+        }
+    }
+    // A group no benchmark names would select nothing, and a run that selects
+    // nothing exits 0 without writing what --record, --export-json or
+    // --save-baseline asked for. Like an unknown --subject, it is a mistake.
+    for g in &opts.groups {
+        if !selected.iter().any(|(_, b)| b.group() == Some(g.as_str())) {
+            bail!("no benchmark in {} names group `{g}`", path.display());
+        }
+    }
+    Ok(selected
+        .into_iter()
+        .filter(|(_, b)| {
+            b.group()
+                .is_some_and(|g| opts.groups.iter().any(|o| o == g))
+        })
+        .collect())
+}
+
 fn plan_declared(cfg: &Config, path: &Path, opts: &RunOpts) -> Result<Planned> {
     let selected: Vec<_> = match &opts.bench {
         Some(name) => {
@@ -790,6 +846,7 @@ fn plan_declared(cfg: &Config, path: &Path, opts: &RunOpts) -> Result<Planned> {
         }
         None => cfg.bench.iter().map(|(k, v)| (k.clone(), v)).collect(),
     };
+    let selected = select_groups(cfg, path, opts, selected)?;
 
     // Resolve and filter everything before measuring anything, so a mistyped
     // --subject fails now rather than after the benchmarks before it ran.
@@ -2952,6 +3009,7 @@ fn cmd_backfill_commits(o: CommitBackfill, settings: &Settings) -> Result<()> {
         allocations: false,
         record: true,
         no_progress: false,
+        groups: Vec::new(),
         subjects: Vec::new(),
         seed: None,
         export_json: None,
@@ -3629,6 +3687,7 @@ fn main() -> Result<()> {
             allocations,
             record,
             no_progress,
+            group,
             subject,
             seed,
             export_json,
@@ -3656,6 +3715,7 @@ fn main() -> Result<()> {
                     allocations,
                     record,
                     no_progress,
+                    groups: group,
                     subjects: subject,
                     seed,
                     export_json,

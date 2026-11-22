@@ -20,6 +20,13 @@
       "description": "Settings every benchmark starts from.",
       "$ref": "#/definitions/layer"
     },
+    "group": {
+      "description": "Settings for the benchmarks that name the group in `group`, stacked over [defaults] and under the benchmark's own.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/layer"
+      }
+    },
     "subject": {
       "description": "Subjects declared once, for benchmarks to list in `subjects`.",
       "type": "object",
@@ -429,6 +436,10 @@
         "cmd": {
           "description": "The command, for a benchmark of one program. Not combined with subjects.",
           "$ref": "#/definitions/cmd"
+        },
+        "group": {
+          "description": "The [group.NAME] whose settings this benchmark starts from, over [defaults].",
+          "type": "string"
         },
         "subjects": {
           "description": "Shared [subject.NAME] tables this benchmark measures.",

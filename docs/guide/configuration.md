@@ -614,9 +614,35 @@ prepare = ["sh", "-c", "rm -rf node_modules ~/.cache/mycli /tmp/othertool"]
 cmd = ["./target/release/mycli", "install", "--no-cache"]
 ```
 
-Settings stack from least to most specific: `[defaults]`, then the benchmark, then the
-shared `[subject.NAME]`, then the benchmark's own `[bench.B.subject.NAME]`. Each layer's
-setting replaces the one before, except `env`, `vars` and `metric`, which merge key by key.
+Settings that some benchmarks share and others do not go in a group, which each of those
+benchmarks names. A group takes the same settings as `[defaults]`:
+
+```toml
+[group.fixture]
+setup = ["./scripts/make-fixture.sh", "/tmp/fixture"]
+env = { HOME = "/tmp/fixture/home" }
+
+[bench.env]
+group = "fixture"
+cmd = ["./target/release/mycli", "-C", "/tmp/fixture", "env"]
+
+[bench.ls]
+group = "fixture"
+cmd = ["./target/release/mycli", "-C", "/tmp/fixture", "ls"]
+
+# Not in the group: no setup, and the real HOME.
+[bench.help]
+cmd = ["./target/release/mycli", "--help"]
+```
+
+A benchmark naming a group that does not exist is an error when tak.toml is read.
+`tak run --group fixture` runs only the benchmarks in that group; repeat `--group` to run
+several groups.
+
+Settings stack from least to most specific: `[defaults]`, then the benchmark's
+`[group.NAME]`, then the benchmark, then the shared `[subject.NAME]`, then the benchmark's
+own `[bench.B.subject.NAME]`. Each layer's setting replaces the one before, except `env`,
+`vars` and `metric`, which merge key by key.
 `[defaults]` takes every benchmark setting (`runs`, `warmup`, `budget`, `min_runs`,
 `max_runs`, `ok_exit_codes`, `setup`, `prepare`, `check`, `version_cmd`, `dir`, `env`, `vars`,
 `metric`, `allocations`). It is a separate table because `[env]` already holds `env.deny` and

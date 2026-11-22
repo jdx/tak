@@ -47,6 +47,9 @@ vars = { v = "x" }
 allocations = false
 metric.binary_bytes.file = "target/release/x"
 
+[group.fixture]
+setup = ["true"]
+
 [subject.shared]
 cmd = ["true"]
 when = "true"
@@ -70,6 +73,7 @@ metric.bundle_kb.cmd = ["true"]
 
 [bench.single]
 cmd = "true"
+group = "fixture"
 when = 'os != ""'
 gate = { pct = 5.0, min_delta = 1000, enabled = true }
 runs = 2
@@ -148,6 +152,12 @@ fn the_schema_and_the_parser_agree_on_every_key() {
         keys(&table(&t["subject"]["shared"])),
         props(&s, "/definitions/subject"),
         "[subject.NAME]"
+    );
+    // A group takes exactly what [defaults] takes, checked above.
+    assert_eq!(
+        s.pointer("/properties/group/additionalProperties/$ref"),
+        s.pointer("/properties/defaults/$ref"),
+        "[group.NAME]"
     );
 
     // A benchmark: the single-command form and the multi-subject form

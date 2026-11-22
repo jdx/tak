@@ -42,6 +42,9 @@ cmd run help="Benchmark a command, or everything declared in tak.toml." {
     flag --allocations help="Also count heap allocations under valgrind's DHAT, for every subject measured. Recorded and reported, never gated."
     flag --record help="Append the result to refs/notes/tak for the current commit."
     flag --no-progress help="Do not report progress on stderr."
+    flag --group help="Run only the benchmarks that name this `[group.NAME]` in tak.toml. Repeatable. Cannot be combined with --bench." var=#true {
+        arg <NAME>
+    }
     flag --subject help="Measure only this subject of each multi-subject benchmark. Repeatable. Benchmarks with none of the named subjects are skipped." var=#true {
         arg <NAME>
     }

@@ -51,6 +51,12 @@ pub struct Config {
     /// Settings every benchmark starts from.
     #[serde(default)]
     defaults: Layer,
+    /// Settings for the benchmarks that name the group in `group = "..."`,
+    /// stacked between `[defaults]` and the benchmark's own. For settings
+    /// some benchmarks share and others do not, such as the setup command
+    /// and environment of the ones that measure the same fixture.
+    #[serde(default)]
+    group: BTreeMap<String, Layer>,
     /// Subjects declared once, for benchmarks to name in `subjects = [...]`.
     #[serde(default)]
     subject: BTreeMap<String, SubjectDecl>,
@@ -284,6 +290,8 @@ pub struct Bench {
     when: Option<String>,
     /// This benchmark's gate, where it differs from `[gate]`.
     gate: Option<GateDecl>,
+    /// The `[group.NAME]` whose settings this benchmark starts from.
+    group: Option<String>,
     /// Shared `[subject.NAME]` tables this benchmark measures.
     #[serde(default)]
     subjects: Vec<String>,
@@ -618,6 +626,11 @@ impl Bench {
         self.when.as_deref()
     }
 
+    /// The `[group.NAME]` this benchmark names, if any.
+    pub fn group(&self) -> Option<&str> {
+        self.group.as_deref()
+    }
+
     /// Whether this benchmark compares several programs rather than measuring
     /// one.
     pub fn is_multi(&self) -> bool {
@@ -626,9 +639,19 @@ impl Bench {
 }
 
 impl Config {
+    /// Whether tak.toml declares `[group.NAME]`.
+    pub fn has_group(&self, name: &str) -> bool {
+        self.group.contains_key(name)
+    }
+
+    /// The names of the declared `[group.NAME]` tables.
+    pub fn group_names(&self) -> impl Iterator<Item = &str> {
+        self.group.keys().map(String::as_str)
+    }
+
     /// Every subject of benchmark `name`, with each layer applied: defaults,
-    /// the benchmark, the shared subject, then the benchmark's own subject
-    /// table. Templates are not rendered yet; see [`crate::template::render`].
+    /// the benchmark's group, the benchmark, the shared subject, then the
+    /// benchmark's own subject table. Templates are not rendered yet; see [`crate::template::render`].
     ///
     /// A single-command benchmark is one subject named [`SELF_TOOL`] with
     /// counters on, which is exactly what it measured before subjects existed.
@@ -637,17 +660,23 @@ impl Config {
             .bench
             .get(name)
             .with_context(|| format!("no benchmark `{name}`"))?;
+        let group = match &b.group {
+            Some(g) => Some(
+                self.group
+                    .get(g)
+                    .with_context(|| format!("names group `{g}`, but there is no [group.{g}]"))?,
+            ),
+            None => None,
+        };
+        let base: Vec<&Layer> = [Some(&self.defaults), group, Some(&b.layer)]
+            .into_iter()
+            .flatten()
+            .collect();
         if let Some(cmd) = &b.cmd {
             if b.is_multi() {
                 bail!("declares both `cmd` and subjects; use one or the other");
             }
-            return Ok(vec![resolve(
-                SELF_TOOL,
-                cmd,
-                true,
-                None,
-                &[&self.defaults, &b.layer],
-            )?]);
+            return Ok(vec![resolve(SELF_TOOL, cmd, true, None, &base)?]);
         }
         // A benchmark's own table can add a subject or override a shared one;
         // either way it is measured, listed or not.
@@ -675,7 +704,7 @@ impl Config {
                     .and_then(|d| d.counters)
                     .or_else(|| shared.and_then(|d| d.counters))
                     .unwrap_or(false);
-                let mut layers = vec![&self.defaults, &b.layer];
+                let mut layers = base.clone();
                 layers.extend(shared.map(|d| &d.layer));
                 layers.extend(local.map(|d| &d.layer));
                 resolve(n, cmd, counters, when, &layers).with_context(|| format!("subject `{n}`"))
@@ -688,6 +717,9 @@ impl Config {
     /// Every settings layer in the file, with where it is.
     fn layers(&self) -> Vec<(String, &Layer)> {
         let mut out = vec![("defaults".to_string(), &self.defaults)];
+        for (g, l) in &self.group {
+            out.push((format!("group.{g}"), l));
+        }
         for (n, d) in &self.subject {
             out.push((format!("subject.{n}"), &d.layer));
         }
@@ -825,6 +857,9 @@ impl Config {
         }
         let mut out = Vec::new();
         layer(&mut out, "defaults", &self.defaults);
+        for (g, l) in &self.group {
+            layer(&mut out, &format!("group.{g}"), l);
+        }
         for (n, d) in &self.subject {
             subject(&mut out, &format!("subject.{n}"), d);
         }
@@ -1729,6 +1764,73 @@ cmd = "mycli 'two words'""#,
         assert_eq!(test[1].cmd, ["pnpm", "install-test"]);
         assert_eq!(test[1].vars["kind"], "local");
         assert!(test[1].counters, "an override keeps the shared setting");
+    }
+
+    /// A group holds what some benchmarks share and others do not: it stacks
+    /// over `[defaults]` and under the benchmark, in both benchmark forms.
+    #[test]
+    fn groups_stack_between_defaults_and_the_benchmark() {
+        let c = Config::parse(
+            r#"
+            [defaults]
+            warmup = 2
+            env = { CI = "1", HOME = "/h" }
+
+            [group.fixture]
+            setup = ["make", "fixture"]
+            warmup = 1
+            env = { HOME = "/fixture/home" }
+
+            [bench.single]
+            group = "fixture"
+            cmd = ["tool", "env"]
+            warmup = 0
+
+            [bench.multi]
+            group = "fixture"
+            [bench.multi.subject.a]
+            cmd = ["a"]
+            env = { HOME = "/a" }
+
+            [bench.plain]
+            cmd = ["tool", "--help"]
+            "#,
+        )
+        .unwrap();
+
+        let single = &c.subjects("single").unwrap()[0];
+        assert_eq!(single.setup.as_deref().unwrap(), ["make", "fixture"]);
+        assert_eq!(single.warmup, 0, "bench over group");
+        assert_eq!(single.env["HOME"], "/fixture/home", "group over defaults");
+        assert_eq!(single.env["CI"], "1", "merged, not replaced");
+
+        let multi = &c.subjects("multi").unwrap()[0];
+        assert_eq!(multi.setup.as_deref().unwrap(), ["make", "fixture"]);
+        assert_eq!(multi.warmup, 1, "group over defaults");
+        assert_eq!(multi.env["HOME"], "/a", "subject over group");
+
+        let plain = &c.subjects("plain").unwrap()[0];
+        assert!(plain.setup.is_none(), "a group reaches only its benchmarks");
+        assert_eq!(plain.warmup, 2);
+    }
+
+    /// Naming a group that does not exist fails when the file is read, like
+    /// listing a subject that does not, rather than measuring without it.
+    #[test]
+    fn an_unknown_group_is_an_error() {
+        let err = Config::parse("[bench.a]\ncmd = \"x\"\ngroup = \"nope\"").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("names group `nope`, but there is no [group.nope]"),
+            "{err:#}"
+        );
+    }
+
+    /// A group no benchmark names yet still has its templates checked.
+    #[test]
+    fn an_unused_group_is_still_checked() {
+        let err = Config::parse("[group.g]\nsetup = [\"{{ env.X \"]\n[bench.a]\ncmd = \"x\"")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("group.g.setup"), "{err:#}");
     }
 
     /// `version_cmd` stacks like `prepare`, and its program is found the

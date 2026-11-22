@@ -16,6 +16,7 @@ Benchmark a command, or everything declared in tak.toml.
 - **`--allocations`** — Also count heap allocations under valgrind's DHAT, for every subject measured. Recorded and reported, never gated.
 - **`--record`** — Append the result to refs/notes/tak for the current commit.
 - **`--no-progress`** — Do not report progress on stderr.
+- **`--group <NAME>`** — Run only the benchmarks that name this `[group.NAME]` in tak.toml. Repeatable. Cannot be combined with --bench.
 - **`--subject <NAME>`** — Measure only this subject of each multi-subject benchmark. Repeatable. Benchmarks with none of the named subjects are skipped.
 - **`--seed <N>`** — Seed for the order subjects are sampled in. Every multi-subject run prints the seed it used, so an order can be repeated.
 - **`--config <PATH>`** — Read this file instead of searching for tak.toml.
