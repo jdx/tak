@@ -274,6 +274,8 @@ fn group_selects_benchmarks_and_rejects_unknown_names() {
 warmup = 0
 runs = 1
 
+[group.unused]
+
 [bench.inside]
 group = "fixture"
 cmd = ["true"]
@@ -300,6 +302,17 @@ cmd = ["true"]
     assert!(!out.status.success());
     let msg = stderr(&out);
     assert!(msg.contains("cannot be combined"), "{msg}");
+
+    // A declared group that no benchmark names selects nothing, so the export
+    // it asked for would never be written.
+    let out = p.run(&["--group", "unused", "--export-json", "out.json"]);
+    assert!(!out.status.success());
+    let msg = stderr(&out);
+    assert!(
+        msg.contains("no benchmark") && msg.contains("group `unused`"),
+        "{msg}"
+    );
+    assert!(!p.dir.join("out.json").exists());
 }
 
 /// Single-command benchmarks are what every existing tak.toml declares; they

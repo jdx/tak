@@ -811,6 +811,14 @@ fn select_groups<'a>(
             );
         }
     }
+    // A group no benchmark names would select nothing, and a run that selects
+    // nothing exits 0 without writing what --record, --export-json or
+    // --save-baseline asked for. Like an unknown --subject, it is a mistake.
+    for g in &opts.groups {
+        if !selected.iter().any(|(_, b)| b.group() == Some(g.as_str())) {
+            bail!("no benchmark in {} names group `{g}`", path.display());
+        }
+    }
     Ok(selected
         .into_iter()
         .filter(|(_, b)| {
