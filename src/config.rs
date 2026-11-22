@@ -626,6 +626,11 @@ impl Bench {
         self.when.as_deref()
     }
 
+    /// The `[group.NAME]` this benchmark names, if any.
+    pub fn group(&self) -> Option<&str> {
+        self.group.as_deref()
+    }
+
     /// Whether this benchmark compares several programs rather than measuring
     /// one.
     pub fn is_multi(&self) -> bool {
@@ -634,6 +639,16 @@ impl Bench {
 }
 
 impl Config {
+    /// Whether tak.toml declares `[group.NAME]`.
+    pub fn has_group(&self, name: &str) -> bool {
+        self.group.contains_key(name)
+    }
+
+    /// The names of the declared `[group.NAME]` tables.
+    pub fn group_names(&self) -> impl Iterator<Item = &str> {
+        self.group.keys().map(String::as_str)
+    }
+
     /// Every subject of benchmark `name`, with each layer applied: defaults,
     /// the benchmark's group, the benchmark, the shared subject, then the
     /// benchmark's own subject table. Templates are not rendered yet; see [`crate::template::render`].

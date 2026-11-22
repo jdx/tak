@@ -188,6 +188,26 @@
             "global": false
           },
           {
+            "name": "group",
+            "usage": "--group <NAME>",
+            "help": "Run only the benchmarks that name this `[group.NAME]` in tak.toml. Repeatable. Cannot be combined with --bench.",
+            "help_first_line": "Run only the benchmarks that name this `[group.NAME]` in tak.toml. Repeatable. Cannot be combined with --bench.",
+            "short": [],
+            "long": [
+              "group"
+            ],
+            "var": true,
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "NAME",
+              "usage": "<NAME>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
             "name": "subject",
             "usage": "--subject <NAME>",
             "help": "Measure only this subject of each multi-subject benchmark. Repeatable. Benchmarks with none of the named subjects are skipped.",

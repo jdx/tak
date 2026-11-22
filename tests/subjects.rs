@@ -263,6 +263,45 @@ fn subject_selects_and_rejects_unknown_names() {
     assert!(msg.contains("nope") && msg.contains("a, b"), "{msg}");
 }
 
+/// --group runs the benchmarks that name one of its groups and no others, and
+/// a group tak.toml does not declare fails before anything is measured.
+#[test]
+fn group_selects_benchmarks_and_rejects_unknown_names() {
+    let p = Project::new(
+        "groups",
+        r#"
+[group.fixture]
+warmup = 0
+runs = 1
+
+[bench.inside]
+group = "fixture"
+cmd = ["true"]
+
+[bench.outside]
+cmd = ["true"]
+"#,
+    );
+    let out = p.run(&["--no-counters", "--no-progress", "--group", "fixture"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("  inside  true"), "{stdout}");
+    assert!(!stdout.contains("outside"), "{stdout}");
+
+    let out = p.run(&["--group", "nope"]);
+    assert!(!out.status.success());
+    let msg = stderr(&out);
+    assert!(
+        msg.contains("no group `nope`") && msg.contains("fixture"),
+        "{msg}"
+    );
+
+    let out = p.run(&["--group", "fixture", "--bench", "inside"]);
+    assert!(!out.status.success());
+    let msg = stderr(&out);
+    assert!(msg.contains("cannot be combined"), "{msg}");
+}
+
 /// Single-command benchmarks are what every existing tak.toml declares; they
 /// keep their output and their `self` series.
 #[test]

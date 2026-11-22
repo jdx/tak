@@ -636,6 +636,8 @@ cmd = ["./target/release/mycli", "--help"]
 ```
 
 A benchmark naming a group that does not exist is an error when tak.toml is read.
+`tak run --group fixture` runs only the benchmarks in that group; repeat `--group` to run
+several groups.
 
 Settings stack from least to most specific: `[defaults]`, then the benchmark's
 `[group.NAME]`, then the benchmark, then the shared `[subject.NAME]`, then the benchmark's
