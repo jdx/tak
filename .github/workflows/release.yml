@@ -71,8 +71,11 @@ jobs:
         with:
           bin: tak
           target: ${{ matrix.target }}
-          # `cross` for the aarch64 Linux targets, plain cargo elsewhere.
-          build-tool: ${{ startsWith(matrix.target, 'aarch64-unknown-linux') && 'cross' || 'cargo' }}
+          # `cross` for the aarch64 Linux targets and for x86_64 musl, plain
+          # cargo elsewhere. x86_64 musl is the runner's own architecture, but
+          # psm (under pest and stacker) compiles assembly with the target's C
+          # compiler, and the runner has no x86_64-linux-musl-gcc.
+          build-tool: ${{ (startsWith(matrix.target, 'aarch64-unknown-linux') || endsWith(matrix.target, '-linux-musl')) && 'cross' || 'cargo' }}
           token: ${{ secrets.GITHUB_TOKEN }}
           dry-run: true
 
