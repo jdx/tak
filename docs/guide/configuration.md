@@ -333,6 +333,36 @@ after `--`.
 - Valgrind measures the process it starts, not the programs that process runs. For
   `["sh", "-c", "…"]`, it counts the shell's allocations.
 
+## Counting a command that execs
+
+Some commands end by replacing themselves with another program: a version manager's shim, `env`,
+a wrapper that sets up an environment and hands over. Valgrind can't count those. The exec
+replaces the process it was counting, and what that process did before it is lost, so the
+instruction count is missing or describes only the program it handed over to.
+
+`count_until = "exec"` stops the count at the exec instead:
+
+```toml
+[bench.shim]
+cmd = ["./shims/node", "--version"]
+count_until = "exec"
+```
+
+- The count covers the command up to its exec, and nothing the new program does. A command that
+  never execs is counted to its exit, as usual.
+- It runs under valgrind's callgrind rather than cachegrind, which stops at any function whose
+  name contains `execve`, as the C library's does. A program that execs some other way, such as a
+  statically linked binary with no symbols, fails with an error rather than recording a count.
+- Callgrind's counts differ slightly from cachegrind's for the same work. Changing a benchmark's
+  `count_until` moves its series, so compare it only against measurements taken the same way.
+- Timed samples are unchanged and include the new program, because wall time is measured from
+  outside the process.
+- `tak profile` keeps no profile for these subjects: callgrind's profile is in a format it doesn't
+  read.
+- Each failed attempt of an `execvp`-style search along PATH is counted, since it's work the
+  command does before the exec that succeeds.
+- `count_until` is a setting like `runs`: it can go in `[defaults]`, a benchmark, or a subject.
+
 ## Recording other metrics
 
 Some changes show up in a number that no timing captures: a binary's size, a bundle's size, a
@@ -645,7 +675,7 @@ own `[bench.B.subject.NAME]`. Each layer's setting replaces the one before, exce
 `vars` and `metric`, which merge key by key.
 `[defaults]` takes every benchmark setting (`runs`, `warmup`, `budget`, `min_runs`,
 `max_runs`, `ok_exit_codes`, `setup`, `prepare`, `check`, `version_cmd`, `dir`, `env`, `vars`,
-`metric`, `allocations`). It is a separate table because `[env]` already holds `env.deny` and
+`metric`, `allocations`, `count_until`). It is a separate table because `[env]` already holds `env.deny` and
 `env.allow`.
 
 ## Templates

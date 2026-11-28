@@ -45,6 +45,7 @@ dir = "."
 env = { A = "1" }
 vars = { v = "x" }
 allocations = false
+count_until = "exit"
 metric.binary_bytes.file = "target/release/x"
 
 [group.fixture]
@@ -69,6 +70,7 @@ dir = "."
 env = { B = "2" }
 vars = { w = "y" }
 allocations = true
+count_until = "exec"
 metric.bundle_kb.cmd = ["true"]
 
 [bench.single]
@@ -90,6 +92,7 @@ dir = "."
 env = { C = "3" }
 vars = { u = "z" }
 allocations = true
+count_until = "exec"
 metric.lines_count.cmd = "true"
 
 [bench.multi]

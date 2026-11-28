@@ -643,6 +643,7 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         warmup: opts.warmup.unwrap_or(DEFAULT_WARMUP),
         counters: true,
         allocations: opts.allocations,
+        count_until: Default::default(),
         ok_exit_codes: config::DEFAULT_OK_EXIT_CODES.to_vec(),
         metrics: BTreeMap::new(),
     };

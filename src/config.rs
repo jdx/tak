@@ -190,11 +190,33 @@ struct Layer {
     /// competitor's upgrade for it to fail, and a single-command benchmark
     /// needs a way to turn it on.
     allocations: Option<bool>,
+    /// Where an instruction count ends: `"exit"`, the default, or `"exec"`
+    /// for a command whose job ends by replacing itself with another program.
+    count_until: Option<CountUntil>,
     /// Numbers recorded beside the timings, by name: a file's size, or what
     /// a command prints. Merged by name across layers, like `env`, with a
     /// more specific layer's metric replacing a same-named one outright.
     #[serde(default)]
     metric: BTreeMap<String, MetricDecl>,
+}
+
+/// Where an instruction count ends.
+///
+/// valgrind loses the count of a process that execs: the new program
+/// replaces the process valgrind was counting, and nothing reports what the
+/// old one retired. A launcher — a version manager's shim, `env`, a wrapper
+/// that sets up and hands over — does all its work before that exec, so
+/// counting it needs a count that stops there.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CountUntil {
+    /// Count the whole process, under cachegrind.
+    #[default]
+    Exit,
+    /// Count until the process execs another program, or until it exits if
+    /// it never does, under callgrind. What the new program does is not
+    /// counted.
+    Exec,
 }
 
 /// A custom metric as written: exactly one of `file` or `cmd`.
@@ -554,6 +576,8 @@ pub struct Subject {
     pub counters: bool,
     /// Count heap allocations under DHAT. Recorded and reported, never gated.
     pub allocations: bool,
+    /// Where the instruction count ends.
+    pub count_until: CountUntil,
     /// Exit codes a timed or warmup sample may end with and still count.
     /// Never empty. A death by signal fails whatever this holds, and
     /// `setup` and `prepare` are always held to exit 0.
@@ -953,6 +977,9 @@ fn resolve(
         allocations: last(layers, |l| l.allocations.as_ref())
             .copied()
             .unwrap_or(false),
+        count_until: last(layers, |l| l.count_until.as_ref())
+            .copied()
+            .unwrap_or_default(),
         ok_exit_codes: match last(layers, |l| l.ok_exit_codes.as_ref()) {
             Some(codes) => ok_exit_codes(codes)?,
             None => DEFAULT_OK_EXIT_CODES.to_vec(),
@@ -1295,6 +1322,38 @@ cmd = "mycli 'two words'""#,
         assert!(!multi[0].allocations, "a subject's own setting wins");
         assert!(multi[1].allocations);
         assert!(!only(&Config::parse("[bench.a]\ncmd = \"x\"").unwrap(), "a").allocations);
+    }
+
+    #[test]
+    fn counts_end_at_exit_unless_a_layer_says_exec() {
+        let c = Config::parse(
+            r#"
+            [defaults]
+            count_until = "exec"
+
+            [bench.inherited]
+            cmd = "x"
+
+            [bench.multi.subject.shim]
+            cmd = "x"
+            [bench.multi.subject.direct]
+            cmd = "y"
+            count_until = "exit"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(only(&c, "inherited").count_until, CountUntil::Exec);
+        let multi = c.subjects("multi").unwrap();
+        assert_eq!(
+            multi[0].count_until,
+            CountUntil::Exit,
+            "a subject's own setting wins"
+        );
+        assert_eq!(multi[1].count_until, CountUntil::Exec);
+        let plain = Config::parse("[bench.a]\ncmd = \"x\"").unwrap();
+        assert_eq!(only(&plain, "a").count_until, CountUntil::Exit);
+        let err = Config::parse("[bench.a]\ncmd = \"x\"\ncount_until = \"fork\"").unwrap_err();
+        assert!(format!("{err:#}").contains("`exit` or `exec`"), "{err:#}");
     }
 
     #[test]
