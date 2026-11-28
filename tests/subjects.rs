@@ -933,6 +933,24 @@ fn dry_run_honours_no_counters() {
     assert!(!String::from_utf8_lossy(&off.stdout).contains("counters on"));
 }
 
+/// --dry-run shows a count that stops at the exec, inherited or not, since it
+/// measures different work from the default.
+#[test]
+fn dry_run_shows_a_count_until_exec() {
+    let p = Project::new(
+        "dry-until",
+        "[defaults]\ncount_until = \"exec\"\n[bench.one]\ncmd = [\"true\"]\n[bench.two]\ncmd = [\"true\"]\ncount_until = \"exit\"\n",
+    );
+    let one = p.run(&["--dry-run", "--bench", "one"]);
+    assert!(String::from_utf8_lossy(&one.stdout).contains("counters on, until exec"));
+    let two = p.run(&["--dry-run", "--bench", "two"]);
+    let two = String::from_utf8_lossy(&two.stdout);
+    assert!(
+        two.contains("counters on") && !two.contains("until exec"),
+        "{two}"
+    );
+}
+
 /// Only the subjects being run have their conditions evaluated, a subject
 /// in a switched-off benchmark is reported as such, and a run where every
 /// selected benchmark is switched off says so.

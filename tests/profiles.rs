@@ -53,6 +53,7 @@ fn echo() -> tak_cli::config::Subject {
         warmup: 0,
         counters: true,
         allocations: false,
+        count_until: Default::default(),
         ok_exit_codes: vec![0],
         metrics: std::collections::BTreeMap::new(),
     }

@@ -18,7 +18,9 @@
 //! that is five programs, not a demonstrated property, so they are recorded
 //! and reported and do not gate. Their peak moves with thread scheduling.
 
-use crate::config::{AutoRuns, DEFAULT_OK_EXIT_CODES, MetricSource, Runs, SELF_TOOL, Subject};
+use crate::config::{
+    AutoRuns, CountUntil, DEFAULT_OK_EXIT_CODES, MetricSource, Runs, SELF_TOOL, Subject,
+};
 use crate::settings::Settings;
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
@@ -1095,6 +1097,7 @@ pub fn wall(plan: &Plan) -> Result<BTreeMap<String, f64>> {
         warmup: plan.warmup,
         counters: false,
         allocations: false,
+        count_until: Default::default(),
         ok_exit_codes: DEFAULT_OK_EXIT_CODES.to_vec(),
         metrics: BTreeMap::new(),
     };
@@ -1188,6 +1191,7 @@ pub fn instructions(
             settings,
         },
         &DEFAULT_OK_EXIT_CODES,
+        CountUntil::Exit,
         false,
         &|| Ok(()),
     )
@@ -1250,6 +1254,7 @@ fn subject_count(
             settings,
         },
         &s.ok_exit_codes,
+        s.count_until,
         profile,
         vet,
     )
@@ -1896,12 +1901,15 @@ const VALGRIND_LOG_CAP: u64 = 1 << 20;
 /// Creating the file can fail — a full or read-only temporary directory —
 /// and that is an error naming it, which the caller reports as a failed
 /// measurement, never as valgrind being absent.
+///
+/// The pid is returned with the log: it is the subject's own, and names the
+/// files a tool writes with `%p` in their path.
 #[cfg(unix)]
 fn under_valgrind(
     tool: &[&str],
     cmd: &[String],
     site: &Site,
-) -> Result<(std::process::ExitStatus, String)> {
+) -> Result<(std::process::ExitStatus, String, u32)> {
     use std::io::{Read, Seek};
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
@@ -1951,7 +1959,7 @@ fn under_valgrind(
         .filter(|l| l.starts_with(&prefix))
         .flat_map(|l| [l, "\n"])
         .collect();
-    Ok((status, own))
+    Ok((status, own, pid))
 }
 
 /// There is no valgrind to run on other platforms, and [`valgrind_available`]
@@ -1961,7 +1969,7 @@ fn under_valgrind(
     _tool: &[&str],
     _cmd: &[String],
     _site: &Site,
-) -> Result<(std::process::ExitStatus, String)> {
+) -> Result<(std::process::ExitStatus, String, u32)> {
     bail!("valgrind runs only on Unix")
 }
 
@@ -1986,23 +1994,34 @@ fn last_log_line(log: &str) -> &str {
 /// Anything that stops the profile being kept is returned in its place
 /// rather than failing the count: an instruction count is still the gate
 /// with or without the profile that explains it.
+///
+/// `until` [`CountUntil::Exec`] counts under callgrind instead, which can
+/// report the count at a point inside the run; see [`callgrind_total`]. Its
+/// profiles are in a format `tak profile` does not read, so none is kept.
 fn count(
     cmd: &[String],
     prepare: Option<&[String]>,
     site: &Site,
     ok: &[i32],
+    until: CountUntil,
     profile: bool,
     vet: &dyn Fn() -> Result<()>,
 ) -> Result<Option<(Counted, Option<Profiled>)>> {
     if !valgrind_available() {
         return Ok(None);
     }
+    let exec = until == CountUntil::Exec;
 
     // An absolute path, since the subject may run in its own `dir`; removed
     // with the directory on every exit path. When it cannot be created the
-    // runs go to `/dev/null` as they would without `profile`.
-    let (scratch, unkept) = match profile.then(tempfile::tempdir) {
+    // runs go to `/dev/null` as they would without `profile`, unless the
+    // count itself is read from it.
+    let (scratch, unkept) = match (profile || exec).then(tempfile::tempdir) {
         Some(Ok(d)) => (Some(d), None),
+        Some(Err(e)) if exec => {
+            return Err(anyhow::Error::new(e)
+                .context("could not create a directory for callgrind's counts"));
+        }
         Some(Err(e)) => (
             None,
             Some(
@@ -2032,8 +2051,30 @@ fn count(
                 .replace('%', "%%"),
             None => "/dev/null".to_string(),
         };
+        let bin = cmd.first().map(String::as_str).unwrap_or("(empty command)");
+        if exec {
+            // `%p`, since a process the subject forks stays under valgrind
+            // and dumps its own counts; only the subject's are read.
+            let out_arg = format!("--callgrind-out-file={out_file}.%p");
+            let (status, log, pid) = under_valgrind(
+                &["--tool=callgrind", "--dump-before=*execve*", &out_arg],
+                cmd,
+                site,
+            )?;
+            accepted(bin, status, ok, " under valgrind")?;
+            let dir = scratch
+                .as_ref()
+                .expect("an exec count has a scratch directory");
+            samples.push(callgrind_total(
+                dir.path(),
+                &format!("run-{run}"),
+                pid,
+                &log,
+            )?);
+            continue;
+        }
         let out_arg = format!("--cachegrind-out-file={out_file}");
-        let (status, log) = under_valgrind(
+        let (status, log, _) = under_valgrind(
             &[
                 "--tool=cachegrind",
                 "--cache-sim=no",
@@ -2045,7 +2086,6 @@ fn count(
         )?;
 
         // cachegrind writes its summary to its log as e.g. "I refs:  48,349,132".
-        let bin = cmd.first().map(String::as_str).unwrap_or("(empty command)");
         accepted(bin, status, ok, " under valgrind")?;
         match parse_irefs(&log) {
             // cachegrind that cannot open its output file still exits with
@@ -2089,6 +2129,11 @@ fn count(
         .position(|n| *n == counted.min)
         .expect("the minimum is one of the samples");
     let kept = match (scratch, unkept) {
+        _ if exec => profile.then(|| {
+            Err(anyhow::anyhow!(
+                "no profile is kept for count_until = \"exec\": the count comes from callgrind, whose profile tak profile does not read"
+            ))
+        }),
         (Some(d), _) => {
             let path = d.path().join(format!("run-{best}"));
             Some(
@@ -2106,6 +2151,71 @@ fn count(
         (None, None) => None,
     };
     Ok(Some((counted, kept)))
+}
+
+/// The instructions one callgrind run counted for the subject, up to its
+/// last `execve`, or to its exit when it never execs.
+///
+/// `--dump-before=*execve*` has callgrind write the counts so far, and
+/// start again from zero, each time the process enters a function named
+/// like `execve` — the C library's, and any wrapper around it. A successful
+/// exec ends the process valgrind was counting without its exit dump, so the
+/// part written before it is the last; a process that never execs leaves
+/// the one dump callgrind writes at exit. Summing every part the subject's
+/// pid wrote gives the same total either way, and one that tries several
+/// paths, as `execvp` does along PATH, has each failed attempt added in.
+///
+/// Files are `{stem}.{pid}` and `{stem}.{pid}.{part}`; the first exists from
+/// the start and stays empty when the run dumped in parts. Each holds its
+/// count on a `totals:` line, which older callgrind wrote as `summary:`.
+fn callgrind_total(dir: &Path, stem: &str, pid: u32, log: &str) -> Result<u64> {
+    let base = format!("{stem}.{pid}");
+    let mut total: u64 = 0;
+    let entries = std::fs::read_dir(dir)
+        .with_context(|| format!("could not read callgrind's counts in {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry
+            .with_context(|| format!("could not read callgrind's counts in {}", dir.display()))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let ours = name == base
+            || name
+                .strip_prefix(&base)
+                .and_then(|r| r.strip_prefix('.'))
+                .is_some_and(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+        if !ours {
+            continue;
+        }
+        let path = entry.path();
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("could not read callgrind's counts in {}", path.display()))?;
+        total += callgrind_part(&text)
+            .with_context(|| format!("callgrind wrote no total to {}", path.display()))?;
+    }
+    if total == 0 {
+        bail!(
+            "callgrind counted no instructions before the process exited or exec'd; \
+             count_until = \"exec\" needs the exec to go through a function named execve, \
+             as the C library's does: {}",
+            last_log_line(log)
+        );
+    }
+    Ok(total)
+}
+
+/// The count in one callgrind output file: 0 for the empty file callgrind
+/// leaves when it dumped in parts, `None` for one with no total at all.
+fn callgrind_part(text: &str) -> Option<u64> {
+    if text.trim().is_empty() {
+        return Some(0);
+    }
+    let number = |key: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(key))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|n| n.parse::<u64>().ok())
+    };
+    number("totals:").or_else(|| number("summary:"))
 }
 
 /// Extract the `I refs:` count from cachegrind's summary in its log.
@@ -2266,7 +2376,7 @@ fn allocations(
         // The profile DHAT would write is for its viewer, and tak reads only
         // the summary; without this every run leaves a `dhat.out.PID` in the
         // subject's directory.
-        let (status, log) =
+        let (status, log, _) =
             under_valgrind(&["--tool=dhat", "--dhat-out-file=/dev/null"], cmd, site)?;
         accepted(bin, status, ok, " under valgrind")?;
         match parse_dhat(&log) {
@@ -2347,6 +2457,38 @@ fn valgrind_lines(log: &str) -> impl Iterator<Item = &str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every part the subject's pid dumped is added up — the empty base file
+    /// callgrind leaves when it dumped in parts included — and the files of
+    /// another run or a forked child are left out.
+    #[test]
+    fn a_callgrind_total_sums_the_subjects_parts_alone() {
+        let d = tempfile::tempdir().unwrap();
+        let write = |name: &str, text: &str| std::fs::write(d.path().join(name), text).unwrap();
+        write("run-0.41", "");
+        write(
+            "run-0.41.1",
+            "version: 1\nevents: Ir\npart: 1\nsummary: 1000\ntotals: 1000\n",
+        );
+        write("run-0.41.2", "part: 2\ntotals: 20\n");
+        write("run-0.410", "totals: 5\n");
+        write("run-0.42.1", "totals: 300\n");
+        write("run-1.41.1", "totals: 7\n");
+        assert_eq!(callgrind_total(d.path(), "run-0", 41, "").unwrap(), 1020);
+        assert_eq!(callgrind_total(d.path(), "run-0", 42, "").unwrap(), 300);
+        assert_eq!(callgrind_part("summary: 9\n"), Some(9), "older callgrind");
+        assert_eq!(callgrind_part("events: Ir\n"), None);
+    }
+
+    /// No dump at all — a process that exec'd through something other than
+    /// an `execve` callgrind could name — is an error, never a count of 0.
+    #[test]
+    fn a_callgrind_run_that_dumped_nothing_is_not_a_count() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("run-0.41"), "").unwrap();
+        let err = callgrind_total(d.path(), "run-0", 41, "").unwrap_err();
+        assert!(format!("{err:#}").contains("execve"), "{err:#}");
+    }
 
     /// Captured from valgrind 3.22.0 (Ubuntu 24.04) running `git --version`.
     /// 3.24.0 (Debian trixie) prints the same summary lines.
@@ -2679,6 +2821,7 @@ git version 2.43.0
             warmup: 1,
             counters: false,
             allocations: false,
+            count_until: Default::default(),
             ok_exit_codes: vec![0],
             metrics: BTreeMap::new(),
         };
@@ -2740,6 +2883,7 @@ git version 2.43.0
             warmup: 0,
             counters: false,
             allocations: false,
+            count_until: Default::default(),
             ok_exit_codes: vec![0],
             metrics: BTreeMap::new(),
         }
@@ -3075,6 +3219,7 @@ git version 2.43.0
                 warmup: 0,
                 counters: false,
                 allocations: false,
+                count_until: Default::default(),
                 ok_exit_codes: vec![0],
                 metrics: BTreeMap::new(),
             }],
@@ -3120,6 +3265,7 @@ git version 2.43.0
             warmup,
             counters: false,
             allocations: false,
+            count_until: Default::default(),
             ok_exit_codes: vec![0],
             metrics: BTreeMap::new(),
         }
@@ -3279,6 +3425,7 @@ git version 2.43.0
             warmup: 1,
             counters: false,
             allocations: false,
+            count_until: Default::default(),
             ok_exit_codes: vec![0],
             metrics: BTreeMap::new(),
         };
@@ -3333,6 +3480,7 @@ git version 2.43.0
             warmup,
             counters: false,
             allocations: false,
+            count_until: Default::default(),
             ok_exit_codes: vec![0],
             metrics: BTreeMap::new(),
         };

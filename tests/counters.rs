@@ -205,6 +205,7 @@ fn a_subject_is_prepared_before_every_counted_run() {
         warmup: 0,
         counters: true,
         allocations: false,
+        count_until: Default::default(),
         ok_exit_codes: vec![0],
         metrics: std::collections::BTreeMap::new(),
     };
@@ -254,6 +255,7 @@ fn ok_exit_codes_apply_under_valgrind() {
         warmup: 0,
         counters: true,
         allocations: false,
+        count_until: Default::default(),
         ok_exit_codes: ok,
         metrics: std::collections::BTreeMap::new(),
     };
@@ -264,6 +266,80 @@ fn ok_exit_codes_apply_under_valgrind() {
 
     let err = measure::subject_instructions(&subject(vec![0]), &Settings::default()).unwrap_err();
     assert!(format!("{err:#}").contains("under valgrind"), "{err:#}");
+}
+
+/// A subject counted with `count_until = "exec"`.
+#[cfg(unix)]
+fn until_exec(cmd: &[&str]) -> tak_cli::config::Subject {
+    tak_cli::config::Subject {
+        name: "x".into(),
+        cmd: cmd.iter().map(|s| s.to_string()).collect(),
+        setup: None,
+        setup_dir: None,
+        prepare: None,
+        check: None,
+        version_cmd: None,
+        dir: None,
+        env: Default::default(),
+        vars: Default::default(),
+        when: None,
+        runs: tak_cli::config::Runs::Fixed(1),
+        auto: tak_cli::config::AutoRuns {
+            budget: std::time::Duration::from_secs(30),
+            min: 5,
+            max: 50,
+        },
+        warmup: 0,
+        counters: true,
+        allocations: false,
+        count_until: tak_cli::config::CountUntil::Exec,
+        ok_exit_codes: vec![0],
+        metrics: std::collections::BTreeMap::new(),
+    }
+}
+
+/// `count_until = "exec"` counts the shell up to its exec and none of what
+/// the new program does: a cheap and an expensive target cost the same, and
+/// the count is the same every run.
+#[cfg(unix)]
+#[test]
+fn an_exec_count_stops_at_the_exec() {
+    if !valgrind_available() {
+        eprintln!("skipping: valgrind not installed");
+        return;
+    }
+    let count = |s: &tak_cli::config::Subject| {
+        measure::subject_instructions(s, &Settings::default())
+            .expect("callgrind invocation failed")
+            .expect("valgrind present but nothing counted")
+    };
+    // The same script both times, and targets of the same length, so the
+    // shell does the same work before its exec — dash copies an argument it
+    // expands one byte at a time. Only what the exec'd shell does differs:
+    // twenty thousand iterations, or none.
+    const LOOP: &str = "i=0; while [ $i -lt 20000 ]; do i=$((i+1)); done";
+    const NO_LOOP: &str = "i=0; while [ $i -lt 00000 ]; do i=$((i+1)); done";
+    let exec_into = |target: &str| until_exec(&["/bin/sh", "-c", "exec /bin/sh -c \"$0\"", target]);
+    let cheap = count(&exec_into(NO_LOOP));
+    let costly = count(&exec_into(LOOP));
+    assert!(cheap.min > 10_000, "implausibly low: {}", cheap.min);
+    assert_eq!(cheap.min, cheap.max, "an exec count is deterministic");
+    let apart = cheap.min.abs_diff(costly.min) as f64 / cheap.min as f64;
+    assert!(
+        apart < 0.001,
+        "the exec'd program was counted: {} vs {}",
+        cheap.min,
+        costly.min
+    );
+
+    // A shell that never execs is counted to its exit, which takes in the loop.
+    let looped = count(&until_exec(&["/bin/sh", "-c", LOOP]));
+    assert!(
+        looped.min > cheap.min * 2,
+        "{} vs {}",
+        looped.min,
+        cheap.min
+    );
 }
 
 /// A declared subject that counts heap allocations and nothing else, with
@@ -291,6 +367,7 @@ fn allocating(cmd: &[&str]) -> tak_cli::config::Subject {
         warmup: 0,
         counters: false,
         allocations: true,
+        count_until: Default::default(),
         metrics: std::collections::BTreeMap::new(),
         ok_exit_codes: vec![0],
     }

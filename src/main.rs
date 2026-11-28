@@ -643,6 +643,7 @@ fn cmd_run(opts: RunOpts, cmd: Vec<String>, settings: &Settings) -> Result<()> {
         warmup: opts.warmup.unwrap_or(DEFAULT_WARMUP),
         counters: true,
         allocations: opts.allocations,
+        count_until: Default::default(),
         ok_exit_codes: config::DEFAULT_OK_EXIT_CODES.to_vec(),
         metrics: BTreeMap::new(),
     };
@@ -1050,7 +1051,12 @@ fn print_plan(bench: &str, multi: bool, subjects: &[Subject], no_counters: bool)
         }
         // As the run would do it: --no-counters overrides the file.
         if s.counters && !no_counters {
-            println!("{pad}counters on");
+            // `exec` counts with another tool and stops early, so it is shown;
+            // `exit` is the default every subject has.
+            match s.count_until {
+                config::CountUntil::Exit => println!("{pad}counters on"),
+                config::CountUntil::Exec => println!("{pad}counters on, until exec"),
+            }
         }
         if s.allocations {
             println!("{pad}allocations on");

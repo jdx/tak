@@ -261,6 +261,10 @@
         "description": "Count heap allocations under valgrind's DHAT: alloc_blocks, alloc_bytes and alloc_peak_bytes. Recorded and reported, never gated. Default false.",
         "type": "boolean"
       },
+      "count_until": {
+        "description": "Where an instruction count ends. \"exit\" (the default) counts the whole process under cachegrind. \"exec\" counts under callgrind until the process execs another program through execve, or exits if it never does, for launchers such as shims and wrappers that end by replacing themselves; the new program is not counted.",
+        "enum": ["exit", "exec"]
+      },
       "metric": {
         "description": "Custom metrics by name, recorded beside the timings and reported by `tak compare`, never gated. Merged by name across layers. Names use a-z, 0-9 and _, start with a letter, and cannot be `instructions` or start with `wall_` or `alloc_`; end them with their unit, such as `binary_bytes`. Lower is taken as better.",
         "type": "object",
@@ -359,6 +363,9 @@
         "allocations": {
           "$ref": "#/definitions/layerProperties/allocations"
         },
+        "count_until": {
+          "$ref": "#/definitions/layerProperties/count_until"
+        },
         "metric": {
           "$ref": "#/definitions/layerProperties/metric"
         }
@@ -416,6 +423,9 @@
         },
         "allocations": {
           "$ref": "#/definitions/layerProperties/allocations"
+        },
+        "count_until": {
+          "$ref": "#/definitions/layerProperties/count_until"
         },
         "metric": {
           "$ref": "#/definitions/layerProperties/metric"
@@ -500,6 +510,9 @@
         },
         "allocations": {
           "$ref": "#/definitions/layerProperties/allocations"
+        },
+        "count_until": {
+          "$ref": "#/definitions/layerProperties/count_until"
         },
         "metric": {
           "$ref": "#/definitions/layerProperties/metric"
