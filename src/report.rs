@@ -68,7 +68,7 @@ impl Series {
 /// [`compare::Change::pct`] uses, for the same reason: a percentage of nothing
 /// is undefined, and printing `+0.00%` would say the opposite of what happened.
 fn pct(base: f64, head: f64) -> Option<f64> {
-    (base != 0.0).then(|| (head - base) / base * 100.0)
+    (base != 0.0).then_some((head - base) / base * 100.0)
 }
 
 /// What a walk found, reduced to series.
